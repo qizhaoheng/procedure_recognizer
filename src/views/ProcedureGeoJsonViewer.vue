@@ -1,14 +1,18 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
+import { useRoute } from 'vue-router';
 import { Loader2, RotateCcw, Upload } from 'lucide-vue-next';
+import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
 import ProcedureLayerControl, { type LayerVisibility } from '../components/procedure/ProcedureLayerControl.vue';
 import ProcedureLegend from '../components/procedure/ProcedureLegend.vue';
 import ProcedureMap from '../components/procedure/ProcedureMap.vue';
-import { getFeatureBounds, parseProcedureGeoJson, type ProcedureGeoJsonModel } from '../utils/procedureGeojsonParser';
+import { parseProcedureGeoJson, type ProcedureGeoJsonModel } from '../utils/procedureGeojsonParser';
 
 const CACHE_KEY = 'procedure-geojson:last-data';
 const CACHE_NAME_KEY = 'procedure-geojson:last-filename';
+const DEFAULT_SAMPLE = '/data/WMKJ_STAR_RWY16_11DME_ARC_v3.geojson';
 
+const route = useRoute();
 const emptyModel = parseProcedureGeoJson({ type: 'FeatureCollection', features: [] });
 const model = ref<ProcedureGeoJsonModel>();
 const loading = ref(false);
@@ -17,10 +21,15 @@ const fileName = ref('');
 const fileInput = ref<HTMLInputElement>();
 const resetCounter = ref(0);
 const mapVersion = ref(0);
-const uploadStatus = ref('等待上传 GeoJSON');
+const uploadStatus = ref('等待加载 GeoJSON');
 
 const activeModel = computed(() => model.value ?? emptyModel);
 const hasData = computed(() => Boolean(model.value));
+const labelWarning = computed(() => {
+  if (!model.value) return '';
+  const hasLabelPoint = model.value.allFeatures.some((feature) => feature.properties.object_type === 'LabelPoint');
+  return hasLabelPoint ? '' : '当前 GeoJSON 未包含 LabelPoint，文字标签无法完整显示。';
+});
 
 const layerVisibility = ref<LayerVisibility>({
   procedureTrack: true,
@@ -34,6 +43,7 @@ const layerVisibility = ref<LayerVisibility>({
   leadRadial: true,
   msaSector: true,
   directionArrows: true,
+  tangentMarks: true,
   labels: true,
   reviewOnly: false,
 });
@@ -45,31 +55,67 @@ const featureSummary = computed(() => {
   return `${model.value.spatialFeatures.length} 个空间对象 · ${model.value.semanticFeatures.length} 个非空间对象${labelText}`;
 });
 
-const boundsSummary = computed(() => {
-  if (!model.value) return '无数据';
-  const bounds = getFeatureBounds(model.value.spatialFeatures);
-  if (!bounds) return '无空间几何';
-  const [[west, south], [east, north]] = bounds;
-  return `bbox ${west.toFixed(4)}, ${south.toFixed(4)} -> ${east.toFixed(4)}, ${north.toFixed(4)}`;
+onMounted(async () => {
+  const taskId = String(route.query.taskId || '');
+  const groupId = String(route.query.groupId || '');
+  if (taskId && groupId) {
+    await loadTaskGeoJson(taskId, groupId);
+    return;
+  }
+  if (restoreCachedGeoJson()) return;
+  await loadDefaultSample();
 });
 
-onMounted(() => {
-  restoreCachedGeoJson();
-});
+async function loadTaskGeoJson(taskId: string, groupId: string) {
+  loading.value = true;
+  error.value = '';
+  uploadStatus.value = '正在加载任务 GeoJSON';
+  try {
+    const response = await fetch(`/api/procedure-tasks/${encodeURIComponent(taskId)}/groups/${encodeURIComponent(groupId)}/geojson`);
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '任务 GeoJSON 加载失败');
+    const geojson = await response.json();
+    loadGeoJson(geojson, `${taskId}-${groupId}.geojson`, false);
+    uploadStatus.value = '已从识别任务加载 GeoJSON';
+  } catch (loadError) {
+    clearModelOnly();
+    error.value = loadError instanceof Error ? loadError.message : '任务 GeoJSON 加载失败';
+    uploadStatus.value = '任务结果加载失败';
+  } finally {
+    loading.value = false;
+  }
+}
 
 function restoreCachedGeoJson() {
   const cachedText = localStorage.getItem(CACHE_KEY);
   const cachedName = localStorage.getItem(CACHE_NAME_KEY);
-  if (!cachedText) return;
+  if (!cachedText) return false;
 
   try {
     loadGeoJsonText(cachedText, cachedName || 'cached.geojson', false);
     uploadStatus.value = `已从浏览器缓存恢复 ${fileName.value}`;
+    return true;
   } catch (restoreError) {
     localStorage.removeItem(CACHE_KEY);
     localStorage.removeItem(CACHE_NAME_KEY);
     error.value = restoreError instanceof Error ? restoreError.message : '缓存 GeoJSON 恢复失败';
     uploadStatus.value = '缓存恢复失败';
+    return false;
+  }
+}
+
+async function loadDefaultSample() {
+  loading.value = true;
+  error.value = '';
+  try {
+    const response = await fetch(DEFAULT_SAMPLE);
+    if (!response.ok) throw new Error('默认示例 GeoJSON 加载失败');
+    loadGeoJson(await response.json(), 'WMKJ_STAR_RWY16_11DME_ARC_v3.geojson', false);
+    uploadStatus.value = '已加载默认示例 GeoJSON';
+  } catch (sampleError) {
+    error.value = sampleError instanceof Error ? sampleError.message : '默认示例加载失败';
+    uploadStatus.value = '等待上传 GeoJSON';
+  } finally {
+    loading.value = false;
   }
 }
 
@@ -118,24 +164,26 @@ function onFileSelected(event: Event) {
 }
 
 function loadGeoJsonText(text: string, name: string, shouldCache: boolean) {
-  const geojson = JSON.parse(text);
+  loadGeoJson(JSON.parse(text), name, shouldCache ? text : undefined);
+}
+
+function loadGeoJson(
+  geojson: FeatureCollection<Geometry | null, GeoJsonProperties>,
+  name: string,
+  cacheTextOrFalse: string | false | undefined,
+) {
   if (geojson?.type !== 'FeatureCollection' || !Array.isArray(geojson.features)) {
     throw new Error('文件不是有效的 GeoJSON FeatureCollection');
   }
 
-  const parsed = parseProcedureGeoJson(geojson);
-  if (!parsed.spatialFeatures.length) {
-    throw new Error('GeoJSON 中没有可上图的空间 geometry');
-  }
-
-  model.value = parsed;
+  model.value = parseProcedureGeoJson(geojson);
   fileName.value = name;
   error.value = '';
   resetCounter.value += 1;
   mapVersion.value += 1;
 
-  if (shouldCache) {
-    localStorage.setItem(CACHE_KEY, text);
+  if (typeof cacheTextOrFalse === 'string') {
+    localStorage.setItem(CACHE_KEY, cacheTextOrFalse);
     localStorage.setItem(CACHE_NAME_KEY, name);
   }
 }
@@ -167,7 +215,13 @@ function clearModelOnly() {
     <header class="topbar">
       <div class="title">
         <h1>GeoJSON 程序图预览器</h1>
-        <p>上传 GeoJSON -> 看地图还原效果 -> 开关图层 -> 点击要素确认属性</p>
+        <p>上传 GeoJSON，或从 PDF 程序识别任务加载结果，用地图校核点、线、弧和文字标签。</p>
+        <p class="status-line">
+          <Loader2 v-if="loading" :size="12" class="spin" aria-hidden="true" />
+          <span>{{ fileName || '未加载 GeoJSON' }}</span>
+          <span>{{ uploadStatus }}</span>
+          <span v-if="hasData">{{ featureSummary }}</span>
+        </p>
       </div>
 
       <div class="actions">
@@ -206,23 +260,12 @@ function clearModelOnly() {
         <ProcedureLegend />
       </div>
 
-      <div class="file-chip" :class="{ empty: !hasData }">
-        <strong>{{ fileName || '未加载 GeoJSON' }}</strong>
-        <span v-if="loading" class="inline-status">
-          <Loader2 :size="14" class="spin" aria-hidden="true" />
-          {{ uploadStatus }}
-        </span>
-        <span v-else>{{ uploadStatus }}</span>
-        <span>{{ featureSummary }}</span>
-        <span>{{ boundsSummary }}</span>
-        <small>刷新页面会自动恢复上一次上传的 GeoJSON；清空会删除缓存。</small>
-      </div>
-
       <div v-if="!hasData && !loading && !error" class="empty-hint">
         <strong>地图已就绪</strong>
-        <span>上传 GeoJSON 后显示程序图层；刷新会恢复上次上传的数据。</span>
+        <span>上传 GeoJSON 后显示程序图层；也可以从 PDF 识别流程跳转进来。</span>
       </div>
 
+      <div v-if="labelWarning" class="toast warning">{{ labelWarning }}</div>
       <div v-if="error" class="toast error">{{ error }}</div>
     </section>
   </main>
@@ -242,7 +285,7 @@ function clearModelOnly() {
 
 .viewer {
   display: grid;
-  grid-template-rows: 64px minmax(0, 1fr);
+  grid-template-rows: 78px minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -275,6 +318,24 @@ p {
   margin: 4px 0 0;
   color: #64748b;
   font-size: 12px;
+}
+
+.status-line {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 5px;
+  color: #64748b;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.status-line span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .actions {
@@ -316,7 +377,6 @@ button.primary {
 }
 
 .floating-panel,
-.file-chip,
 .empty-hint,
 .toast {
   position: absolute;
@@ -335,48 +395,15 @@ button.primary {
 }
 
 .legend-panel {
-  left: 14px;
-  bottom: 14px;
+  top: 14px;
+  right: 14px;
   width: 288px;
   padding: 12px;
 }
 
-.file-chip {
-  right: 14px;
-  bottom: 14px;
-  display: grid;
-  gap: 3px;
-  max-width: min(460px, calc(100vw - 340px));
-  padding: 10px 12px;
-  font-size: 12px;
-}
-
-.file-chip.empty {
-  color: #64748b;
-}
-
-.file-chip strong {
-  color: #172033;
-  overflow-wrap: anywhere;
-}
-
-.file-chip span {
-  color: #475569;
-}
-
-.file-chip small {
-  color: #64748b;
-}
-
-.inline-status {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
 .empty-hint {
   top: 14px;
-  right: 14px;
+  right: 318px;
   display: grid;
   gap: 4px;
   max-width: 320px;
@@ -396,7 +423,7 @@ button.primary {
 
 .toast {
   top: 14px;
-  right: 14px;
+  right: 318px;
   max-width: 420px;
   padding: 10px 12px;
   font-size: 13px;
@@ -406,6 +433,12 @@ button.primary {
   border-color: #fecaca;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.toast.warning {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #9a3412;
 }
 
 .spin {
@@ -440,12 +473,6 @@ button.primary {
     width: 220px;
     max-height: 36vh;
     overflow: auto;
-  }
-
-  .file-chip {
-    left: 14px;
-    right: 14px;
-    max-width: none;
   }
 }
 </style>

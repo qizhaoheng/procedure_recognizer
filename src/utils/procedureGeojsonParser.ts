@@ -128,6 +128,15 @@ export interface ArrowFeatureProperties {
   review_required?: boolean;
 }
 
+export interface TangentFeatureProperties {
+  tangent_type: string;
+  bearing: number;
+  procedure?: string;
+  radial_deg?: number;
+  source_feature_id?: string;
+  review_required?: boolean;
+}
+
 export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): FeatureCollection<Geometry, LabelFeatureProperties> {
   const embeddedLabels = spatialFeatures.filter(
     (feature) =>
@@ -304,11 +313,21 @@ export function buildArrowFeatures(spatialFeatures: ProcedureFeature[]): Feature
   };
 
   for (const feature of spatialFeatures) {
-    if (feature.properties.object_type !== 'ProcedureLeg' || feature.geometry?.type !== 'LineString') continue;
+    if (feature.geometry?.type !== 'LineString') continue;
+
+    if (feature.properties.object_type === 'LeadRadial') {
+      pushArrow(feature, 0.92, 'LeadRadial');
+      continue;
+    }
+
+    if (feature.properties.object_type !== 'ProcedureLeg') continue;
 
     const legType = asString(feature.properties.leg_type);
     if (legType === 'TRACK_TO_DME_FIX') {
       pushArrow(feature, 0.9, 'BeforeEntryTurn');
+    }
+    if (legType === 'LEAD_RADIAL_EXIT_TURN') {
+      pushArrow(feature, 0.5, 'LeadTurn');
     }
     if (legType === 'FINAL_COMMON_SEGMENT' && !finalCommonArrowAdded) {
       finalCommonArrowAdded = true;
@@ -317,6 +336,33 @@ export function buildArrowFeatures(spatialFeatures: ProcedureFeature[]): Feature
   }
 
   return { type: 'FeatureCollection', features: arrows };
+}
+
+export function buildTangentFeatures(spatialFeatures: ProcedureFeature[]): FeatureCollection<Geometry, TangentFeatureProperties> {
+  const tangents: Feature<Geometry, TangentFeatureProperties>[] = [];
+
+  for (const feature of spatialFeatures) {
+    if (feature.properties.object_type !== 'DerivedFix' || feature.geometry?.type !== 'Point') continue;
+
+    const name = asString(feature.properties.name);
+    const radial = Number(feature.properties.radial_deg);
+    if (!name.includes('13D VJB') || !Number.isFinite(radial)) continue;
+
+    tangents.push({
+      type: 'Feature',
+      geometry: feature.geometry,
+      properties: {
+        tangent_type: 'ThirteenDRadialTangent',
+        bearing: (radial + 90) % 360,
+        procedure: asString(feature.properties.procedure),
+        radial_deg: radial,
+        source_feature_id: asString(feature.properties.feature_id),
+        review_required: feature.properties.review_required === true,
+      },
+    });
+  }
+
+  return { type: 'FeatureCollection', features: tangents };
 }
 
 export function getFeatureBounds(features: ProcedureFeature[]): [[number, number], [number, number]] | undefined {

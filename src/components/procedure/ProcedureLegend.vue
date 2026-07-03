@@ -10,6 +10,7 @@
     <div class="item"><span class="line lead"></span>L-R332 / L-R348</div>
     <div class="item"><span class="line radial"></span>径向参考</div>
     <div class="item"><span class="arrow"></span>飞行方向</div>
+    <div class="item"><span class="tangent"></span>13D 径向切线</div>
     <div class="item"><span class="dot fix"></span>航路点 / 跑道点</div>
     <div class="item"><span class="dot derived"></span>派生点 / 需复核</div>
   </section>
@@ -90,6 +91,12 @@ h2 {
   border-right: 8px solid transparent;
   border-bottom: 16px solid #111827;
   transform: rotate(90deg);
+}
+
+.tangent {
+  width: 30px;
+  height: 4px;
+  background: #111827;
 }
 
 .dot {

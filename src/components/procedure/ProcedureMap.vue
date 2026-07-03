@@ -6,6 +6,7 @@ import type { LayerVisibility } from './ProcedureLayerControl.vue';
 import {
   buildArrowFeatures,
   buildLabelFeatures,
+  buildTangentFeatures,
   getFeatureBounds,
   type ProcedureFeature,
   type ProcedureGeoJsonModel,
@@ -23,6 +24,7 @@ let map: Map | undefined;
 const sourceId = 'procedureGeoJson';
 const labelSourceId = 'labelSource';
 const arrowSourceId = 'arrowSource';
+const tangentSourceId = 'tangentSource';
 
 const layerMap: Record<keyof LayerVisibility, string[]> = {
   procedureTrack: ['procedure-track'],
@@ -33,9 +35,10 @@ const layerMap: Record<keyof LayerVisibility, string[]> = {
   runway: ['runway-line', 'runway-point'],
   dmeArc: ['dme-reference-circle', 'chart-label-point'],
   radial: ['radial-reference'],
-  leadRadial: ['lead-radial'],
+  leadRadial: ['lead-radial', 'lead-radial-arrow-layer'],
   msaSector: ['msa-fill', 'msa-outline'],
   directionArrows: ['direction-arrow-layer'],
+  tangentMarks: ['tangent-mark-layer'],
   labels: ['text-label-layer'],
   reviewOnly: [],
 };
@@ -85,6 +88,7 @@ onMounted(() => {
   map.addControl(new maplibregl.ScaleControl({ unit: 'nautical' }), 'bottom-right');
   map.on('load', () => {
     addDirectionArrowImage();
+    addTangentMarkImage();
     addSourcesAndLayers();
     updateMapData();
     fitToCurrentData();
@@ -125,6 +129,7 @@ function addSourcesAndLayers() {
   map.addSource(sourceId, emptyCollection());
   map.addSource(labelSourceId, emptyCollection());
   map.addSource(arrowSourceId, emptyCollection());
+  map.addSource(tangentSourceId, emptyCollection());
 
   addLayer({
     id: 'msa-fill',
@@ -225,6 +230,7 @@ function addSourcesAndLayers() {
     id: 'direction-arrow-layer',
     type: 'symbol',
     source: arrowSourceId,
+    filter: ['!=', ['get', 'arrow_type'], 'LeadRadial'],
     layout: {
       'icon-image': 'direction-arrow',
       'icon-size': [
@@ -238,8 +244,37 @@ function addSourcesAndLayers() {
         0.66,
         'FinalCommon',
         0.7,
+        'LeadTurn',
+        0.34,
         0.62,
       ],
+      'icon-rotate': ['get', 'bearing'],
+      'icon-rotation-alignment': 'map',
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    },
+  });
+  addLayer({
+    id: 'lead-radial-arrow-layer',
+    type: 'symbol',
+    source: arrowSourceId,
+    filter: ['==', ['get', 'arrow_type'], 'LeadRadial'],
+    layout: {
+      'icon-image': 'direction-arrow',
+      'icon-size': 0.32,
+      'icon-rotate': ['get', 'bearing'],
+      'icon-rotation-alignment': 'map',
+      'icon-allow-overlap': true,
+      'icon-ignore-placement': true,
+    },
+  });
+  addLayer({
+    id: 'tangent-mark-layer',
+    type: 'symbol',
+    source: tangentSourceId,
+    layout: {
+      'icon-image': 'tangent-mark',
+      'icon-size': 1,
       'icon-rotate': ['get', 'bearing'],
       'icon-rotation-alignment': 'map',
       'icon-allow-overlap': true,
@@ -422,9 +457,11 @@ function updateMapData() {
   };
   const labelCollection = buildLabelFeatures(props.model.spatialFeatures);
   const arrowCollection = buildArrowFeatures(props.model.spatialFeatures);
+  const tangentCollection = buildTangentFeatures(props.model.spatialFeatures);
   (map.getSource(sourceId) as GeoJSONSource).setData(spatialCollection);
   (map.getSource(labelSourceId) as GeoJSONSource).setData(labelCollection);
   (map.getSource(arrowSourceId) as GeoJSONSource).setData(arrowCollection);
+  (map.getSource(tangentSourceId) as GeoJSONSource).setData(tangentCollection);
   updateReviewFilters();
 }
 
@@ -466,7 +503,23 @@ function updateReviewFilters() {
     map.setFilter('text-label-layer', reviewOnly ? (['==', ['get', 'review_required'], true] as never) : null);
   }
   if (map.getLayer('direction-arrow-layer')) {
-    map.setFilter('direction-arrow-layer', reviewOnly ? (['==', ['get', 'review_required'], true] as never) : null);
+    map.setFilter(
+      'direction-arrow-layer',
+      reviewOnly
+        ? (['all', ['!=', ['get', 'arrow_type'], 'LeadRadial'], ['==', ['get', 'review_required'], true]] as never)
+        : (['!=', ['get', 'arrow_type'], 'LeadRadial'] as never),
+    );
+  }
+  if (map.getLayer('lead-radial-arrow-layer')) {
+    map.setFilter(
+      'lead-radial-arrow-layer',
+      reviewOnly
+        ? (['all', ['==', ['get', 'arrow_type'], 'LeadRadial'], ['==', ['get', 'review_required'], true]] as never)
+        : (['==', ['get', 'arrow_type'], 'LeadRadial'] as never),
+    );
+  }
+  if (map.getLayer('tangent-mark-layer')) {
+    map.setFilter('tangent-mark-layer', reviewOnly ? (['==', ['get', 'review_required'], true] as never) : null);
   }
 }
 
@@ -510,6 +563,19 @@ function addDirectionArrowImage() {
   context.fill();
 
   map.addImage('direction-arrow', context.getImageData(0, 0, canvas.width, canvas.height));
+}
+
+function addTangentMarkImage() {
+  if (!map || map.hasImage('tangent-mark')) return;
+  const canvas = document.createElement('canvas');
+  canvas.width = 40;
+  canvas.height = 40;
+  const context = canvas.getContext('2d');
+  if (!context) return;
+
+  context.fillStyle = '#111827';
+  context.fillRect(18, 5, 4, 30);
+  map.addImage('tangent-mark', context.getImageData(0, 0, canvas.width, canvas.height));
 }
 
 function fitToCurrentData() {

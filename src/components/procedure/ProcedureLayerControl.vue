@@ -11,6 +11,7 @@ export interface LayerVisibility {
   leadRadial: boolean;
   msaSector: boolean;
   directionArrows: boolean;
+  tangentMarks: boolean;
   labels: boolean;
   reviewOnly: boolean;
 }
@@ -35,6 +36,7 @@ const controls = [
   { key: 'leadRadial', label: 'Lead Radial' },
   { key: 'msaSector', label: 'MSA 扇区' },
   { key: 'directionArrows', label: '方向箭头' },
+  { key: 'tangentMarks', label: '13D 切线' },
   { key: 'labels', label: '文字标签' },
   { key: 'reviewOnly', label: '只显示 Review Required' },
 ] as const;
