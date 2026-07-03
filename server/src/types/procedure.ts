@@ -9,6 +9,7 @@ export type ChartRole =
   | 'MINIMA_TABLE'
   | 'CHART_INDEX'
   | 'BLANK'
+  | 'SUPPORT'
   | 'OTHER'
   | 'UNKNOWN';
 
@@ -17,7 +18,9 @@ export type ProcedureCategory = 'ARRIVAL' | 'DEPARTURE' | 'APPROACH' | 'AERODROM
 export type NavigationType =
   | 'RNAV'
   | 'RNP'
+  | 'RNP_AR'
   | 'ILS'
+  | 'ILS_LOC'
   | 'LOC'
   | 'VOR'
   | 'NDB'
@@ -27,6 +30,40 @@ export type NavigationType =
   | 'UNKNOWN';
 
 export type GroupStatus = 'GROUPED' | 'CANDIDATES_EXTRACTED' | 'AI_READY' | 'AI_RUNNING' | 'AI_COMPLETED' | 'ERROR';
+export type PackageType = 'STAR' | 'SID' | 'APPROACH' | 'AERODROME' | 'AIRSPACE' | 'OTHER';
+export type PackageSource = 'AD_2_24_CHART_INDEX' | 'PAGE_HEADER_RULE' | 'TITLE_MATCH_RULE' | 'MANUAL';
+export type SupportType =
+  | 'AIRPORT_METADATA'
+  | 'RUNWAY_DATA'
+  | 'RUNWAY_OPERATIONAL_DATA'
+  | 'AIRSPACE_COMMUNICATION'
+  | 'NAVAID'
+  | 'FLIGHT_PROCEDURES'
+  | 'CHART_INDEX'
+  | 'AIRSPACE'
+  | 'OBSTACLE'
+  | 'OTHER';
+
+export interface SupportingInfoRefs {
+  airportMetadata?: number[];
+  runwayData?: number[];
+  runwayOperationalData?: number[];
+  communication?: number[];
+  navaid?: number[];
+  flightProcedures?: number[];
+  chartIndex?: number[];
+}
+
+export interface SupportingInfoSummary {
+  airportMetadata?: Record<string, unknown>;
+  runwayData?: Array<Record<string, unknown>>;
+  runwayOperationalData?: Array<Record<string, unknown>>;
+  communication?: Array<Record<string, unknown>>;
+  navaids?: Array<Record<string, unknown>>;
+  flightProcedures?: Array<Record<string, unknown>>;
+  chartIndexPages?: number[];
+  sourcePages: SupportingInfoRefs;
+}
 
 export interface ProcedureTask {
   taskId: string;
@@ -55,20 +92,44 @@ export interface PdfPageAsset {
   procedureNames?: string[];
   confidence?: number;
   reviewRequired?: boolean;
+  packageType?: PackageType;
+  isTabular?: boolean;
+  tabularNo?: number;
+  indexMatchedPackageId?: string;
+  headerMatchedPackageId?: string;
+  matchedPackageId?: string;
+  groupingReason?: string[];
 }
 
 export interface ProcedureGroup {
   groupId: string;
   groupName: string;
+  packageId?: string;
+  packageName?: string;
+  packageType?: PackageType;
   procedureCategory: 'ARRIVAL' | 'DEPARTURE' | 'APPROACH' | 'UNKNOWN';
   navigationType: string;
   runway?: string;
+  chartTitle?: string;
+  normalizedTitle?: string;
+  chartNo?: string;
+  chartPageNo?: number;
+  relatedChartNos?: string[];
+  relatedPageNos?: number[];
   chartPages: number[];
   tabularPages: number[];
   coordinatePages: number[];
   minimaPages: number[];
+  textSupplementPages?: number[];
+  supportingPages?: number[];
   otherPages: number[];
   procedureNames: string[];
+  source?: PackageSource;
+  confidence?: number;
+  supportingInfoRefs?: SupportingInfoRefs;
+  supportingInfoDetails?: SupportPageRef[];
+  supportingInfoSummary?: SupportingInfoSummary;
+  groupingReason?: string[];
   status: GroupStatus;
   textCandidates?: TextCandidate[];
   geometryCandidates?: GeometryCandidate[];
@@ -78,6 +139,53 @@ export interface ProcedureGroup {
   aiResponse?: AiResponseRecord;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   reviewRequired?: boolean;
+}
+
+export interface AipAdStructure {
+  airportIcao?: string;
+  airportName?: string;
+  sections: AipSection[];
+  chartIndexItems: ChartIndexItem[];
+  globalSupportPages: SupportPageRef[];
+  pages: PdfPageAsset[];
+}
+
+export interface AipSection {
+  sectionNo: string;
+  title: string;
+  startPageNo: number;
+  endPageNo?: number;
+  role:
+    | 'AERODROME_DATA'
+    | 'RUNWAY_DATA'
+    | 'COMMUNICATION'
+    | 'NAVAID'
+    | 'FLIGHT_PROCEDURES'
+    | 'CHART_INDEX'
+    | 'CHART_PAGE'
+    | 'OTHER';
+}
+
+export interface ChartIndexItem {
+  chartName: string;
+  chartNo: string;
+  procedureCategory: ProcedureCategory;
+  packageType: PackageType;
+  navigationType: NavigationType;
+  runway?: string;
+  procedureNames: string[];
+  isTabular: boolean;
+  tabularNo?: number;
+  normalizedGroupKey: string;
+}
+
+export interface SupportPageRef {
+  pageNo: number;
+  aipPageNo?: string;
+  supportType: SupportType;
+  label?: string;
+  extracted?: Record<string, unknown>;
+  summary?: string;
 }
 
 export interface TextCandidate {

@@ -5,6 +5,7 @@ export interface AiRequestPreview {
   prompt: string;
   schema: Record<string, unknown>;
   inputPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>;
+  supportPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>;
   candidateSummary: Record<string, unknown>;
 }
 
@@ -13,9 +14,13 @@ export function buildAiRequestPreview(
   pages: PdfPageAsset[],
   model = process.env.LLM_MODEL || 'mock-procedure-recognizer',
 ): AiRequestPreview {
-  const inputPageNos = allGroupPages(group);
+  const inputPageNos = corePages(group);
+  const supportPageNos = group.supportingPages ?? [];
   const inputPages = pages
     .filter((page) => inputPageNos.includes(page.pageNo))
+    .map(({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }) => ({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }));
+  const supportPages = pages
+    .filter((page) => supportPageNos.includes(page.pageNo))
     .map(({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }) => ({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }));
   const candidates: CandidateExtractionResult = {
     groupId: group.groupId,
@@ -24,13 +29,14 @@ export function buildAiRequestPreview(
     waypointCandidates: group.waypointCandidates ?? [],
     tableCandidates: group.tableCandidates ?? [],
   };
-  const prompt = buildPrompt(group, inputPages, candidates);
+  const prompt = buildPrompt(group, inputPages, supportPages, candidates);
 
   return {
     model,
     prompt,
     schema: geoJsonSchema(),
     inputPages,
+    supportPages,
     candidateSummary: {
       textCandidates: candidates.textCandidates.length,
       waypointCandidates: candidates.waypointCandidates.length,
@@ -43,9 +49,33 @@ export function buildAiRequestPreview(
 export function buildPrompt(
   group: ProcedureGroup,
   inputPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>,
+  supportPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>,
   candidates: CandidateExtractionResult,
 ) {
   const templateName = selectTemplate(group);
+  const corePageNos = new Set(inputPages.map((page) => page.pageNo));
+  const promptInput = {
+    packageMetadata: {
+      packageId: group.packageId || group.groupId,
+      packageName: group.packageName || group.groupName,
+      packageType: group.packageType,
+      procedureCategory: group.procedureCategory,
+      navigationType: group.navigationType,
+      runway: group.runway,
+      procedureNames: group.procedureNames,
+      chartNo: group.chartNo,
+      relatedChartNos: group.relatedChartNos,
+      source: group.source,
+    },
+    corePages: inputPages,
+    candidateTextsFromCorePages: candidates.textCandidates.filter((candidate) => corePageNos.has(candidate.pageNo)).slice(0, 160),
+    candidateGeometryFromChartPages: candidates.geometryCandidates.filter((candidate) => corePageNos.has(candidate.pageNo)).slice(0, 80),
+    supportingInfoSummary: group.supportingInfoSummary,
+    supportingPages: supportPages,
+    waypointCandidates: candidates.waypointCandidates.slice(0, 80),
+    tableCandidates: candidates.tableCandidates.slice(0, 80),
+  };
+
   return [
     `Template: ${templateName}`,
     '',
@@ -56,28 +86,11 @@ export function buildPrompt(
     'Required feature object_type values include ProcedureChart, ProcedureTrack, ProcedureLeg, ProcedureFix, Navaid, Runway, HoldingPattern, MSA, LabelPoint, SourceEvidence, and semantic geometry:null objects.',
     'Every feature.properties must include object_type, source_page, source_text, coordinate_quality, review_required, and confidence.',
     '',
-    `Group metadata: ${JSON.stringify(
-      {
-        groupId: group.groupId,
-        groupName: group.groupName,
-        procedureCategory: group.procedureCategory,
-        navigationType: group.navigationType,
-        runway: group.runway,
-        procedureNames: group.procedureNames,
-      },
-      null,
-      2,
-    )}`,
+    'Use the ProcedurePackage core pages as the primary evidence. Supporting pages may only supplement common runway, frequency, navaid, and flight-procedure context.',
     '',
-    `Input pages: ${JSON.stringify(inputPages, null, 2)}`,
+    'Use this structured input. Treat corePages as the only procedure package pages; use supportingInfoSummary only as contextual evidence.',
     '',
-    `Text candidates: ${JSON.stringify(candidates.textCandidates.slice(0, 160), null, 2)}`,
-    '',
-    `Waypoint candidates: ${JSON.stringify(candidates.waypointCandidates.slice(0, 80), null, 2)}`,
-    '',
-    `Table candidates: ${JSON.stringify(candidates.tableCandidates.slice(0, 80), null, 2)}`,
-    '',
-    `Geometry candidates: ${JSON.stringify(candidates.geometryCandidates.slice(0, 80), null, 2)}`,
+    JSON.stringify(promptInput, null, 2),
   ].join('\n');
 }
 
@@ -85,6 +98,7 @@ function selectTemplate(group: ProcedureGroup) {
   if (group.procedureCategory === 'ARRIVAL' && group.navigationType === 'RNAV') return 'RNAV_STAR_PROMPT';
   if (group.procedureCategory === 'ARRIVAL' && group.navigationType === 'DME_ARC') return 'CONVENTIONAL_STAR_PROMPT';
   if (group.procedureCategory === 'DEPARTURE' && group.navigationType === 'RNAV') return 'RNAV_SID_PROMPT';
+  if (group.procedureCategory === 'APPROACH' && group.navigationType === 'ILS_LOC') return 'ILS_LOC_APPROACH_PROMPT';
   if (group.procedureCategory === 'APPROACH' && group.navigationType === 'ILS') return 'ILS_APPROACH_PROMPT';
   if (group.procedureCategory === 'APPROACH' && group.navigationType === 'LOC') return 'LOC_APPROACH_PROMPT';
   if (group.procedureCategory === 'APPROACH' && group.navigationType === 'VOR') return 'VOR_APPROACH_PROMPT';
@@ -113,6 +127,12 @@ function geoJsonSchema() {
   };
 }
 
-function allGroupPages(group: ProcedureGroup) {
-  return [...group.chartPages, ...group.tabularPages, ...group.coordinatePages, ...group.minimaPages, ...group.otherPages];
+function corePages(group: ProcedureGroup) {
+  return [
+    ...group.chartPages,
+    ...group.tabularPages,
+    ...group.coordinatePages,
+    ...group.minimaPages,
+    ...(group.textSupplementPages ?? []),
+  ];
 }

@@ -8,6 +8,7 @@ import { validateProcedureGeoJson } from '../services/geojsonValidator';
 import { runProcedureRecognition } from '../services/llmService';
 import { parsePdfTask } from '../services/pdfService';
 import { buildAiRequestPreview } from '../services/promptBuilder';
+import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
 import type { ProcedureGroup } from '../types/procedure';
 
@@ -93,6 +94,24 @@ router.get('/:taskId', async (req, res, next) => {
   }
 });
 
+router.get('/:taskId/grouping-debug', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    res.json(buildGroupingDebug(task.pages));
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/:taskId/pdf', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    res.sendFile(path.resolve(task.filePath));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/:taskId/pages/:pageNo/image', async (req, res, next) => {
   try {
     const task = await readTask(req.params.taskId);
@@ -158,8 +177,7 @@ router.get('/:taskId/groups/:groupId/ai-request-preview', async (req, res, next)
 
 router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
   try {
-    let responsePayload = {};
-    await updateTask(req.params.taskId, async (draft) => {
+    await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.groupId);
       group.status = 'AI_RUNNING';
       draft.status = 'AI_RUNNING';
@@ -173,7 +191,7 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
       model,
       prompt: preview.prompt,
       schemaName: 'ProcedureGeoJsonFeatureCollection',
-      inputPageNos: preview.inputPages.map((page) => page.pageNo),
+      inputPageNos: [...preview.inputPages, ...preview.supportPages].map((page) => page.pageNo),
       createdAt: new Date().toISOString(),
     };
     group.aiResponse = await runProcedureRecognition(group, preview);
@@ -182,13 +200,12 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
     task.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
     await saveTask(task);
 
-    responsePayload = {
+    res.json({
       groupId: group.groupId,
       status: group.status,
       geojsonResultId: `geojson_${group.groupId}`,
       geojson: group.geojson,
-    };
-    res.json(responsePayload);
+    });
   } catch (error) {
     next(error);
   }
@@ -209,14 +226,14 @@ router.post('/:taskId/groups/:groupId/validate-geojson', async (req, res, next) 
   try {
     const task = await readTask(req.params.taskId);
     const group = findGroup(task.groups, req.params.groupId);
-    res.json(validateProcedureGeoJson(req.body?.geojson || group.geojson));
+    res.json(validateProcedureGeoJson(req.body?.geojson || group.geojson, group));
   } catch (error) {
     next(error);
   }
 });
 
 function findGroup(groups: ProcedureGroup[], groupId: string) {
-  const group = groups.find((item) => item.groupId === groupId);
+  const group = groups.find((item) => item.groupId === groupId || item.packageId === groupId);
   if (!group) throw new Error('分组不存在。');
   return group;
 }

@@ -1,4 +1,5 @@
 import type { ChartRole, NavigationType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
+import { extractLikelyAipPageNo } from './chartIndexParser';
 
 export function classifyPage(pageNo: number, text: string): PdfPageAsset {
   const normalized = text.replace(/\s+/g, ' ').trim();
@@ -6,7 +7,7 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
   const chartRole = detectChartRole(upper);
   const procedureCategory = detectProcedureCategory(upper);
   const navigationType = detectNavigationType(upper);
-  const aipPageNo = firstMatch(normalized, /AD\s*2-[A-Z]{4}-\d+-\d+/i)?.toUpperCase().replace(/\s+/g, ' ');
+  const aipPageNo = extractLikelyAipPageNo(normalized);
   const runwayMatch = firstMatch(normalized, /RWY\s?(\d{2}[LRC]?)/i);
   const procedureNames = uniqueMatches(normalized, /\b[A-Z]{5}\s?\d[A-Z]\b/g).map((name) => name.replace(/\s+/, ' '));
   const chartTitle = detectTitle(text);
@@ -32,9 +33,10 @@ function detectChartRole(upper: string): ChartRole {
   if (!upper.trim()) return 'BLANK';
   if (upper.includes('INTENTIONALLY BLANK')) return 'BLANK';
   if (upper.includes('CHARTS RELATED TO AN AERODROME')) return 'CHART_INDEX';
+  if (upper.includes('TABULAR DESCRIPTION')) return 'TABULAR_DESCRIPTION';
   if (upper.includes('WAYPOINT COORDINATES') || upper.includes('AERONAUTICAL DATA TABULATION')) return 'WAYPOINT_COORDINATES';
   if (upper.includes('MINIMA') || upper.includes('OCA') || upper.includes('OCH')) return 'MINIMA_TABLE';
-  if (upper.includes('TABULAR DESCRIPTION')) return 'TABULAR_DESCRIPTION';
+  if (/AD\s*2\.?\s*(12|18|19|20|21|22|23)\b/.test(upper)) return 'SUPPORT';
   if (
     upper.includes('STANDARD ARRIVAL CHART') ||
     upper.includes('STANDARD DEPARTURE CHART') ||
@@ -54,9 +56,11 @@ function detectProcedureCategory(upper: string): ProcedureCategory {
 }
 
 function detectNavigationType(upper: string): NavigationType {
+  if (upper.includes('RNP Z (AR)') || upper.includes('(AR)')) return 'RNP_AR';
   if (upper.includes('DME ARC') || upper.includes('11 DME ARC')) return 'DME_ARC';
   if (upper.includes('RNP')) return 'RNP';
   if (upper.includes('RNAV')) return 'RNAV';
+  if (upper.includes('ILS') && upper.includes('LOC')) return 'ILS_LOC';
   if (upper.includes('ILS')) return 'ILS';
   if (upper.includes('LOC')) return 'LOC';
   if (upper.includes('VOR')) return 'VOR';

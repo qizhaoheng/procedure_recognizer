@@ -8,6 +8,7 @@
     "dev:web": "vite --host 0.0.0.0 --port 3307 --strictPort",
     "dev:server": "tsx watch server/src/index.ts",
     "server": "tsx server/src/index.ts",
+    "test": "node --import tsx --test \"server/src/services/__tests__/*.test.ts\"",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
   },

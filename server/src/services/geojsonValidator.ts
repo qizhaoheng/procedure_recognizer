@@ -1,4 +1,5 @@
-import type { Feature, FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
+import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
+import type { ProcedureGroup } from '../types/procedure';
 
 const semanticNullGeometryTypes = new Set([
   'ProcedureChart',
@@ -18,43 +19,53 @@ export interface GeoJsonValidationResult {
   errors: string[];
 }
 
-export function validateProcedureGeoJson(geojson: unknown): GeoJsonValidationResult {
+export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGroup): GeoJsonValidationResult {
   const warnings: string[] = [];
   const errors: string[] = [];
 
   if (!isFeatureCollection(geojson)) {
-    return { valid: false, warnings, errors: ['GeoJSON 必须是 FeatureCollection。'] };
+    return { valid: false, warnings, errors: ['GeoJSON must be a FeatureCollection.'] };
   }
 
   let hasLabelPoint = false;
+  const allowedSourcePages = group ? new Set([...(group.relatedPageNos ?? []), ...(group.supportingPages ?? [])]) : undefined;
   geojson.features.forEach((feature, index) => {
     const props = (feature.properties ?? {}) as Record<string, unknown>;
     const objectType = String(props.object_type ?? '');
 
-    if (!objectType) errors.push(`feature[${index}] 缺少 properties.object_type。`);
+    if (!objectType) errors.push(`feature[${index}] is missing properties.object_type.`);
     if (objectType === 'LabelPoint') hasLabelPoint = true;
-    if (objectType === 'LabelPoint' && !props.label_text) errors.push(`feature[${index}] LabelPoint 缺少 label_text。`);
+    if (objectType === 'LabelPoint' && !props.label_text) errors.push(`feature[${index}] LabelPoint is missing label_text.`);
     if (objectType === 'ProcedureLeg' && (!props.procedure || !props.leg_seq || (!props.path_terminator && !props.leg_type))) {
-      errors.push(`feature[${index}] ProcedureLeg 缺少 procedure、leg_seq、path_terminator/leg_type。`);
+      errors.push(`feature[${index}] ProcedureLeg is missing procedure, leg_seq, or path terminator.`);
     }
     if (objectType === 'ProcedureTrack' && !props.procedure && !props.name) {
-      errors.push(`feature[${index}] ProcedureTrack 缺少 procedure/name。`);
+      errors.push(`feature[${index}] ProcedureTrack is missing procedure/name.`);
     }
     if (objectType === 'ProcedureFix' && !props.ident && !props.name) {
-      errors.push(`feature[${index}] ProcedureFix 缺少 ident/name。`);
+      errors.push(`feature[${index}] ProcedureFix is missing ident/name.`);
     }
-    if (typeof props.review_required !== 'boolean') errors.push(`feature[${index}] review_required 必须是 boolean。`);
-    if (!props.coordinate_quality) errors.push(`feature[${index}] 缺少 coordinate_quality。`);
+    if (typeof props.review_required !== 'boolean') errors.push(`feature[${index}] review_required must be boolean.`);
+    if (!props.coordinate_quality) errors.push(`feature[${index}] is missing coordinate_quality.`);
+    if (allowedSourcePages && typeof props.source_page === 'number' && !allowedSourcePages.has(props.source_page)) {
+      warnings.push(`feature[${index}] source_page=${props.source_page} is outside core/supporting pages.`);
+    }
 
     if (!feature.geometry && !semanticNullGeometryTypes.has(objectType)) {
-      errors.push(`feature[${index}] geometry 为 null，但 ${objectType || 'UNKNOWN'} 不是允许的语义对象。`);
+      errors.push(`feature[${index}] geometry is null but ${objectType || 'UNKNOWN'} is not an allowed semantic object.`);
     }
     if (feature.geometry && !isGeometry(feature.geometry)) {
-      errors.push(`feature[${index}] geometry 不合法。`);
+      errors.push(`feature[${index}] geometry is invalid.`);
     }
   });
 
-  if (!hasLabelPoint) warnings.push('GeoJSON 未包含 LabelPoint，地图文字可能无法显示。');
+  if (!hasLabelPoint) warnings.push('GeoJSON does not include LabelPoint features; map labels may be incomplete.');
+  if (group?.procedureCategory === 'APPROACH' && !group.supportingInfoRefs?.runwayOperationalData?.length) {
+    warnings.push('APPROACH package is missing runwayOperationalData supporting info.');
+  }
+  if (/(ILS_LOC|ILS|LOC|DME_ARC|CONVENTIONAL|VOR|NDB)/.test(group?.navigationType || '') && !group?.supportingInfoRefs?.navaid?.length) {
+    warnings.push(`${group?.navigationType} package is missing navaid supporting info.`);
+  }
   return { valid: errors.length === 0, warnings, errors };
 }
 
