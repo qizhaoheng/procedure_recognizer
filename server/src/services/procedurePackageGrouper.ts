@@ -47,7 +47,7 @@ export function buildGroupingDebug(pages: PdfPageAsset[]): GroupingDebug {
       pageNos: mappedPages.map((page) => page.pageNo),
     })),
     chartIndexItems: result.state.structure.chartIndexItems.map((item) => {
-      const mappedPages = result.state.chartNoPageMap.get(item.chartNo) || [];
+      const mappedPages = lookupPagesForChartNo(result.state.chartNoPageMap, item.chartNo);
       return {
         ...item,
         matchedPageNo: mappedPages[0]?.pageNo,
@@ -77,7 +77,7 @@ export function buildGroupingDebug(pages: PdfPageAsset[]): GroupingDebug {
 export function buildExactChartNoPageMap(pages: PdfPageAsset[]) {
   const map = new Map<string, PdfPageAsset[]>();
   for (const page of pages) {
-    if (page.chartRole === 'CHART_INDEX') continue;
+    if (page.chartRole === 'CHART_INDEX' || page.chartRole === 'BLANK') continue;
     const chartNo = normalizeChartNo(page.aipPageNo);
     if (!chartNo) continue;
     const mappedPages = map.get(chartNo) ?? [];
@@ -108,7 +108,7 @@ function groupFromStructure(structure: AipAdStructure) {
     packagesByKey.set(key, group);
 
     for (const item of items) {
-      const mappedPages = state.chartNoPageMap.get(item.chartNo) || [];
+      const mappedPages = lookupPagesForChartNo(state.chartNoPageMap, item.chartNo);
       pushUnique(group.relatedChartNos ||= [], item.chartNo);
       if (!mappedPages.length) {
         state.unmatchedChartIndexItems.push(item);
@@ -128,6 +128,7 @@ function groupFromStructure(structure: AipAdStructure) {
     finalizePackage(group, structure.globalSupportPages);
   }
 
+  repairFragmentedChartNoMatches(state, indexItems, packagesByKey);
   stageTwoHeaderCompletion(state, packagesByKey);
   stageThreeSequentialCompletion(state, Array.from(packagesByKey.values()));
 
@@ -137,6 +138,34 @@ function groupFromStructure(structure: AipAdStructure) {
     .sort((a, b) => (a.chartPageNo || 99999) - (b.chartPageNo || 99999));
 
   return { state, packages };
+}
+
+// 部分图页（如横排图）的图号被 PDF 文本层拆成碎片（"AD 2-VHHH-IAC-0" + "6" + "A"），
+// 无法直接解析。利用 AD 2.24 目录中的权威图号，把未匹配页的页首文本去空格后反查（最长优先）。
+function repairFragmentedChartNoMatches(
+  state: GroupingState,
+  indexItems: ChartIndexItem[],
+  packagesByKey: Map<string, ProcedureGroup>,
+) {
+  const candidates = indexItems
+    .map((item) => ({ item, needle: item.chartNo.replace(/\s+/g, '').toUpperCase() }))
+    .sort((a, b) => b.needle.length - a.needle.length);
+  if (!candidates.length) return;
+
+  for (const page of state.structure.pages) {
+    if (page.matchedPackageId) continue;
+    if (['CHART_INDEX', 'BLANK', 'SUPPORT'].includes(page.chartRole)) continue;
+    // 横排图页的文本顺序不定，图号碎片可能出现在任意位置，整页去空格后检索
+    const compact = (page.ocrText || page.textLayerText || '').replace(/\s+/g, '').toUpperCase();
+    if (!compact.includes('AD2-')) continue;
+    const hit = candidates.find(({ needle }) => compact.includes(needle));
+    if (!hit) continue;
+    const group = packagesByKey.get(hit.item.normalizedGroupKey);
+    if (!group) continue;
+    assignPageToPackage(group, page, hit.item, 'matched by fragmented chart number repair');
+    group.reviewRequired = true;
+    state.unmatchedChartIndexItems = state.unmatchedChartIndexItems.filter((item) => item.chartNo !== hit.item.chartNo);
+  }
 }
 
 function stageTwoHeaderCompletion(state: GroupingState, packagesByKey: Map<string, ProcedureGroup>) {
@@ -258,8 +287,15 @@ function assignPageToPackage(group: ProcedureGroup, page: PdfPageAsset, item: Ch
 
   if (isTabular) pushUnique(group.tabularPages, page.pageNo);
   if (isCoordinate) pushUnique(group.coordinatePages, page.pageNo);
-  else if (page.chartRole === 'MINIMA_TABLE' || (!isTabular && /\bMINIMA\b|\bOCA\b|\bOCH\b/.test(pageText))) pushUnique(group.minimaPages, page.pageNo);
-  else if (!isTabular && (page.chartRole === 'CHART' || !item.isTabular)) {
+  else if (page.chartRole === 'CHART' && !item.isTabular) {
+    // 图页角色明确时优先归图面页：图面上常印有 OCA/MINIMA、TABULAR DESCRIPTION 等字样，
+    // 不能据此误判为最低标准/表格页（图面+表格合一的页会同时进 tabularPages）
+    pushUnique(group.chartPages, page.pageNo);
+    group.chartNo ||= item.chartNo || page.aipPageNo;
+    group.chartPageNo ||= page.pageNo;
+    group.chartTitle ||= item.chartName || page.chartTitle;
+  } else if (page.chartRole === 'MINIMA_TABLE' || (!isTabular && /\bMINIMA\b|\bOCA\b|\bOCH\b/.test(pageText))) pushUnique(group.minimaPages, page.pageNo);
+  else if (!isTabular && !item.isTabular) {
     pushUnique(group.chartPages, page.pageNo);
     group.chartNo ||= item.chartNo || page.aipPageNo;
     group.chartPageNo ||= page.pageNo;
@@ -302,6 +338,19 @@ function finalizePackage(group: ProcedureGroup, globalSupportPages: SupportPageR
   group.supportingPages = supportContext.pages;
   group.reviewRequired ||= !group.chartPages.length || (group.confidence ?? 0) < 0.8;
   return group;
+}
+
+// 目录图号可能不含页序后缀（AD 2-VHHH-SID-BEKOL-A），而图页图号带后缀（...-A-1），按前缀归并
+function lookupPagesForChartNo(map: Map<string, PdfPageAsset[]>, chartNo: string): PdfPageAsset[] {
+  const collected = [...(map.get(chartNo) ?? [])];
+  const prefix = `${chartNo}-`;
+  for (const [key, pages] of map) {
+    if (key.startsWith(prefix) && /^\d{1,2}$/.test(key.slice(prefix.length))) collected.push(...pages);
+  }
+  const seen = new Set<number>();
+  return collected
+    .filter((page) => (seen.has(page.pageNo) ? false : (seen.add(page.pageNo), true)))
+    .sort((a, b) => a.pageNo - b.pageNo);
 }
 
 function groupItemsByKey(items: ChartIndexItem[]) {

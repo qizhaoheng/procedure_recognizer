@@ -1,12 +1,13 @@
 import type { AipAdStructure, AipSection, PdfPageAsset } from '../types/procedure';
-import { extractLikelyAipPageNo, normalizeChartNo, parseChartIndexFromPages } from './chartIndexParser';
+import { countLetteredChartNos, extractLikelyAipPageNo, normalizeChartNo, parseChartIndexFromPages } from './chartIndexParser';
 import { parsePageHeader } from './pageHeaderParser';
 import { detectSupportType, extractSupportingInfo } from './supportingInfoExtractor';
 
 export function extractAipAdStructure(pages: PdfPageAsset[]): AipAdStructure {
   const chartIndexPages = pages.filter((page) => {
     const text = page.ocrText || page.textLayerText || '';
-    return page.chartRole === 'CHART_INDEX' || /AD\s*2\.?24|CHARTS RELATED TO AN AERODROME/i.test(text) || looksLikeChartIndexContinuation(text);
+    // 注意不能用正文里“见 AD 2.24”之类的提及来判定目录页，否则正文引用的图号会被当成目录项
+    return page.chartRole === 'CHART_INDEX' || /CHARTS RELATED TO AN AERODROME/i.test(text) || looksLikeChartIndexContinuation(text);
   });
   const chartIndexItems = parseChartIndexFromPages(chartIndexPages);
 
@@ -38,7 +39,9 @@ export function extractAipAdStructure(pages: PdfPageAsset[]): AipAdStructure {
 function looksLikeChartIndexContinuation(text: string) {
   const upper = text.toUpperCase();
   const programItemCount = (upper.match(/STANDARD\s+DEPARTURE\s+CHART|STANDARD\s+ARRIVAL\s+CHART|INSTRUMENT\s+APPROACH\s+CHART/g) || []).length;
-  return programItemCount >= 4 && /CHART\s+NAME\s+PAGE|AD\s*2\.?24|CHARTS RELATED TO AN AERODROME/i.test(text);
+  if (programItemCount >= 4 && /CHART\s+NAME\s+PAGE|AD\s*2\.?24|CHARTS RELATED TO AN AERODROME/i.test(text)) return true;
+  // 香港式目录续页：整页都是“图名 + 字母段图号”条目（正文引用图号一般不超过几个）
+  return countLetteredChartNos(text) >= 8;
 }
 
 function inferSections(pages: PdfPageAsset[]): AipSection[] {

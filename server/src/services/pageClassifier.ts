@@ -1,13 +1,28 @@
 import type { ChartRole, NavigationType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
-import { extractLikelyAipPageNo } from './chartIndexParser';
+import { classifyChartNoType, extractLikelyAipPageNo } from './chartIndexParser';
 
 export function classifyPage(pageNo: number, text: string): PdfPageAsset {
   const normalized = text.replace(/\s+/g, ' ').trim();
   const upper = normalized.toUpperCase();
-  const chartRole = detectChartRole(upper);
-  const procedureCategory = detectProcedureCategory(upper);
+  let chartRole = detectChartRole(upper);
+  let procedureCategory = detectProcedureCategory(upper);
   const navigationType = detectNavigationType(upper);
   const aipPageNo = extractLikelyAipPageNo(normalized);
+
+  // 香港等 AIP 的图页往往没有可提取的标题文本，退而用字母段图号语义判定。
+  // 图号明确指向 SID/STAR/IAC 图页时，优先于文本嗅探出的表格/最低标准角色：
+  // 这类图页图面上常印有 OCA/MINIMA、TABULAR DESCRIPTION 等字样。
+  const chartNoKind = classifyChartNoType(aipPageNo);
+  const overridableRoles: ChartRole[] = chartNoKind?.role === 'CHART'
+    ? ['OTHER', 'UNKNOWN', 'MINIMA_TABLE', 'TABULAR_DESCRIPTION', 'WAYPOINT_COORDINATES']
+    : ['OTHER', 'UNKNOWN'];
+  if (chartNoKind && overridableRoles.includes(chartRole)) {
+    chartRole = chartNoKind.role;
+    if (procedureCategory === 'UNKNOWN' && chartNoKind.procedureCategory !== 'UNKNOWN') {
+      procedureCategory = chartNoKind.procedureCategory;
+    }
+  }
+
   const runwayMatch = firstMatch(normalized, /RWY\s?(\d{2}[LRC]?)/i);
   const procedureNames = uniqueMatches(normalized, /\b[A-Z]{5}\s?\d[A-Z]\b/g).map((name) => name.replace(/\s+/, ' '));
   const chartTitle = detectTitle(text);
@@ -31,19 +46,20 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
 
 function detectChartRole(upper: string): ChartRole {
   if (!upper.trim()) return 'BLANK';
-  if (upper.includes('INTENTIONALLY BLANK')) return 'BLANK';
+  if (/INTENTIONALLY\s+(?:LEFT\s+)?BLANK/.test(upper)) return 'BLANK';
   if (upper.includes('CHARTS RELATED TO AN AERODROME')) return 'CHART_INDEX';
   if (upper.includes('TABULAR DESCRIPTION')) return 'TABULAR_DESCRIPTION';
   if (upper.includes('WAYPOINT COORDINATES') || upper.includes('AERONAUTICAL DATA TABULATION')) return 'WAYPOINT_COORDINATES';
-  if (upper.includes('MINIMA') || upper.includes('OCA') || upper.includes('OCH')) return 'MINIMA_TABLE';
   if (/AD\s*2\.?\s*(12|18|19|20|21|22|23)\b/.test(upper)) return 'SUPPORT';
   if (
     upper.includes('STANDARD ARRIVAL CHART') ||
     upper.includes('STANDARD DEPARTURE CHART') ||
     upper.includes('INSTRUMENT APPROACH CHART')
   ) {
+    // 图名标题优先于 MINIMA 嗅探：图页文本层常包含 OCA/MINIMA 字样
     return 'CHART';
   }
+  if (upper.includes('MINIMA') || upper.includes('OCA') || upper.includes('OCH')) return 'MINIMA_TABLE';
   return upper.length < 30 ? 'UNKNOWN' : 'OTHER';
 }
 

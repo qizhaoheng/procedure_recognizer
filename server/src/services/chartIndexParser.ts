@@ -1,9 +1,16 @@
 import type { ChartIndexItem, NavigationType, PackageType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
 
 const CHART_NO_PATTERN = /A\s*D\s*2\s*-\s*([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z])\s*-\s*(\d{1,2})\s*-\s*(\d{1,2}(?:\s+\d(?!\d))?)/i;
+// 香港等 AIP 的字母段图号，如 AD 2-VHHH-SID-BEKOL-A / AD 2-VHHH-IAC-04A / AD 2-VHHH-AC-DEP
+const LETTERED_CHART_NO_PATTERN = /AD\s*2\s*-\s*([A-Z]{4})\s*-\s*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)/;
+const LETTERED_CHART_NO_PATTERN_GLOBAL = new RegExp(LETTERED_CHART_NO_PATTERN.source, 'g');
 const PROGRAM_CHART_PATTERN = /STANDARD\s+DEPARTURE\s+CHART|STANDARD\s+ARRIVAL\s+CHART|INSTRUMENT\s+APPROACH\s+CHART/i;
 
 export function normalizeChartNo(raw?: string | null): string | undefined {
+  return normalizeNumericChartNo(raw) || normalizeLetteredChartNo(raw);
+}
+
+export function normalizeNumericChartNo(raw?: string | null): string | undefined {
   const match = raw?.match(CHART_NO_PATTERN);
   if (!match) return undefined;
   const icao = match[1].replace(/\s+/g, '').toUpperCase();
@@ -13,10 +20,44 @@ export function normalizeChartNo(raw?: string | null): string | undefined {
   return `AD 2-${icao}-${section}-${page}`;
 }
 
+export function normalizeLetteredChartNo(raw?: string | null): string | undefined {
+  const match = raw?.toUpperCase().match(LETTERED_CHART_NO_PATTERN);
+  if (!match) return undefined;
+  return `AD 2-${match[1]}-${match[2]}`;
+}
+
+export function countLetteredChartNos(text: string) {
+  return (text.toUpperCase().match(LETTERED_CHART_NO_PATTERN_GLOBAL) || []).length;
+}
+
+export interface ChartNoKind {
+  role: 'CHART' | 'SUPPORT';
+  procedureCategory: ProcedureCategory;
+  packageType: PackageType;
+}
+
+// 从字母段图号推断图页类型（图页可能没有可提取的标题文本，只能靠图号语义）
+export function classifyChartNoType(chartNo?: string | null): ChartNoKind | undefined {
+  const match = chartNo?.toUpperCase().match(/^AD 2-[A-Z]{4}-([A-Z][A-Z0-9]*)/);
+  if (!match) return undefined;
+  const segment = match[1];
+  if (segment === 'SID') return { role: 'CHART', procedureCategory: 'DEPARTURE', packageType: 'SID' };
+  if (segment === 'STAR') return { role: 'CHART', procedureCategory: 'ARRIVAL', packageType: 'STAR' };
+  if (segment === 'IAC') return { role: 'CHART', procedureCategory: 'APPROACH', packageType: 'APPROACH' };
+  return { role: 'SUPPORT', procedureCategory: 'UNKNOWN', packageType: 'OTHER' };
+}
+
 export function extractLikelyAipPageNo(raw?: string | null): string | undefined {
   if (!raw) return undefined;
   const edgeText = `${raw.slice(0, 650)} ${raw.slice(-650)}`;
-  return normalizeChartNo(edgeText);
+  const numeric = normalizeNumericChartNo(edgeText);
+  if (numeric) return numeric;
+  // 字母段图号只信页首位置：真正的图页文本层以图号开头，正文页开头是纯数字页码。
+  // 窗口取大一些避免截断图号，但要求匹配起点在前 100 字符内。
+  const head = raw.slice(0, 300);
+  const match = head.toUpperCase().match(LETTERED_CHART_NO_PATTERN);
+  if (!match || (match.index ?? 0) >= 100) return undefined;
+  return `AD 2-${match[1]}-${match[2]}`;
 }
 
 export function parseChartIndexFromPages(chartIndexPages: PdfPageAsset[]): ChartIndexItem[] {
@@ -29,9 +70,83 @@ export function parseChartIndex(text: string): ChartIndexItem[] {
   const itemPattern =
     /((?:STANDARD\s+DEPARTURE\s+CHART|STANDARD\s+ARRIVAL\s+CHART|INSTRUMENT\s+APPROACH\s+CHART)[\s\S]*?)(A\s*D\s*2\s*-\s*[A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z]\s*-\s*\d{1,2}\s*-\s*\d{1,2}(?:\s+\d(?!\d))?)/gi;
 
-  return Array.from(normalized.matchAll(itemPattern))
+  const items = Array.from(normalized.matchAll(itemPattern))
     .map((match) => parseChartIndexLine(`${match[1]} ${match[2]}`))
     .filter((item): item is ChartIndexItem => Boolean(item));
+
+  const seen = new Set(items.map((item) => item.chartNo));
+  for (const item of parseLetteredChartIndex(text)) {
+    if (seen.has(item.chartNo)) continue;
+    seen.add(item.chartNo);
+    items.push(item);
+  }
+  return items;
+}
+
+// 香港等 AIP 的 AD 2.24 目录格式：图名一行、图号一行交替出现
+function parseLetteredChartIndex(text: string): ChartIndexItem[] {
+  const items: ChartIndexItem[] = [];
+  let nameBuffer: string[] = [];
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.replace(/\s+/g, ' ').trim();
+    if (!line) continue;
+    if (isIndexBoilerplateLine(line)) {
+      nameBuffer = [];
+      continue;
+    }
+    const upper = line.toUpperCase();
+    const match = upper.match(LETTERED_CHART_NO_PATTERN);
+    if (!match) {
+      nameBuffer.push(line);
+      continue;
+    }
+    const chartNo = `AD 2-${match[1]}-${match[2]}`;
+    const before = line.slice(0, upper.indexOf(match[0])).trim();
+    const chartName = [nameBuffer.join(' '), before].filter(Boolean).join(' ').trim();
+    nameBuffer = [];
+    if (chartName) items.push(buildLetteredIndexItem(chartName, chartNo));
+  }
+  return items;
+}
+
+function isIndexBoilerplateLine(line: string) {
+  const upper = line.toUpperCase();
+  if (/^AIP\b/.test(upper)) return true;
+  if (/^CIVIL AVIATION/.test(upper)) return true;
+  if (/^HONG KONG$/.test(upper)) return true;
+  if (/^AMENDMENT\b/.test(upper)) return true;
+  if (/^AIRAC\b/.test(upper)) return true;
+  if (/^\d{1,2} [A-Z]{3} \d{2,4}$/.test(upper)) return true;
+  if (/^AD 2-[A-Z]{4}-\d+$/.test(upper)) return true;
+  if (/CHARTS RELATED TO AN AERODROME/.test(upper)) return true;
+  if (/^CHART NAME\b/.test(upper)) return true;
+  return false;
+}
+
+function buildLetteredIndexItem(chartName: string, chartNo: string): ChartIndexItem {
+  const kind = classifyChartNoType(chartNo);
+  const isProgramChart = kind?.role === 'CHART';
+  const procedureCategory = isProgramChart ? kind!.procedureCategory : detectProcedureCategory(chartName);
+  const packageType = isProgramChart ? kind!.packageType : detectPackageType(procedureCategory);
+  const runway = detectRunway(chartName);
+  const navigationType = detectNavigationTypeForPackage(chartName, packageType);
+  const procedureNames =
+    packageType === 'APPROACH'
+      ? [parseApproachProcedureName(chartName)]
+      : detectProcedureNames(chartName, navigationType);
+  return {
+    chartName,
+    chartNo,
+    procedureCategory,
+    packageType,
+    navigationType,
+    runway,
+    procedureNames,
+    isTabular: false,
+    tabularNo: undefined,
+    // 字母段图号本身唯一标识一张图，直接作为分组键（每张图一个程序包）
+    normalizedGroupKey: chartNo,
+  };
 }
 
 export function parseChartIndexLine(line: string): ChartIndexItem | undefined {
@@ -98,16 +213,21 @@ export function buildNormalizedGroupKey(input: {
 export function parseApproachProcedureName(chartName: string): string {
   const baseName = stripTabularMarker(chartName).replace(/\s+/g, ' ').trim();
   const runway = detectRunway(baseName);
-  const runwayMatch = baseName.match(/RWY\s*\d{2}[LRC]?(?:\s*\/\s*\d{2}[LRC]?)?/i);
+  // 香港式标题：Instrument Approach Chart - ICAO - ILS - RWY 07R，程序类型在 RWY 之前
+  const middle = baseName.match(
+    /(?:INSTRUMENT\s+APPROACH\s+CHART|APPROACH\s+TRANSITION\s+CHART)(?:\s*[-–]\s*ICAO)?\s*[-–]\s*(.+?)\s*[-–]?\s*RWY/i,
+  )?.[1];
+  const runwayMatch = baseName.match(/RWY\s*\d{2}[LRC]?(?:\s*\/\s*(?:\d{2})?[LRC]?)*/i);
   const afterRunway = runwayMatch
     ? baseName.slice((runwayMatch.index ?? 0) + runwayMatch[0].length)
     : baseName.replace(/.*INSTRUMENT\s+APPROACH\s+CHART(?:\s*-\s*ICAO)?/i, '');
-  const procedure = afterRunway
+  const suffix = afterRunway
     .replace(CHART_NO_PATTERN, '')
     .replace(/\bICAO\b/gi, '')
     .replace(/^[-\s]+/, '')
     .replace(/\s+/g, ' ')
     .trim();
+  const procedure = [middle, suffix].filter(Boolean).join(' ').trim();
   return [procedure || detectNavigationType(baseName), runway].filter(Boolean).join(' ').trim();
 }
 
@@ -148,9 +268,10 @@ export function detectNavigationTypeForPackage(text: string, packageType: Packag
 }
 
 export function detectRunway(text: string) {
-  const match = text.match(/RWY\s*([0-9]{2}[LRC]?)(?:\s*\/\s*([0-9]{2}[LRC]?))?/i);
+  // 支持 RWY 16、RWY 16/34、RWY 07L/C/R 等写法
+  const match = text.match(/RWY\s*([0-9]{2}[LRC]?(?:\s*\/\s*(?:[0-9]{2}[LRC]?|[LRC]))*)/i);
   if (!match) return undefined;
-  return match[2] ? `RWY${match[1].toUpperCase()}/${match[2].toUpperCase()}` : `RWY${match[1].toUpperCase()}`;
+  return `RWY${match[1].replace(/\s+/g, '').toUpperCase()}`;
 }
 
 export function detectApproachProcedureNames(text: string, _navigationType: NavigationType, _runway?: string) {
@@ -187,6 +308,9 @@ function detectProcedureNames(text: string, navigationType: NavigationType) {
     const radar = text.match(/\bRADAR\s+([A-Z0-9 ]+?DEPARTURE|[A-Z0-9 ]+?ARRIVAL)\b/i)?.[1];
     return radar ? [normalizeProcedureName(radar)] : [];
   }
+  // 香港式命名：RNAV(GNSS) BEKOL SID RWY 07R —— 取 SID/STAR 前的定位点名
+  const fix = text.match(/\b([A-Z]{3,6})\s+(?:SID|STAR)\b/i)?.[1]?.toUpperCase();
+  if (fix && !['RNAV', 'RNP', 'GNSS', 'ICAO'].includes(fix)) return [fix];
   return [];
 }
 

@@ -60,12 +60,25 @@ const message = ref('等待上传 PDF');
 const error = ref('');
 const aiPreview = ref<AiRequestPreview>();
 const pdfCanvas = ref<HTMLCanvasElement>();
+const pdfFrame = ref<HTMLDivElement>();
 const pdfRenderBusy = ref(false);
 const pdfRenderError = ref('');
+const previewZoom = ref(1);
+const previewPanX = ref(0);
+const previewPanY = ref(0);
+const previewPanning = ref(false);
+let panPointerStart = { x: 0, y: 0, panX: 0, panY: 0 };
+let renderedQuality = 1;
+let renderedQualityCap = Number.POSITIVE_INFINITY;
+let qualityRenderTimer: number | undefined;
 let pollTimer: number | undefined;
 let pdfDocumentTaskId = '';
 let pdfDocument: any;
 let renderSerial = 0;
+
+const previewStageStyle = computed(() => ({
+  transform: `translate(${previewPanX.value}px, ${previewPanY.value}px) scale(${previewZoom.value})`,
+}));
 
 const selectedPage = computed(() => task.value?.pages.find((page) => page.pageNo === selectedPageNo.value));
 const selectedGroup = computed(() => task.value?.groups.find((group) => group.groupId === selectedGroupId.value));
@@ -83,6 +96,7 @@ const selectedGroupIndexLabel = computed(() => {
 
 onBeforeUnmount(() => {
   stopPolling();
+  if (qualityRenderTimer) window.clearTimeout(qualityRenderTimer);
   void pdfDocument?.destroy?.();
 });
 
@@ -458,7 +472,11 @@ function updateProcedureNames(event: Event) {
     .filter(Boolean);
 }
 
-async function renderSelectedPdfPage() {
+const PDF_BASE_SCALE = 1.6;
+const MAX_CANVAS_DIMENSION = 8192;
+const MAX_CANVAS_PIXELS = 60_000_000;
+
+async function renderSelectedPdfPage(options?: { quality?: number; preserveView?: boolean }) {
   const currentTask = task.value;
   const pageNo = selectedPageNo.value;
   if (!currentTask || !pageNo) return;
@@ -475,23 +493,97 @@ async function renderSelectedPdfPage() {
     const pdf = await loadPdfDocument(currentTask.taskId);
     if (serial !== renderSerial) return;
     const page = await pdf.getPage(pageNo);
-    const viewport = page.getViewport({ scale: 1.6 });
     const canvas = pdfCanvas.value;
     const context = canvas?.getContext('2d');
     if (!canvas || !context) return;
 
     const ratio = window.devicePixelRatio || 1;
+    const baseViewport = page.getViewport({ scale: PDF_BASE_SCALE });
+    // canvas 备份分辨率随缩放倍率提升，但受浏览器画布上限约束
+    const qualityCap = Math.min(
+      MAX_CANVAS_DIMENSION / (baseViewport.width * ratio),
+      MAX_CANVAS_DIMENSION / (baseViewport.height * ratio),
+      Math.sqrt(MAX_CANVAS_PIXELS / (baseViewport.width * baseViewport.height * ratio * ratio)),
+    );
+    const quality = Math.max(1, Math.min(options?.quality ?? 1, qualityCap));
+    const viewport = page.getViewport({ scale: PDF_BASE_SCALE * quality });
+
     canvas.width = Math.floor(viewport.width * ratio);
     canvas.height = Math.floor(viewport.height * ratio);
-    canvas.style.width = `${Math.floor(viewport.width)}px`;
-    canvas.style.height = `${Math.floor(viewport.height)}px`;
+    canvas.style.width = `${Math.floor(baseViewport.width)}px`;
+    canvas.style.height = `${Math.floor(baseViewport.height)}px`;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
     await page.render({ canvasContext: context, viewport }).promise;
+    if (serial === renderSerial) {
+      renderedQuality = quality;
+      renderedQualityCap = qualityCap;
+      if (!options?.preserveView) resetPreviewView();
+    }
   } catch (renderError) {
     pdfRenderError.value = toErrorMessage(renderError);
   } finally {
     if (serial === renderSerial) pdfRenderBusy.value = false;
   }
+}
+
+function scheduleQualityRender() {
+  if (qualityRenderTimer) window.clearTimeout(qualityRenderTimer);
+  qualityRenderTimer = window.setTimeout(() => {
+    qualityRenderTimer = undefined;
+    const quality = Math.max(1, Math.min(previewZoom.value, renderedQualityCap));
+    if (Math.abs(quality - renderedQuality) > 0.01) {
+      void renderSelectedPdfPage({ quality, preserveView: true });
+    }
+  }, 220);
+}
+
+function resetPreviewView() {
+  const frame = pdfFrame.value;
+  const canvas = pdfCanvas.value;
+  if (!frame || !canvas) return;
+  const canvasWidth = parseFloat(canvas.style.width) || canvas.width;
+  const canvasHeight = parseFloat(canvas.style.height) || canvas.height;
+  if (!canvasWidth || !canvasHeight) return;
+  const fit = Math.min(frame.clientWidth / canvasWidth, frame.clientHeight / canvasHeight, 1);
+  previewZoom.value = fit;
+  previewPanX.value = (frame.clientWidth - canvasWidth * fit) / 2;
+  previewPanY.value = (frame.clientHeight - canvasHeight * fit) / 2;
+  scheduleQualityRender();
+}
+
+function onPreviewWheel(event: WheelEvent) {
+  const frame = pdfFrame.value;
+  if (!frame) return;
+  const rect = frame.getBoundingClientRect();
+  const cursorX = event.clientX - rect.left;
+  const cursorY = event.clientY - rect.top;
+  const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+  const nextZoom = Math.min(8, Math.max(0.1, previewZoom.value * factor));
+  const applied = nextZoom / previewZoom.value;
+  previewPanX.value = cursorX - applied * (cursorX - previewPanX.value);
+  previewPanY.value = cursorY - applied * (cursorY - previewPanY.value);
+  previewZoom.value = nextZoom;
+  scheduleQualityRender();
+}
+
+function onPreviewPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  previewPanning.value = true;
+  panPointerStart = { x: event.clientX, y: event.clientY, panX: previewPanX.value, panY: previewPanY.value };
+  (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId);
+}
+
+function onPreviewPointerMove(event: PointerEvent) {
+  if (!previewPanning.value) return;
+  previewPanX.value = panPointerStart.panX + (event.clientX - panPointerStart.x);
+  previewPanY.value = panPointerStart.panY + (event.clientY - panPointerStart.y);
+}
+
+function endPreviewPan(event: PointerEvent) {
+  if (!previewPanning.value) return;
+  previewPanning.value = false;
+  const target = event.currentTarget as HTMLElement;
+  if (target.hasPointerCapture(event.pointerId)) target.releasePointerCapture(event.pointerId);
 }
 
 async function loadPdfDocument(taskId: string) {
@@ -658,50 +750,38 @@ function toErrorMessage(value: unknown) {
       <section class="column page-preview">
         <div class="column-head">
           <h2>PDF 页面</h2>
-          <span>P{{ selectedPageNo || '-' }}</span>
+          <div v-if="selectedGroupPages.length" class="page-tabs">
+            <button
+              v-for="page in selectedGroupPages"
+              :key="page.pageNo"
+              type="button"
+              :class="{ active: page.pageNo === selectedPageNo }"
+              @click="selectPage(page)"
+            >
+              P{{ page.pageNo }}
+            </button>
+          </div>
+          <span v-else>P{{ selectedPageNo || '-' }}</span>
         </div>
 
-        <div v-if="selectedGroupPages.length" class="page-tabs">
-          <button
-            v-for="page in selectedGroupPages"
-            :key="page.pageNo"
-            type="button"
-            :class="{ active: page.pageNo === selectedPageNo }"
-            @click="selectPage(page)"
-          >
-            P{{ page.pageNo }}
-          </button>
-        </div>
-
-        <div class="pdf-page-frame">
+        <div
+          ref="pdfFrame"
+          class="pdf-page-frame"
+          :class="{ panning: previewPanning }"
+          @wheel.prevent="onPreviewWheel"
+          @pointerdown="onPreviewPointerDown"
+          @pointermove="onPreviewPointerMove"
+          @pointerup="endPreviewPan"
+          @pointercancel="endPreviewPan"
+          @dblclick="resetPreviewView"
+        >
           <div v-if="pdfRenderBusy" class="pdf-state">正在渲染页面...</div>
           <div v-if="pdfRenderError" class="pdf-state error">{{ pdfRenderError }}</div>
-          <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+          <div class="pdf-stage" :style="previewStageStyle">
+            <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+          </div>
         </div>
 
-        <div v-if="selectedPage" class="page-meta">
-          <strong>P{{ selectedPage.pageNo }} {{ selectedPage.aipPageNo || '' }}</strong>
-          <span>{{ selectedPage.chartRole }} · {{ selectedPage.procedureCategory }} · {{ selectedPage.navigationType }}</span>
-          <div class="button-row">
-            <button type="button" @click="saveSelectedPage">保存页识别</button>
-            <button type="button" :disabled="!selectedGroup" @click="addSelectedPageToGroup">加入当前分组</button>
-            <button type="button" :disabled="!selectedGroup" @click="removeSelectedPageFromGroup">移出当前分组</button>
-          </div>
-          <details>
-            <summary>OCR / 文本层摘要</summary>
-            <pre>{{ (selectedPage.ocrText || selectedPage.textLayerText || '').slice(0, 2200) }}</pre>
-          </details>
-          <details>
-            <summary>页面识别字段</summary>
-            <div class="form-grid">
-              <label>图件编号<input v-model="selectedPage.aipPageNo" /></label>
-              <label>页类型<select v-model="selectedPage.chartRole"><option v-for="role in chartRoles" :key="role">{{ role }}</option></select></label>
-              <label>程序类别<select v-model="selectedPage.procedureCategory"><option v-for="category in procedureCategories" :key="category">{{ category }}</option></select></label>
-              <label>导航类型<select v-model="selectedPage.navigationType"><option v-for="type in navigationTypes" :key="type">{{ type }}</option></select></label>
-              <label>跑道<input v-model="selectedPage.runway" placeholder="RWY16" /></label>
-            </div>
-          </details>
-        </div>
       </section>
     </section>
   </main>
@@ -769,8 +849,7 @@ h4 {
 .title p,
 .empty,
 .notice,
-.summary p,
-.page-meta span {
+.summary p {
   color: #64748b;
   font-size: 12px;
 }
@@ -877,8 +956,7 @@ button.ghost {
 
 .group-picker,
 .editor,
-.summary,
-.page-meta {
+.summary {
   display: grid;
   gap: 10px;
 }
@@ -967,12 +1045,9 @@ pre {
 }
 
 .page-tabs {
-  position: sticky;
-  top: 45px;
-  z-index: 1;
-  margin: -2px -2px 10px;
-  padding: 2px;
-  background: #f8fafc;
+  flex: 1;
+  justify-content: flex-end;
+  min-width: 0;
 }
 
 .page-tabs button.active {
@@ -981,22 +1056,38 @@ pre {
   color: #1d4ed8;
 }
 
+.page-preview {
+  display: flex;
+  flex-direction: column;
+}
+
 .pdf-page-frame {
   position: relative;
-  display: grid;
-  justify-items: center;
+  flex: 1;
   min-height: 480px;
-  overflow: auto;
+  overflow: hidden;
   border: 1px solid #e2e8f0;
   border-radius: 7px;
   background: #e5e7eb;
-  padding: 18px;
+  cursor: grab;
+  touch-action: none;
+  user-select: none;
+}
+
+.pdf-page-frame.panning {
+  cursor: grabbing;
+}
+
+.pdf-stage {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  will-change: transform;
 }
 
 .pdf-canvas {
   display: block;
-  max-width: 100%;
-  height: auto !important;
   background: #fff;
   box-shadow: 0 12px 28px rgb(15 23 42 / 18%);
 }
@@ -1018,10 +1109,6 @@ pre {
   border-color: #fecaca;
   background: #fef2f2;
   color: #b91c1c;
-}
-
-.page-meta {
-  margin-top: 12px;
 }
 
 ul {
