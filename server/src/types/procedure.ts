@@ -336,13 +336,22 @@ export interface PromptRunRecord {
 
 export interface VisionRunRecord {
   runId: string;
+  provider?: string;
   model: string;
+  baseUrl?: string;
+  endpointType?: string;
+  imageMode?: 'base64' | 'url';
+  structuredOutputModeUsed?: 'json_schema' | 'json_object' | 'text_json_extract';
+  schemaValidation?: {
+    valid: boolean;
+    errors: string[];
+  };
   promptTemplateId: string;
   promptVersion: string;
   schemaName: string;
   schemaVersion: string;
   inputPackageHash: string;
-  imagePages: number[];
+  imagePages: VisionRunImagePage[];
   supportSummaryPages: number[];
   startedAt: string;
   completedAt: string;
@@ -352,11 +361,28 @@ export interface VisionRunRecord {
     schemaValid: boolean;
     errors: string[];
   };
+  errorType?: string;
+  errorMessage?: string;
+  rawError?: string;
+}
+
+export interface VisionRunImagePage {
+  pageNo: number;
+  aipPageNo?: string;
+  role: AiInputPageRole;
+  imageMode: 'base64' | 'url';
 }
 
 export interface AiResponseRecord {
   rawText: string;
   parsedJson?: unknown;
+  provider?: string;
+  baseUrl?: string;
+  endpointType?: string;
+  imageMode?: 'base64' | 'url';
+  structuredOutputModeUsed?: 'json_schema' | 'json_object' | 'text_json_extract';
+  rawProviderResponse?: unknown;
+  latencyMs?: number;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   errors?: string[];
   createdAt: string;

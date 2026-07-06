@@ -1,13 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import Ajv2020 from 'ajv/dist/2020';
 import express from 'express';
 import multer from 'multer';
 import { PDFDocument } from 'pdf-lib';
 import { createTask, getUploadDir, listTasks, readTask, saveTask, updateTask } from '../storage/taskStore';
 import { extractCandidates } from '../services/candidateExtractor';
 import { validateProcedureGeoJson } from '../services/geojsonValidator';
-import { runProcedureRecognition, runProcedureUnderstandingRecognition } from '../services/llmService';
+import { LlmApiError, runProcedureRecognition, runProcedureUnderstandingRecognition } from '../services/llmService';
 import { parsePdfTask } from '../services/pdfService';
 import { buildAiInputPackage } from '../services/aiInputPackageBuilder';
 import { evaluateProcedureUnderstanding } from '../services/evaluation/procedureUnderstandingEvaluator';
@@ -16,10 +17,11 @@ import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
+import { getLlmRuntimeConfig } from '../services/llm/llmClient';
 import type { EvaluationResult, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
+import type { BuiltPrompt, PromptRunRecord } from '../services/prompt/promptTypes';
 
 const router = express.Router();
-const DEFAULT_VISION_MODEL = 'gpt-5.5';
 const routeDir = path.dirname(fileURLToPath(import.meta.url));
 const upload = multer({
   storage: multer.diskStorage({
@@ -237,7 +239,7 @@ router.get('/:taskId/packages/:packageId/prompt-preview', async (req, res, next)
     const task = await readTask(req.params.taskId);
     const group = findGroup(task.groups, req.params.packageId);
     const packageId = group.packageId || group.groupId;
-    const model = String(req.query.model || process.env.LLM_MODEL || DEFAULT_VISION_MODEL);
+    const model = String(req.query.model || getLlmRuntimeConfig().model);
     const aiInputPackage = buildAiInputPackage(group, task.pages, model);
     const builtPrompt = await buildProcedurePrompt({
       taskId: task.taskId,
@@ -292,8 +294,11 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
 });
 
 router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, res, next) => {
+  const startedAt = new Date().toISOString();
+  let model = String(req.body?.model || getLlmRuntimeConfig().model);
+  let builtPrompt: BuiltPrompt | undefined;
+  let promptRun: PromptRunRecord | undefined;
   try {
-    const startedAt = new Date().toISOString();
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
       group.status = 'AI_RUNNING';
@@ -303,16 +308,16 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
     const task = await readTask(req.params.taskId);
     const group = findGroup(task.groups, req.params.packageId);
     const packageId = group.packageId || group.groupId;
-    const model = String(req.body?.model || process.env.LLM_MODEL || DEFAULT_VISION_MODEL);
+    model = String(req.body?.model || getLlmRuntimeConfig().model);
     const aiInputPackage = buildAiInputPackage(group, task.pages, model);
-    const builtPrompt = await buildProcedurePrompt({
+    builtPrompt = await buildProcedurePrompt({
       taskId: task.taskId,
       packageId,
       procedurePackage: group,
       aiInputPackage,
       templateOverrideId: req.body?.templateId,
     });
-    const promptRun = await savePromptRunRecord(task.taskId, packageId, model, builtPrompt, aiInputPackage);
+    promptRun = await savePromptRunRecord(task.taskId, packageId, model, builtPrompt, aiInputPackage);
 
     group.aiRequest = {
       model,
@@ -330,23 +335,32 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
     };
     group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model);
     const completedAt = new Date().toISOString();
-    const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson);
+    const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson, builtPrompt.responseSchema);
     group.procedureUnderstanding = group.aiResponse.parsedJson as ProcedureUnderstandingResult;
     group.visionRunRecord = {
       runId: `vision_run_${Date.now()}`,
+      provider: group.aiResponse.provider,
       model,
+      baseUrl: group.aiResponse.baseUrl,
+      endpointType: group.aiResponse.endpointType,
+      imageMode: group.aiResponse.imageMode,
+      structuredOutputModeUsed: group.aiResponse.structuredOutputModeUsed,
       promptTemplateId: builtPrompt.promptTemplateId,
       promptVersion: builtPrompt.promptVersion,
       schemaName: builtPrompt.outputSchemaName,
       schemaVersion: builtPrompt.outputSchemaVersion,
       inputPackageHash: promptRun.inputPackageHash,
-      imagePages: builtPrompt.inputImages.map((page) => page.pageNo),
+      imagePages: imagePageRecords(builtPrompt, group.aiResponse.imageMode),
       supportSummaryPages: Array.from(new Set(builtPrompt.supportSummaries.flatMap((item) => item.pageNos))).sort((a, b) => a - b),
       startedAt,
       completedAt,
       rawResponse: group.aiResponse.rawText,
       parsedJson: group.aiResponse.parsedJson,
       validationResult,
+      schemaValidation: {
+        valid: validationResult.schemaValid,
+        errors: validationResult.errors,
+      },
     };
     group.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
     task.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
@@ -366,7 +380,7 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       rawText: group.aiResponse.rawText,
     });
   } catch (error) {
-    await markRecognitionError(req.params.taskId, req.params.packageId, error);
+    await markRecognitionError(req.params.taskId, req.params.packageId, error, { startedAt, model, builtPrompt, promptRun });
     next(error);
   }
 });
@@ -419,10 +433,25 @@ async function loadGoldenCase(fileName: string) {
   return JSON.parse(await fs.readFile(filePath, 'utf-8'));
 }
 
-function validateProcedureUnderstandingResult(value: unknown) {
+function validateProcedureUnderstandingResult(value: unknown, schema?: unknown) {
   const errors: string[] = [];
   if (!value || typeof value !== 'object') {
     return { schemaValid: false, errors: ['Response is not a JSON object.'] };
+  }
+  if (schema) {
+    try {
+      const ajv = new Ajv2020({ allErrors: true, strict: false });
+      const validate = ajv.compile(schema);
+      if (!validate(value)) {
+        return {
+          schemaValid: false,
+          errors: (validate.errors ?? []).map((error) => `${error.instancePath || '/'} ${error.message || 'schema validation failed'}`),
+        };
+      }
+      return { schemaValid: true, errors: [] };
+    } catch (error) {
+      errors.push(error instanceof Error ? `Schema validator failed: ${error.message}` : 'Schema validator failed.');
+    }
   }
   const record = value as Record<string, unknown>;
   for (const key of ['procedures', 'fixes', 'sourceEvidence', 'warnings', 'confidence', 'reviewRequired']) {
@@ -434,22 +463,96 @@ function validateProcedureUnderstandingResult(value: unknown) {
   return { schemaValid: errors.length === 0, errors };
 }
 
-async function markRecognitionError(taskId: string, packageId: string, error: unknown) {
+async function markRecognitionError(
+  taskId: string,
+  packageId: string,
+  error: unknown,
+  context: {
+    startedAt: string;
+    model: string;
+    builtPrompt?: BuiltPrompt;
+    promptRun?: PromptRunRecord;
+  },
+) {
   try {
     await updateTask(taskId, (draft) => {
       const group = findGroup(draft.groups, packageId);
+      const normalized = normalizeRecognitionError(error);
+      const config = getLlmRuntimeConfig(context.model);
       group.status = 'ERROR';
       group.aiResponse = {
-        rawText: error instanceof Error ? error.message : 'Vision recognition failed',
-        errors: [error instanceof Error ? error.message : 'Vision recognition failed'],
+        rawText: normalized.message,
+        errors: [normalized.message],
         createdAt: new Date().toISOString(),
       };
+      if (context.builtPrompt) {
+        group.visionRunRecord = {
+          runId: `vision_run_${Date.now()}`,
+          provider: config.provider,
+          model: context.model,
+          baseUrl: config.baseUrl,
+          endpointType: config.endpointType,
+          imageMode: config.imageMode,
+          structuredOutputModeUsed: plannedStructuredOutputMode(config.structuredOutputMode),
+          promptTemplateId: context.builtPrompt.promptTemplateId,
+          promptVersion: context.builtPrompt.promptVersion,
+          schemaName: context.builtPrompt.outputSchemaName,
+          schemaVersion: context.builtPrompt.outputSchemaVersion,
+          inputPackageHash: context.promptRun?.inputPackageHash || '',
+          imagePages: imagePageRecords(context.builtPrompt, config.imageMode),
+          supportSummaryPages: Array.from(new Set(context.builtPrompt.supportSummaries.flatMap((item) => item.pageNos))).sort((a, b) => a - b),
+          startedAt: context.startedAt,
+          completedAt: new Date().toISOString(),
+          rawResponse: '',
+          validationResult: {
+            schemaValid: false,
+            errors: [normalized.message],
+          },
+          schemaValidation: {
+            valid: false,
+            errors: [normalized.message],
+          },
+          errorType: normalized.errorType,
+          errorMessage: normalized.message,
+          rawError: normalized.rawError,
+        };
+      }
       draft.status = 'ERROR';
-      draft.error = error instanceof Error ? error.message : 'Vision recognition failed';
+      draft.error = normalized.message;
     });
   } catch {
     // The original API error is more useful than a secondary persistence failure.
   }
+}
+
+function imagePageRecords(builtPrompt: BuiltPrompt, imageMode: 'base64' | 'url' = 'base64') {
+  return builtPrompt.inputImages.map((page) => ({
+    pageNo: page.pageNo,
+    aipPageNo: page.aipPageNo,
+    role: page.role,
+    imageMode,
+  }));
+}
+
+function normalizeRecognitionError(error: unknown) {
+  if (error instanceof LlmApiError) {
+    return {
+      errorType: error.errorType,
+      message: error.message,
+      rawError: error.rawError,
+    };
+  }
+  return {
+    errorType: 'UNKNOWN',
+    message: error instanceof Error ? error.message : 'Vision recognition failed',
+    rawError: error instanceof Error ? error.stack || error.message : String(error),
+  };
+}
+
+function plannedStructuredOutputMode(mode: string) {
+  if (mode === 'json_object') return 'json_object' as const;
+  if (mode === 'none') return 'text_json_extract' as const;
+  return 'json_schema' as const;
 }
 
 export default router;

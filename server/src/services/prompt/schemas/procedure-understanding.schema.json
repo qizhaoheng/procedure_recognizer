@@ -6,9 +6,11 @@
   "additionalProperties": false,
   "required": [
     "airportIcao",
+    "airportName",
     "packageType",
     "procedureCategory",
     "navigationType",
+    "runway",
     "procedures",
     "fixes",
     "navaids",
@@ -71,7 +73,7 @@
     "procedure": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["procedureName", "legs", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "required": ["procedureName", "runway", "navigationSpec", "legs", "sourceEvidenceIds", "confidence", "reviewRequired"],
       "properties": {
         "procedureName": { "type": ["string", "null"] },
         "runway": { "type": ["string", "null"] },
@@ -99,6 +101,7 @@
         "altitudeConstraint",
         "speedLimitKias",
         "navigationSpec",
+        "derivationMethod",
         "sourceEvidenceIds",
         "confidence",
         "reviewRequired"
@@ -123,6 +126,7 @@
     "constraint": {
       "type": ["object", "null"],
       "additionalProperties": false,
+      "required": ["type", "altitudeFt", "lowerFt", "upperFt", "rawText"],
       "properties": {
         "type": { "type": ["string", "null"] },
         "altitudeFt": { "type": ["number", "null"] },
@@ -133,8 +137,8 @@
     },
     "fix": {
       "type": "object",
-      "additionalProperties": true,
-      "required": ["identifier", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "additionalProperties": false,
+      "required": ["identifier", "latitude", "longitude", "rawCoordinate", "sourceEvidenceIds", "confidence", "reviewRequired"],
       "properties": {
         "identifier": { "type": ["string", "null"] },
         "latitude": { "type": ["number", "null"] },
@@ -145,15 +149,75 @@
         "reviewRequired": { "type": "boolean" }
       }
     },
-    "navaid": { "type": "object", "additionalProperties": true },
-    "runway": { "type": "object", "additionalProperties": true },
-    "communication": { "type": "object", "additionalProperties": true },
-    "holding": { "type": "object", "additionalProperties": true },
-    "msaSector": { "type": "object", "additionalProperties": true },
+    "navaid": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "type", "frequency", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "properties": {
+        "identifier": { "type": ["string", "null"] },
+        "type": { "type": ["string", "null"] },
+        "frequency": { "type": ["string", "null"] },
+        "sourceEvidenceIds": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      }
+    },
+    "runway": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "thresholdLatitude", "thresholdLongitude", "magneticBearing", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "properties": {
+        "identifier": { "type": ["string", "null"] },
+        "thresholdLatitude": { "type": ["number", "null"] },
+        "thresholdLongitude": { "type": ["number", "null"] },
+        "magneticBearing": { "type": ["number", "null"] },
+        "sourceEvidenceIds": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      }
+    },
+    "communication": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["service", "frequency", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "properties": {
+        "service": { "type": ["string", "null"] },
+        "frequency": { "type": ["string", "null"] },
+        "sourceEvidenceIds": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      }
+    },
+    "holding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["fixIdentifier", "inboundCourseDegMag", "turnDirection", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "properties": {
+        "fixIdentifier": { "type": ["string", "null"] },
+        "inboundCourseDegMag": { "type": ["number", "null"] },
+        "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", null] },
+        "sourceEvidenceIds": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      }
+    },
+    "msaSector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reference", "minimumAltitudeFt", "sector", "sourceEvidenceIds", "confidence", "reviewRequired"],
+      "properties": {
+        "reference": { "type": ["string", "null"] },
+        "minimumAltitudeFt": { "type": ["number", "null"] },
+        "sector": { "type": ["string", "null"] },
+        "sourceEvidenceIds": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      }
+    },
     "sourceEvidence": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "pageNo", "evidenceType", "fieldName"],
+      "required": ["id", "pageNo", "aipPageNo", "evidenceType", "fieldName", "rawText", "visualDescription", "confidence"],
       "properties": {
         "id": { "type": "string" },
         "pageNo": { "type": "integer", "minimum": 1 },
@@ -163,16 +227,12 @@
         "rawText": { "type": ["string", "null"] },
         "visualDescription": { "type": ["string", "null"] },
         "confidence": { "type": ["number", "null"], "minimum": 0, "maximum": 1 }
-      },
-      "anyOf": [
-        { "required": ["rawText"] },
-        { "required": ["visualDescription"] }
-      ]
+      }
     },
     "warning": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["message", "pageNos", "reviewRequired"],
+      "required": ["message", "pageNos", "fieldName", "reviewRequired"],
       "properties": {
         "message": { "type": "string" },
         "pageNos": { "type": "array", "items": { "type": "integer" } },

@@ -151,6 +151,18 @@ const selectedGroupIndexLabel = computed(() => {
 const procedureUnderstanding = computed(() => selectedGroup.value?.procedureUnderstanding);
 const visionRunRecord = computed(() => selectedGroup.value?.visionRunRecord);
 const recognitionEvaluation = computed(() => selectedGroup.value?.recognitionEvaluation);
+const llmRunStatus = computed(() => {
+  if (selectedGroup.value?.status === 'AI_RUNNING') return 'RUNNING';
+  if (visionRunRecord.value?.errorType || selectedGroup.value?.status === 'ERROR') return 'ERROR';
+  if (procedureUnderstanding.value || selectedGroup.value?.status === 'AI_COMPLETED') return 'COMPLETED';
+  return 'NOT_STARTED';
+});
+const visionImagePagesText = computed(() => {
+  const pages = visionRunRecord.value?.imagePages ?? [];
+  return pages.map((page) => `PDF ${page.pageNo}${page.aipPageNo ? ` / ${page.aipPageNo}` : ''} / ${page.role} / ${page.imageMode}`).join(', ') || '-';
+});
+const supportSummaryPagesText = computed(() => pageRangeText(visionRunRecord.value?.supportSummaryPages ?? []));
+const llmBaseUrlHost = computed(() => hostText(visionRunRecord.value?.baseUrl));
 const recognitionLegRows = computed(() => {
   const evidence = procedureUnderstanding.value?.sourceEvidence ?? [];
   return (procedureUnderstanding.value?.procedures ?? []).flatMap((procedure) => (procedure.legs ?? []).map((leg) => {
@@ -441,7 +453,7 @@ async function runAiRecognition() {
     const result = await requestJson<{ status: string }>(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/run-vision-recognition`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'gpt-5.5' }),
+      body: JSON.stringify({}),
     });
     await refreshTask(false);
     message.value = result.status === 'AI_COMPLETED' ? 'AI 识别已完成' : `AI 识别未完成：${result.status}`;
@@ -686,6 +698,15 @@ function valueText(value: unknown) {
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
   if (typeof value === 'boolean') return value ? 'Yes' : 'No';
   return String(value);
+}
+
+function hostText(value: unknown) {
+  if (!value || typeof value !== 'string') return '-';
+  try {
+    return new URL(value).host;
+  } catch {
+    return value.replace(/^https?:\/\//, '').split('/')[0] || '-';
+  }
 }
 
 function altitudeText(value: unknown) {
@@ -981,7 +1002,7 @@ function toErrorMessage(value: unknown) {
 
             <div v-if="aiInputPackage" class="prompt-panel">
               <div class="manifest-grid">
-                <span>当前模型</span><strong>{{ aiInputPackage.model || 'gpt-5.5' }}</strong>
+                <span>当前模型</span><strong>{{ aiInputPackage.model || 'qwen3-vl-plus' }}</strong>
                 <span>当前模板</span><strong>{{ aiInputPackage.promptTemplateName || aiInputPackage.promptTemplate }} {{ aiInputPackage.promptVersion || '' }}</strong>
                 <span>输出 Schema</span><strong>{{ aiInputPackage.outputSchemaName }} {{ aiInputPackage.outputSchemaVersion || '' }}</strong>
                 <span>Prompt 状态</span><strong>{{ promptPreview ? '已渲染' : '待预览' }}</strong>
@@ -1103,28 +1124,49 @@ function toErrorMessage(value: unknown) {
             </div>
           </section>
 
-          <section v-if="procedureUnderstanding" class="ai-result">
+          <section v-if="procedureUnderstanding || visionRunRecord || selectedGroup.status === 'AI_RUNNING' || selectedGroup.status === 'ERROR'" class="ai-result">
             <div class="ai-package-head">
               <div>
                 <h4>AI Recognition Result</h4>
-                <p>ProcedureUnderstanding JSON from {{ visionRunRecord?.model || selectedGroup.aiRequest?.model || 'gpt-5.5' }}</p>
+                <p>ProcedureUnderstanding JSON from {{ visionRunRecord?.model || selectedGroup.aiRequest?.model || 'qwen3-vl-plus' }}</p>
               </div>
-              <button type="button" :disabled="evaluationBusy" @click="evaluateRecognition">Compare Golden Case</button>
+              <button type="button" :disabled="evaluationBusy || !procedureUnderstanding" @click="evaluateRecognition">Compare Golden Case</button>
             </div>
 
             <div class="manifest-grid">
+              <span>LLM Status</span><strong>{{ llmRunStatus }}</strong>
+              <span>Provider</span><strong>{{ visionRunRecord?.provider || '-' }}</strong>
               <span>Model</span><strong>{{ visionRunRecord?.model || selectedGroup.aiRequest?.model || '-' }}</strong>
+              <span>Base URL</span><strong>{{ llmBaseUrlHost }}</strong>
+              <span>Image Mode</span><strong>{{ visionRunRecord?.imageMode || '-' }}</strong>
+              <span>Structured Output</span><strong>{{ visionRunRecord?.structuredOutputModeUsed || '-' }}</strong>
               <span>Prompt</span><strong>{{ visionRunRecord?.promptTemplateId || selectedGroup.aiRequest?.promptTemplateId || '-' }} {{ visionRunRecord?.promptVersion || selectedGroup.aiRequest?.promptVersion || '' }}</strong>
               <span>Schema</span><strong>{{ visionRunRecord?.schemaName || selectedGroup.aiRequest?.schemaName || '-' }} {{ visionRunRecord?.schemaVersion || selectedGroup.aiRequest?.schemaVersion || '' }}</strong>
-              <span>Confidence</span><strong>{{ valueText(procedureUnderstanding.confidence) }}</strong>
-              <span>Review</span><strong>{{ valueText(procedureUnderstanding.reviewRequired) }}</strong>
+              <span>Schema Valid</span><strong>{{ valueText(visionRunRecord?.schemaValidation?.valid ?? visionRunRecord?.validationResult.schemaValid) }}</strong>
+              <span>Image Pages</span><strong>{{ visionImagePagesText }}</strong>
+              <span>Support Summary</span><strong>{{ supportSummaryPagesText }}</strong>
+              <span>Input Hash</span><strong>{{ visionRunRecord?.inputPackageHash || '-' }}</strong>
+              <span>Confidence</span><strong>{{ valueText(procedureUnderstanding?.confidence) }}</strong>
+              <span>Review</span><strong>{{ valueText(procedureUnderstanding?.reviewRequired) }}</strong>
               <span>Validation</span><strong>{{ visionRunRecord?.validationResult.schemaValid ? 'Schema valid' : 'Needs review' }}</strong>
             </div>
 
-            <div v-if="procedureUnderstanding.warnings?.length" class="summary-lines">
+            <div v-if="visionRunRecord?.errorType || visionRunRecord?.errorMessage" class="summary-lines">
+              <b>Error</b>
+              <div class="manifest-grid">
+                <span>Type</span><strong>{{ visionRunRecord?.errorType || '-' }}</strong>
+                <span>Message</span><strong>{{ visionRunRecord?.errorMessage || selectedGroup.aiResponse?.errors?.[0] || '-' }}</strong>
+              </div>
+              <details v-if="visionRunRecord?.rawError">
+                <summary>rawError</summary>
+                <pre>{{ visionRunRecord.rawError }}</pre>
+              </details>
+            </div>
+
+            <div v-if="procedureUnderstanding?.warnings?.length" class="summary-lines">
               <b>Warnings</b>
               <ul>
-                <li v-for="(warning, index) in procedureUnderstanding.warnings" :key="`ai-warning-${index}`">
+                <li v-for="(warning, index) in procedureUnderstanding?.warnings" :key="`ai-warning-${index}`">
                   {{ valueText(warning.message ?? warning) }}
                 </li>
               </ul>

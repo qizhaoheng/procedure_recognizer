@@ -1,10 +1,36 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
-import type { AiResponseRecord, ProcedureGroup } from '../types/procedure';
+import type { AiInputPage, AiResponseRecord, ProcedureGroup } from '../types/procedure';
 import { validateProcedureGeoJson, withBbox } from './geojsonValidator';
+import {
+  getLlmRuntimeConfig,
+  LlmApiError,
+  runVisionRecognition,
+  type StructuredOutputModeUsed,
+} from './llm/llmClient';
 import type { BuiltPrompt } from './prompt/promptTypes';
 import type { AiRequestPreview } from './promptBuilder';
+
+export { LlmApiError };
+
+export interface VisionImagePayload {
+  page: AiInputPage;
+  dataUrl: string;
+  imageUrl?: string;
+}
+
+export interface LlmVisionTestResult {
+  ok: boolean;
+  provider: string;
+  model: string;
+  baseUrl: string;
+  endpointType: string;
+  imageMode: string;
+  structuredOutputModeUsed?: StructuredOutputModeUsed;
+  latencyMs: number;
+  result: unknown;
+}
 
 export async function runProcedureRecognition(group: ProcedureGroup, preview: AiRequestPreview): Promise<AiResponseRecord> {
   const now = new Date().toISOString();
@@ -49,22 +75,95 @@ export async function runProcedureUnderstandingRecognition(
   model: string,
 ): Promise<AiResponseRecord> {
   const now = new Date().toISOString();
-  const apiKey = process.env.LLM_API_KEY;
+  const images = await buildVisionImagePayloads(builtPrompt.inputImages);
 
-  if (!apiKey) {
-    throw new Error('LLM_API_KEY is not configured. Vision recognition was not sent to GPT-5.5.');
+  const result = await runVisionRecognition({
+    model,
+    systemPrompt: builtPrompt.systemPrompt,
+    userPrompt: builtPrompt.userPrompt,
+    responseSchema: builtPrompt.responseSchema,
+    schemaName: builtPrompt.outputSchemaName,
+    images: images.map((image) => ({
+      pageNo: image.page.pageNo,
+      aipPageNo: image.page.aipPageNo,
+      role: image.page.role,
+      dataUrl: image.dataUrl,
+      imageUrl: image.imageUrl,
+    })),
+  });
+
+  if (!result.ok) {
+    throw new LlmApiError(
+      result.error?.type || 'LLM_ERROR',
+      result.error?.message || 'LLM vision recognition failed.',
+      typeof result.error?.raw === 'string' ? result.error.raw : JSON.stringify(result.error?.raw ?? result.rawResponse ?? result),
+    );
   }
 
-  try {
-    const rawText = await callStructuredVisionApi(builtPrompt, model, apiKey);
-    return {
-      rawText,
-      parsedJson: extractAnyJson(rawText),
-      createdAt: now,
-    };
-  } catch (error) {
-    throw new Error(error instanceof Error ? error.message : 'LLM call failed');
+  return {
+    rawText: result.rawText || JSON.stringify(result.rawResponse),
+    parsedJson: result.parsedJson,
+    provider: result.provider,
+    baseUrl: result.baseUrl,
+    endpointType: result.endpointType,
+    imageMode: result.imageMode,
+    structuredOutputModeUsed: result.structuredOutputModeUsed,
+    rawProviderResponse: result.rawResponse,
+    latencyMs: result.latencyMs,
+    createdAt: now,
+  };
+}
+
+export async function testVisionConnection(model = process.env.LLM_MODEL || getLlmRuntimeConfig().model): Promise<LlmVisionTestResult> {
+  const startedAt = Date.now();
+  const result = await runVisionRecognition({
+    model,
+    systemPrompt: 'You test whether a vision-capable LLM endpoint can read an attached image and return structured JSON.',
+    userPrompt: 'Inspect the attached tiny test image. Return ok=true when the API request, image input, and schema output are working. Set imageReadable=true if an image was received.',
+    responseSchema: {
+      type: 'object',
+      additionalProperties: false,
+      required: ['ok', 'imageReadable', 'message'],
+      properties: {
+        ok: { type: 'boolean' },
+        imageReadable: { type: 'boolean' },
+        message: { type: 'string' },
+      },
+    },
+    schemaName: 'llm_test_vision',
+    images: [
+      {
+        page: {
+          pageNo: 0,
+          aipPageNo: 'LLM test image',
+          role: 'CHART',
+          sendMode: 'IMAGE_ONLY',
+          reason: 'LLM connection test',
+          confidence: 1,
+          reviewRequired: false,
+        },
+        dataUrl: await testPngDataUrl(),
+      },
+    ],
+  });
+  if (!result.ok) {
+    throw new LlmApiError(
+      result.error?.type || 'LLM_ERROR',
+      result.error?.message || 'LLM vision test failed.',
+      typeof result.error?.raw === 'string' ? result.error.raw : JSON.stringify(result.error?.raw ?? result.rawResponse ?? result),
+    );
   }
+  return {
+    ok: true,
+    provider: result.provider,
+    model,
+    baseUrl: result.baseUrl,
+    endpointType: result.endpointType,
+    imageMode: result.imageMode,
+    structuredOutputModeUsed: result.structuredOutputModeUsed,
+    latencyMs: result.latencyMs ?? Date.now() - startedAt,
+    result: result.parsedJson,
+  };
 }
 
 async function callCompatibleChatApi(preview: AiRequestPreview, apiKey: string) {
@@ -82,57 +181,6 @@ async function callCompatibleChatApi(preview: AiRequestPreview, apiKey: string) 
       messages: [
         { role: 'system', content: 'Return only valid JSON. The JSON must be a GeoJSON FeatureCollection.' },
         { role: 'user', content: preview.prompt },
-      ],
-    }),
-  });
-
-  if (!response.ok) {
-    throw new Error(`LLM API ${response.status}: ${await response.text()}`);
-  }
-
-  const data = await response.json();
-  return data.choices?.[0]?.message?.content ?? JSON.stringify(data);
-}
-
-async function callStructuredVisionApi(builtPrompt: BuiltPrompt, model: string, apiKey: string) {
-  const baseUrl = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
-  const imageContent = await Promise.all(
-    builtPrompt.inputImages
-      .filter((image) => image.imageUrl)
-      .map(async (image) => ({
-        type: 'image_url',
-        image_url: {
-          url: await localImageAsDataUrl(image.imageUrl!),
-        },
-      })),
-  );
-
-  const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      model,
-      temperature: 0.1,
-      response_format: {
-        type: 'json_schema',
-        json_schema: {
-          name: schemaResponseName(builtPrompt.outputSchemaName),
-          strict: true,
-          schema: builtPrompt.responseSchema,
-        },
-      },
-      messages: [
-        { role: 'system', content: builtPrompt.systemPrompt },
-        {
-          role: 'user',
-          content: [
-            { type: 'text', text: builtPrompt.userPrompt },
-            ...imageContent,
-          ],
-        },
       ],
     }),
   });
@@ -214,12 +262,92 @@ function extractAnyJson(rawText: string): unknown {
   }
 }
 
-async function localImageAsDataUrl(imageUrl: string) {
+export async function buildVisionImagePayloads(inputImages: AiInputPage[]): Promise<VisionImagePayload[]> {
+  const images: VisionImagePayload[] = [];
+  for (const image of inputImages) {
+    if (!image.imageUrl) {
+      throw new LlmApiError('MISSING_IMAGE', `Input image page ${image.pageNo} has no imageUrl.`);
+    }
+    images.push({
+      page: image,
+      dataUrl: await localImageAsDataUrl(image.imageUrl),
+      imageUrl: publicImageUrl(image.imageUrl),
+    });
+  }
+  return images;
+}
+
+function publicImageUrl(imageUrl: string) {
+  if (!/^https?:\/\//i.test(imageUrl)) return undefined;
+  if (/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])/i.test(imageUrl)) return undefined;
+  return imageUrl;
+}
+
+export async function localImageAsDataUrl(imageUrl: string) {
   if (/^https?:\/\//i.test(imageUrl) || imageUrl.startsWith('data:')) return imageUrl;
   const relative = imageUrl.replace(/^\/uploads\//, '');
   const filePath = path.resolve(process.cwd(), 'server', 'data', relative);
+  if (path.extname(filePath).toLowerCase() === '.svg') {
+    return await renderPdfPageForTaskAsset(filePath) ?? svgFileAsPngDataUrl(filePath);
+  }
   const bytes = await fs.readFile(filePath);
   return `data:${mimeFor(filePath)};base64,${bytes.toString('base64')}`;
+}
+
+async function renderPdfPageForTaskAsset(filePath: string) {
+  const taskAsset = parseTaskPageAssetPath(filePath);
+  if (!taskAsset) return undefined;
+
+  try {
+    const taskPath = path.resolve(process.cwd(), 'server', 'data', 'procedure-tasks', taskAsset.taskId, 'task.json');
+    const task = JSON.parse(await fs.readFile(taskPath, 'utf-8')) as { filePath?: string };
+    if (!task.filePath) return undefined;
+    return await renderPdfPageAsPngDataUrl(task.filePath, taskAsset.pageNo);
+  } catch {
+    return undefined;
+  }
+}
+
+function parseTaskPageAssetPath(filePath: string) {
+  const normalized = filePath.replace(/\\/g, '/');
+  const match = normalized.match(/\/procedure-tasks\/([^/]+)\/pages\/page-(\d+)\.svg$/);
+  if (!match) return undefined;
+  return { taskId: match[1], pageNo: Number(match[2]) };
+}
+
+async function renderPdfPageAsPngDataUrl(pdfPath: string, pageNo: number) {
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
+  const { createCanvas } = await import('@napi-rs/canvas');
+  const data = new Uint8Array(await fs.readFile(pdfPath));
+  const loadingTask = pdfjs.getDocument({
+    data,
+    disableFontFace: true,
+    useSystemFonts: true,
+  });
+  try {
+    const pdf = await loadingTask.promise;
+    const page = await pdf.getPage(pageNo);
+    const scale = Number(process.env.LLM_IMAGE_RENDER_SCALE || 2.5);
+    const viewport = page.getViewport({ scale });
+    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const context = canvas.getContext('2d');
+    context.fillStyle = '#fff';
+    context.fillRect(0, 0, canvas.width, canvas.height);
+    await page.render({ canvasContext: context, viewport }).promise;
+    return `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
+async function svgFileAsPngDataUrl(filePath: string) {
+  const { createCanvas, loadImage } = await import('@napi-rs/canvas');
+  const svg = (await fs.readFile(filePath, 'utf-8')).replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, '');
+  const image = await loadImage(Buffer.from(svg));
+  const canvas = createCanvas(image.width, image.height);
+  const context = canvas.getContext('2d');
+  context.drawImage(image, 0, 0);
+  return `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
 }
 
 function mimeFor(filePath: string) {
@@ -229,6 +357,16 @@ function mimeFor(filePath: string) {
   return 'image/png';
 }
 
-function schemaResponseName(schemaName: string) {
-  return schemaName.replace(/\W+/g, '_').replace(/^_+|_+$/g, '') || 'procedure_understanding';
+async function testPngDataUrl() {
+  const { createCanvas } = await import('@napi-rs/canvas');
+  const canvas = createCanvas(160, 80);
+  const context = canvas.getContext('2d');
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  context.fillStyle = '#0f172a';
+  context.font = '24px Arial';
+  context.fillText('LLM VISION', 16, 44);
+  context.fillStyle = '#2563eb';
+  context.fillRect(16, 54, 128, 8);
+  return `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
 }
