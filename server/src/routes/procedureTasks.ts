@@ -1,19 +1,26 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express from 'express';
 import multer from 'multer';
 import { PDFDocument } from 'pdf-lib';
 import { createTask, getUploadDir, listTasks, readTask, saveTask, updateTask } from '../storage/taskStore';
 import { extractCandidates } from '../services/candidateExtractor';
 import { validateProcedureGeoJson } from '../services/geojsonValidator';
-import { runProcedureRecognition } from '../services/llmService';
+import { runProcedureRecognition, runProcedureUnderstandingRecognition } from '../services/llmService';
 import { parsePdfTask } from '../services/pdfService';
+import { buildAiInputPackage } from '../services/aiInputPackageBuilder';
+import { evaluateProcedureUnderstanding } from '../services/evaluation/procedureUnderstandingEvaluator';
+import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
+import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
-import type { ProcedureGroup } from '../types/procedure';
+import type { EvaluationResult, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
 
 const router = express.Router();
+const DEFAULT_VISION_MODEL = 'gpt-5.5';
+const routeDir = path.dirname(fileURLToPath(import.meta.url));
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (_req, _file, callback) => {
@@ -214,6 +221,37 @@ router.get('/:taskId/groups/:groupId/ai-request-preview', async (req, res, next)
   }
 });
 
+router.get('/:taskId/packages/:packageId/ai-input-package', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    const preview = buildAiRequestPreview(group, task.pages, String(req.query.model || process.env.LLM_MODEL || 'mock-procedure-recognizer'));
+    res.json(preview.aiInputPackage);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/:taskId/packages/:packageId/prompt-preview', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    const packageId = group.packageId || group.groupId;
+    const model = String(req.query.model || process.env.LLM_MODEL || DEFAULT_VISION_MODEL);
+    const aiInputPackage = buildAiInputPackage(group, task.pages, model);
+    const builtPrompt = await buildProcedurePrompt({
+      taskId: task.taskId,
+      packageId,
+      procedurePackage: group,
+      aiInputPackage,
+      templateOverrideId: req.query.templateId ? String(req.query.templateId) : undefined,
+    });
+    res.json(builtPrompt);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
   try {
     await updateTask(req.params.taskId, (draft) => {
@@ -230,7 +268,10 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
       model,
       prompt: preview.prompt,
       schemaName: 'ProcedureGeoJsonFeatureCollection',
-      inputPageNos: [...preview.inputPages, ...preview.supportPages].map((page) => page.pageNo),
+      inputPageNos: Array.from(new Set([
+        ...preview.aiInputPackage.includedImages.map((page) => page.pageNo),
+        ...preview.aiInputPackage.includedSummaries.flatMap((item) => item.pageNos),
+      ])).sort((a, b) => a - b),
       createdAt: new Date().toISOString(),
     };
     group.aiResponse = await runProcedureRecognition(group, preview);
@@ -245,6 +286,102 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
       geojsonResultId: `geojson_${group.groupId}`,
       geojson: group.geojson,
     });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, res, next) => {
+  try {
+    const startedAt = new Date().toISOString();
+    await updateTask(req.params.taskId, (draft) => {
+      const group = findGroup(draft.groups, req.params.packageId);
+      group.status = 'AI_RUNNING';
+      draft.status = 'AI_RUNNING';
+    });
+
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    const packageId = group.packageId || group.groupId;
+    const model = String(req.body?.model || process.env.LLM_MODEL || DEFAULT_VISION_MODEL);
+    const aiInputPackage = buildAiInputPackage(group, task.pages, model);
+    const builtPrompt = await buildProcedurePrompt({
+      taskId: task.taskId,
+      packageId,
+      procedurePackage: group,
+      aiInputPackage,
+      templateOverrideId: req.body?.templateId,
+    });
+    const promptRun = await savePromptRunRecord(task.taskId, packageId, model, builtPrompt, aiInputPackage);
+
+    group.aiRequest = {
+      model,
+      prompt: builtPrompt.userPrompt,
+      schemaName: builtPrompt.outputSchemaName,
+      schemaVersion: builtPrompt.outputSchemaVersion,
+      promptRunId: promptRun.runId,
+      promptTemplateId: builtPrompt.promptTemplateId,
+      promptVersion: builtPrompt.promptVersion,
+      inputPageNos: Array.from(new Set([
+        ...builtPrompt.inputImages.map((page) => page.pageNo),
+        ...builtPrompt.supportSummaries.flatMap((item) => item.pageNos),
+      ])).sort((a, b) => a - b),
+      createdAt: new Date().toISOString(),
+    };
+    group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model);
+    const completedAt = new Date().toISOString();
+    const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson);
+    group.procedureUnderstanding = group.aiResponse.parsedJson as ProcedureUnderstandingResult;
+    group.visionRunRecord = {
+      runId: `vision_run_${Date.now()}`,
+      model,
+      promptTemplateId: builtPrompt.promptTemplateId,
+      promptVersion: builtPrompt.promptVersion,
+      schemaName: builtPrompt.outputSchemaName,
+      schemaVersion: builtPrompt.outputSchemaVersion,
+      inputPackageHash: promptRun.inputPackageHash,
+      imagePages: builtPrompt.inputImages.map((page) => page.pageNo),
+      supportSummaryPages: Array.from(new Set(builtPrompt.supportSummaries.flatMap((item) => item.pageNos))).sort((a, b) => a - b),
+      startedAt,
+      completedAt,
+      rawResponse: group.aiResponse.rawText,
+      parsedJson: group.aiResponse.parsedJson,
+      validationResult,
+    };
+    group.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
+    task.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
+    await saveTask(task);
+
+    res.json({
+      packageId,
+      status: group.status,
+      promptRunId: promptRun.runId,
+      visionRunId: group.visionRunRecord.runId,
+      promptTemplateId: builtPrompt.promptTemplateId,
+      promptVersion: builtPrompt.promptVersion,
+      outputSchemaName: builtPrompt.outputSchemaName,
+      outputSchemaVersion: builtPrompt.outputSchemaVersion,
+      result: group.procedureUnderstanding,
+      visionRunRecord: group.visionRunRecord,
+      rawText: group.aiResponse.rawText,
+    });
+  } catch (error) {
+    await markRecognitionError(req.params.taskId, req.params.packageId, error);
+    next(error);
+  }
+});
+
+router.post('/:taskId/packages/:packageId/evaluate-recognition', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    if (!group.procedureUnderstanding) return res.status(400).json({ error: 'No ProcedureUnderstanding result to evaluate.' });
+
+    const goldenCase = await loadGoldenCase('wmkj-rwy16-rnav-star.expected.json');
+    const evaluation = evaluateProcedureUnderstanding(group.procedureUnderstanding, goldenCase);
+    group.recognitionEvaluation = evaluation;
+    await saveTask(task);
+    res.json(evaluation);
   } catch (error) {
     next(error);
   }
@@ -275,6 +412,44 @@ function findGroup(groups: ProcedureGroup[], groupId: string) {
   const group = groups.find((item) => item.groupId === groupId || item.packageId === groupId);
   if (!group) throw new Error('分组不存在。');
   return group;
+}
+
+async function loadGoldenCase(fileName: string) {
+  const filePath = path.resolve(routeDir, '..', 'services', 'evaluation', 'golden-cases', fileName);
+  return JSON.parse(await fs.readFile(filePath, 'utf-8'));
+}
+
+function validateProcedureUnderstandingResult(value: unknown) {
+  const errors: string[] = [];
+  if (!value || typeof value !== 'object') {
+    return { schemaValid: false, errors: ['Response is not a JSON object.'] };
+  }
+  const record = value as Record<string, unknown>;
+  for (const key of ['procedures', 'fixes', 'sourceEvidence', 'warnings', 'confidence', 'reviewRequired']) {
+    if (!(key in record)) errors.push(`Missing required field: ${key}`);
+  }
+  for (const key of ['procedures', 'fixes', 'sourceEvidence', 'warnings']) {
+    if (key in record && !Array.isArray(record[key])) errors.push(`Field must be an array: ${key}`);
+  }
+  return { schemaValid: errors.length === 0, errors };
+}
+
+async function markRecognitionError(taskId: string, packageId: string, error: unknown) {
+  try {
+    await updateTask(taskId, (draft) => {
+      const group = findGroup(draft.groups, packageId);
+      group.status = 'ERROR';
+      group.aiResponse = {
+        rawText: error instanceof Error ? error.message : 'Vision recognition failed',
+        errors: [error instanceof Error ? error.message : 'Vision recognition failed'],
+        createdAt: new Date().toISOString(),
+      };
+      draft.status = 'ERROR';
+      draft.error = error instanceof Error ? error.message : 'Vision recognition failed';
+    });
+  } catch {
+    // The original API error is more useful than a secondary persistence failure.
+  }
 }
 
 export default router;

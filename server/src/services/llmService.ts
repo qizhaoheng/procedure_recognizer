@@ -3,6 +3,7 @@ import path from 'node:path';
 import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
 import type { AiResponseRecord, ProcedureGroup } from '../types/procedure';
 import { validateProcedureGeoJson, withBbox } from './geojsonValidator';
+import type { BuiltPrompt } from './prompt/promptTypes';
 import type { AiRequestPreview } from './promptBuilder';
 
 export async function runProcedureRecognition(group: ProcedureGroup, preview: AiRequestPreview): Promise<AiResponseRecord> {
@@ -43,6 +44,29 @@ export async function runProcedureRecognition(group: ProcedureGroup, preview: Ai
   }
 }
 
+export async function runProcedureUnderstandingRecognition(
+  builtPrompt: BuiltPrompt,
+  model: string,
+): Promise<AiResponseRecord> {
+  const now = new Date().toISOString();
+  const apiKey = process.env.LLM_API_KEY;
+
+  if (!apiKey) {
+    throw new Error('LLM_API_KEY is not configured. Vision recognition was not sent to GPT-5.5.');
+  }
+
+  try {
+    const rawText = await callStructuredVisionApi(builtPrompt, model, apiKey);
+    return {
+      rawText,
+      parsedJson: extractAnyJson(rawText),
+      createdAt: now,
+    };
+  } catch (error) {
+    throw new Error(error instanceof Error ? error.message : 'LLM call failed');
+  }
+}
+
 async function callCompatibleChatApi(preview: AiRequestPreview, apiKey: string) {
   const baseUrl = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
   const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
@@ -58,6 +82,57 @@ async function callCompatibleChatApi(preview: AiRequestPreview, apiKey: string) 
       messages: [
         { role: 'system', content: 'Return only valid JSON. The JSON must be a GeoJSON FeatureCollection.' },
         { role: 'user', content: preview.prompt },
+      ],
+    }),
+  });
+
+  if (!response.ok) {
+    throw new Error(`LLM API ${response.status}: ${await response.text()}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content ?? JSON.stringify(data);
+}
+
+async function callStructuredVisionApi(builtPrompt: BuiltPrompt, model: string, apiKey: string) {
+  const baseUrl = process.env.LLM_BASE_URL || 'https://api.openai.com/v1';
+  const imageContent = await Promise.all(
+    builtPrompt.inputImages
+      .filter((image) => image.imageUrl)
+      .map(async (image) => ({
+        type: 'image_url',
+        image_url: {
+          url: await localImageAsDataUrl(image.imageUrl!),
+        },
+      })),
+  );
+
+  const response = await fetch(`${baseUrl.replace(/\/$/, '')}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model,
+      temperature: 0.1,
+      response_format: {
+        type: 'json_schema',
+        json_schema: {
+          name: schemaResponseName(builtPrompt.outputSchemaName),
+          strict: true,
+          schema: builtPrompt.responseSchema,
+        },
+      },
+      messages: [
+        { role: 'system', content: builtPrompt.systemPrompt },
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: builtPrompt.userPrompt },
+            ...imageContent,
+          ],
+        },
       ],
     }),
   });
@@ -128,4 +203,32 @@ function extractJson(rawText: string): FeatureCollection<Geometry | null, GeoJso
     const match = rawText.match(/\{[\s\S]*\}/);
     return match ? JSON.parse(match[0]) : undefined;
   }
+}
+
+function extractAnyJson(rawText: string): unknown {
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    return match ? JSON.parse(match[0]) : undefined;
+  }
+}
+
+async function localImageAsDataUrl(imageUrl: string) {
+  if (/^https?:\/\//i.test(imageUrl) || imageUrl.startsWith('data:')) return imageUrl;
+  const relative = imageUrl.replace(/^\/uploads\//, '');
+  const filePath = path.resolve(process.cwd(), 'server', 'data', relative);
+  const bytes = await fs.readFile(filePath);
+  return `data:${mimeFor(filePath)};base64,${bytes.toString('base64')}`;
+}
+
+function mimeFor(filePath: string) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.jpg' || ext === '.jpeg') return 'image/jpeg';
+  if (ext === '.webp') return 'image/webp';
+  return 'image/png';
+}
+
+function schemaResponseName(schemaName: string) {
+  return schemaName.replace(/\W+/g, '_').replace(/^_+|_+$/g, '') || 'procedure_understanding';
 }

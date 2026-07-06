@@ -1,4 +1,5 @@
-import type { CandidateExtractionResult, PdfPageAsset, ProcedureGroup } from '../types/procedure';
+import type { AiInputPackage, CandidateExtractionResult, PdfPageAsset, ProcedureGroup } from '../types/procedure';
+import { buildAiInputPackage, selectPromptTemplate } from './aiInputPackageBuilder';
 
 export interface AiRequestPreview {
   model: string;
@@ -7,6 +8,7 @@ export interface AiRequestPreview {
   inputPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>;
   supportPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>;
   candidateSummary: Record<string, unknown>;
+  aiInputPackage: AiInputPackage;
 }
 
 export function buildAiRequestPreview(
@@ -14,14 +16,6 @@ export function buildAiRequestPreview(
   pages: PdfPageAsset[],
   model = process.env.LLM_MODEL || 'mock-procedure-recognizer',
 ): AiRequestPreview {
-  const inputPageNos = corePages(group);
-  const supportPageNos = group.supportingPages ?? [];
-  const inputPages = pages
-    .filter((page) => inputPageNos.includes(page.pageNo))
-    .map(({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }) => ({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }));
-  const supportPages = pages
-    .filter((page) => supportPageNos.includes(page.pageNo))
-    .map(({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }) => ({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }));
   const candidates: CandidateExtractionResult = {
     groupId: group.groupId,
     textCandidates: group.textCandidates ?? [],
@@ -29,7 +23,20 @@ export function buildAiRequestPreview(
     waypointCandidates: group.waypointCandidates ?? [],
     tableCandidates: group.tableCandidates ?? [],
   };
-  const prompt = buildPrompt(group, inputPages, supportPages, candidates);
+  const aiInputPackage = buildAiInputPackage(group, pages, model);
+  const inputPages = pages
+    .filter((page) => aiInputPackage.corePages.some((inputPage) => inputPage.pageNo === page.pageNo))
+    .map(({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }) => ({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }));
+  const supportImagePageNos = new Set(
+    aiInputPackage.includedImages
+      .filter((page) => !aiInputPackage.corePages.some((corePage) => corePage.pageNo === page.pageNo))
+      .map((page) => page.pageNo),
+  );
+  const supportPages = pages
+    .filter((page) => supportImagePageNos.has(page.pageNo))
+    .map(({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }) => ({ pageNo, aipPageNo, chartRole, imageUrl, thumbnailUrl }));
+  const prompt = buildPrompt(group, aiInputPackage, candidates);
+  aiInputPackage.promptPreview = prompt;
 
   return {
     model,
@@ -43,17 +50,17 @@ export function buildAiRequestPreview(
       geometryCandidates: candidates.geometryCandidates.length,
       tableCandidates: candidates.tableCandidates.length,
     },
+    aiInputPackage,
   };
 }
 
 export function buildPrompt(
   group: ProcedureGroup,
-  inputPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>,
-  supportPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>,
+  aiInputPackage: AiInputPackage,
   candidates: CandidateExtractionResult,
 ) {
-  const templateName = selectTemplate(group);
-  const corePageNos = new Set(inputPages.map((page) => page.pageNo));
+  const templateName = selectPromptTemplate(group);
+  const corePageNos = new Set(aiInputPackage.corePages.map((page) => page.pageNo));
   const promptInput = {
     packageMetadata: {
       packageId: group.packageId || group.groupId,
@@ -67,11 +74,14 @@ export function buildPrompt(
       relatedChartNos: group.relatedChartNos,
       source: group.source,
     },
-    corePages: inputPages,
+    corePages: aiInputPackage.corePages,
     candidateTextsFromCorePages: candidates.textCandidates.filter((candidate) => corePageNos.has(candidate.pageNo)).slice(0, 160),
     candidateGeometryFromChartPages: candidates.geometryCandidates.filter((candidate) => corePageNos.has(candidate.pageNo)).slice(0, 80),
-    supportingInfoSummary: group.supportingInfoSummary,
-    supportingPages: supportPages,
+    supportingInfoPackage: aiInputPackage.supportingInfo,
+    supportingInfoSummary: aiInputPackage.supportSummary,
+    includedImages: aiInputPackage.includedImages,
+    includedSummaries: aiInputPackage.includedSummaries.map(({ supportType, pageNos, sendMode }) => ({ supportType, pageNos, sendMode })),
+    excludedSupport: aiInputPackage.excludedSupport.map(({ supportType, pageNos, reason }) => ({ supportType, pageNos, reason })),
     waypointCandidates: candidates.waypointCandidates.slice(0, 80),
     tableCandidates: candidates.tableCandidates.slice(0, 80),
   };
@@ -94,18 +104,6 @@ export function buildPrompt(
   ].join('\n');
 }
 
-function selectTemplate(group: ProcedureGroup) {
-  if (group.procedureCategory === 'ARRIVAL' && group.navigationType === 'RNAV') return 'RNAV_STAR_PROMPT';
-  if (group.procedureCategory === 'ARRIVAL' && group.navigationType === 'DME_ARC') return 'CONVENTIONAL_STAR_PROMPT';
-  if (group.procedureCategory === 'DEPARTURE' && group.navigationType === 'RNAV') return 'RNAV_SID_PROMPT';
-  if (group.procedureCategory === 'APPROACH' && group.navigationType === 'ILS_LOC') return 'ILS_LOC_APPROACH_PROMPT';
-  if (group.procedureCategory === 'APPROACH' && group.navigationType === 'ILS') return 'ILS_APPROACH_PROMPT';
-  if (group.procedureCategory === 'APPROACH' && group.navigationType === 'LOC') return 'LOC_APPROACH_PROMPT';
-  if (group.procedureCategory === 'APPROACH' && group.navigationType === 'VOR') return 'VOR_APPROACH_PROMPT';
-  if (group.procedureCategory === 'APPROACH' && group.navigationType === 'RNP') return 'RNP_APPROACH_PROMPT';
-  return 'CONVENTIONAL_STAR_PROMPT';
-}
-
 function geoJsonSchema() {
   return {
     type: 'FeatureCollection',
@@ -125,14 +123,4 @@ function geoJsonSchema() {
       },
     ],
   };
-}
-
-function corePages(group: ProcedureGroup) {
-  return [
-    ...group.chartPages,
-    ...group.tabularPages,
-    ...group.coordinatePages,
-    ...group.minimaPages,
-    ...(group.textSupplementPages ?? []),
-  ];
 }

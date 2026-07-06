@@ -22,6 +22,7 @@ const SUPPORT_KEY_BY_TYPE: Record<SupportType, keyof SupportingInfoRefs | undefi
   NAVAID: 'navaid',
   FLIGHT_PROCEDURES: 'flightProcedures',
   CHART_INDEX: 'chartIndex',
+  OPTIONAL_CONTEXT_CHARTS: undefined,
   AIRSPACE: undefined,
   OBSTACLE: undefined,
   OTHER: undefined,
@@ -58,6 +59,7 @@ export function detectSupportType(page: PdfPageAsset): SupportType | undefined {
   }
   if (/AD\s*2\.?19\b|RADIO NAVIGATION AND LANDING AIDS|NAVIGATION AND LANDING AIDS/.test(text)) return 'NAVAID';
   if (/AD\s*2\.?22\b|FLIGHT PROCEDURES/.test(text)) return 'FLIGHT_PROCEDURES';
+  if (/TMA|CTR|HOLDING AREAS|SURVEILLANCE MINIMUM ALTITUDE|MINIMUM ALTITUDE CHART/.test(text)) return 'OPTIONAL_CONTEXT_CHARTS';
   if (/OBSTACLE/.test(text)) return 'OBSTACLE';
   if (/AIRSPACE/.test(text)) return 'AIRSPACE';
   return undefined;
@@ -225,6 +227,7 @@ function labelForSupportType(supportType: SupportType) {
     NAVAID: '导航台',
     FLIGHT_PROCEDURES: '飞行程序说明',
     CHART_INDEX: '图件目录',
+    OPTIONAL_CONTEXT_CHARTS: '可选背景图',
     AIRSPACE: '空域',
     OBSTACLE: '障碍物',
     OTHER: '其他',

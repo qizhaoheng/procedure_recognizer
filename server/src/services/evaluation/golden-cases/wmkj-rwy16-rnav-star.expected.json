@@ -1,0 +1,47 @@
+{
+  "caseId": "wmkj-rwy16-rnav-star",
+  "packageName": "RWY16 RNAV STAR EMTUV 1E OMKOM 1E PIMOK 1E ADLOV 1E",
+  "packageType": "STAR",
+  "navigationType": "RNAV",
+  "runway": "16",
+  "expectedCorePages": [51, 52, 53],
+  "expectedSupportSummaryPages": [1, 10, 12, 16, 17],
+  "excludedPages": [15, 55, 56],
+  "procedures": [
+    {
+      "procedureName": "EMTUV 1E",
+      "legs": [
+        { "sequence": 10, "pathTerminator": "IF", "fixIdentifier": "EMTUV", "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 6000 }, "navigationSpec": "RNAV1" },
+        { "sequence": 20, "pathTerminator": "TF", "fixIdentifier": "UDOSU", "courseDegMag": 72, "distanceNm": 13.4, "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 3500 }, "navigationSpec": "RNAV1" },
+        { "sequence": 30, "pathTerminator": "TF", "fixIdentifier": "OSRUP", "courseDegMag": 70, "distanceNm": 6.0, "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 2000 }, "navigationSpec": "RNAV1" }
+      ]
+    },
+    {
+      "procedureName": "ADLOV 1E",
+      "legs": [
+        { "sequence": 10, "pathTerminator": "IF", "fixIdentifier": "ADLOV", "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 6000 }, "navigationSpec": "RNAV1" },
+        { "sequence": 20, "pathTerminator": "TF", "fixIdentifier": "GOVNU", "courseDegMag": 198, "distanceNm": 14.5, "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 3500 }, "navigationSpec": "RNAV1" },
+        { "sequence": 30, "pathTerminator": "TF", "fixIdentifier": "OSRUP", "courseDegMag": 250, "distanceNm": 6.0, "turnDirection": "R", "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 2000 }, "navigationSpec": "RNAV1" }
+      ]
+    },
+    {
+      "procedureName": "OMKOM 1E",
+      "legs": [
+        { "sequence": 10, "pathTerminator": "IF", "fixIdentifier": "OMKOM", "navigationSpec": "RNAV1" },
+        { "sequence": 20, "pathTerminator": "TF", "fixIdentifier": "KJ705", "courseDegMag": 318, "distanceNm": 13.8, "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 5000 }, "navigationSpec": "RNAV1" },
+        { "sequence": 30, "pathTerminator": "TF", "fixIdentifier": "GOVNU", "courseDegMag": 318, "distanceNm": 11.5, "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 3500 }, "navigationSpec": "RNAV1" },
+        { "sequence": 40, "pathTerminator": "TF", "fixIdentifier": "OSRUP", "courseDegMag": 250, "distanceNm": 6.0, "turnDirection": "L", "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 2000 }, "navigationSpec": "RNAV1" }
+      ]
+    },
+    {
+      "procedureName": "PIMOK 1E",
+      "legs": [
+        { "sequence": 10, "pathTerminator": "IF", "fixIdentifier": "PIMOK", "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 6000 }, "navigationSpec": "RNAV1" },
+        { "sequence": 20, "pathTerminator": "TF", "fixIdentifier": "KJ704", "courseDegMag": 30, "distanceNm": 11.3, "altitudeConstraint": { "type": "AT", "altitudeFt": 5000 }, "navigationSpec": "RNAV1" },
+        { "sequence": 30, "pathTerminator": "TF", "fixIdentifier": "UDOSU", "courseDegMag": 30, "distanceNm": 10.7, "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 3500 }, "navigationSpec": "RNAV1" },
+        { "sequence": 40, "pathTerminator": "TF", "fixIdentifier": "OSRUP", "courseDegMag": 70, "distanceNm": 6.0, "turnDirection": "R", "altitudeConstraint": { "type": "AT_OR_ABOVE", "altitudeFt": 2000 }, "navigationSpec": "RNAV1" }
+      ]
+    }
+  ],
+  "waypoints": ["ADLOV", "EMTUV", "GOVNU", "OMKOM", "OSRUP", "PIMOK", "UDOSU", "KJ704", "KJ705"]
+}

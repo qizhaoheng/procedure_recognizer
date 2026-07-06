@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import type { ChartRole, PdfPageAsset } from '../../types/procedure';
+import { buildAiInputPackage } from '../aiInputPackageBuilder';
 import { buildGroupingDebug, groupProcedurePackages } from '../procedurePackageGrouper';
 
 interface FixtureProcedure {
@@ -165,6 +166,22 @@ describe('WMKJ procedure package grouping', () => {
       navaid: [13],
       chartIndex: [16, 17],
     });
+  });
+
+  it('builds an inspectable AI input package for RWY16 RNAV STAR', () => {
+    const inputPackage = buildAiInputPackage(getPackage('AD 2-WMKJ-7-1'), pages, 'mock-model');
+
+    assert.deepEqual(inputPackage.corePages.map((page) => page.pageNo), [51, 52, 53]);
+    assert.deepEqual(inputPackage.corePages.map((page) => page.role), ['CHART', 'TABULAR', 'COORDINATES']);
+    assert.deepEqual(inputPackage.includedSummaries.map((item) => item.supportType), [
+      'AIRPORT_METADATA',
+      'RUNWAY_DATA',
+      'AIRSPACE_COMMUNICATION',
+      'CHART_INDEX',
+    ]);
+    assert.ok(inputPackage.supportingInfo.find((item) => item.supportType === 'RUNWAY_OPERATIONAL_DATA' && item.sendMode === 'NOT_SENT'));
+    assert.ok(inputPackage.excludedSupport.find((item) => item.supportType === 'FLIGHT_PROCEDURES'));
+    assert.ok(JSON.stringify(inputPackage.supportSummary).includes('airportMetadata'));
   });
 
   function getPackage(chartNo: string) {

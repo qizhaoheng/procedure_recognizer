@@ -7,7 +7,10 @@ export type ProcedureCategory = 'ARRIVAL' | 'DEPARTURE' | 'APPROACH' | 'AERODROM
 export type NavigationType = 'RNAV' | 'RNP' | 'RNP_AR' | 'ILS' | 'ILS_LOC' | 'LOC' | 'VOR' | 'NDB' | 'DME_ARC' | 'RADAR' | 'CONVENTIONAL' | 'UNKNOWN';
 export type PackageType = 'STAR' | 'SID' | 'APPROACH' | 'AERODROME' | 'AIRSPACE' | 'OTHER';
 export type PackageSource = 'AD_2_24_CHART_INDEX' | 'PAGE_HEADER_RULE' | 'TITLE_MATCH_RULE' | 'MANUAL';
-export type SupportType = 'AIRPORT_METADATA' | 'RUNWAY_DATA' | 'RUNWAY_OPERATIONAL_DATA' | 'AIRSPACE_COMMUNICATION' | 'NAVAID' | 'FLIGHT_PROCEDURES' | 'CHART_INDEX' | 'AIRSPACE' | 'OBSTACLE' | 'OTHER';
+export type SupportType = 'AIRPORT_METADATA' | 'RUNWAY_DATA' | 'RUNWAY_OPERATIONAL_DATA' | 'AIRSPACE_COMMUNICATION' | 'NAVAID' | 'FLIGHT_PROCEDURES' | 'CHART_INDEX' | 'OPTIONAL_CONTEXT_CHARTS' | 'AIRSPACE' | 'OBSTACLE' | 'OTHER';
+export type SendPolicy = 'REQUIRED' | 'OPTIONAL' | 'EXCLUDED';
+export type SendMode = 'SUMMARY_ONLY' | 'IMAGE_ONLY' | 'SUMMARY_AND_IMAGE' | 'NOT_SENT';
+export type AiInputPageRole = 'CHART' | 'TABULAR' | 'COORDINATES' | 'MINIMA';
 
 export interface SupportingInfoRefs {
   airportMetadata?: number[];
@@ -94,6 +97,8 @@ export interface ProcedureGroup {
   supportingInfoRefs?: SupportingInfoRefs;
   supportingInfoDetails?: SupportPageRef[];
   supportingInfoSummary?: SupportingInfoSummary;
+  aiInputOverrides?: Record<string, AiInputOverride>;
+  manualOverride?: boolean;
   groupingReason?: string[];
   status: GroupStatus;
   textCandidates?: TextCandidate[];
@@ -102,6 +107,9 @@ export interface ProcedureGroup {
   tableCandidates?: TableCandidate[];
   aiRequest?: AiRequestRecord;
   aiResponse?: AiResponseRecord;
+  procedureUnderstanding?: ProcedureUnderstandingResult;
+  visionRunRecord?: VisionRunRecord;
+  recognitionEvaluation?: EvaluationResult;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   reviewRequired?: boolean;
 }
@@ -113,6 +121,58 @@ export interface SupportPageRef {
   label?: string;
   extracted?: Record<string, unknown>;
   summary?: string;
+}
+
+export interface AiInputOverride {
+  sendPolicy?: SendPolicy;
+  sendMode?: SendMode;
+}
+
+export interface SupportingInfoRef {
+  id: string;
+  supportType: SupportType;
+  pageNos: number[];
+  aipPageNos: string[];
+  title: string;
+  aipSection?: string;
+  sendPolicy: SendPolicy;
+  sendMode: SendMode;
+  reason: string;
+  summary: Record<string, unknown>;
+  confidence: number;
+  reviewRequired: boolean;
+  manualOverride?: boolean;
+}
+
+export interface AiInputPage {
+  pageNo: number;
+  aipPageNo?: string;
+  role: AiInputPageRole;
+  imageUrl?: string;
+  thumbnailUrl?: string;
+  sendMode: Extract<SendMode, 'IMAGE_ONLY' | 'SUMMARY_AND_IMAGE'>;
+  reason: string;
+  confidence: number;
+  reviewRequired: boolean;
+}
+
+export interface AiInputPackage {
+  packageId: string;
+  packageName: string;
+  model: string;
+  promptTemplate: string;
+  promptTemplateName?: string;
+  promptVersion?: string;
+  outputSchemaName: string;
+  outputSchemaVersion?: string;
+  corePages: AiInputPage[];
+  supportingInfo: SupportingInfoRef[];
+  supportSummary: Record<string, unknown>;
+  includedImages: AiInputPage[];
+  includedSummaries: SupportingInfoRef[];
+  excludedSupport: SupportingInfoRef[];
+  ocrTextLayerIncluded: boolean;
+  promptPreview?: string;
 }
 
 export interface TextCandidate {
@@ -153,6 +213,10 @@ export interface AiRequestRecord {
   model: string;
   prompt: string;
   schemaName: string;
+  schemaVersion?: string;
+  promptRunId?: string;
+  promptTemplateId?: string;
+  promptVersion?: string;
   inputPageNos: number[];
   createdAt: string;
 }
@@ -165,6 +229,90 @@ export interface AiResponseRecord {
   createdAt: string;
 }
 
+export interface VisionRunRecord {
+  runId: string;
+  model: string;
+  promptTemplateId: string;
+  promptVersion: string;
+  schemaName: string;
+  schemaVersion: string;
+  inputPackageHash: string;
+  imagePages: number[];
+  supportSummaryPages: number[];
+  startedAt: string;
+  completedAt: string;
+  rawResponse: string;
+  parsedJson?: unknown;
+  validationResult: {
+    schemaValid: boolean;
+    errors: string[];
+  };
+}
+
+export interface ProcedureUnderstandingResult {
+  airportIcao?: string | null;
+  airportName?: string | null;
+  packageType?: string | null;
+  procedureCategory?: string | null;
+  navigationType?: string | null;
+  runway?: string | null;
+  procedures?: ProcedureUnderstandingProcedure[];
+  fixes?: Array<Record<string, unknown>>;
+  navaids?: Array<Record<string, unknown>>;
+  runways?: Array<Record<string, unknown>>;
+  communications?: Array<Record<string, unknown>>;
+  holdings?: Array<Record<string, unknown>>;
+  msa?: Array<Record<string, unknown>>;
+  sourceEvidence?: Array<Record<string, unknown>>;
+  warnings?: Array<Record<string, unknown>>;
+  confidence?: number;
+  reviewRequired?: boolean;
+}
+
+export interface ProcedureUnderstandingProcedure {
+  procedureName?: string | null;
+  runway?: string | null;
+  navigationSpec?: string | null;
+  legs?: Array<Record<string, unknown>>;
+  sourceEvidenceIds?: string[];
+  confidence?: number;
+  reviewRequired?: boolean;
+}
+
+export interface EvaluationResult {
+  totalScore: number;
+  procedureNameAccuracy: number;
+  legCountAccuracy: number;
+  pathTerminatorAccuracy: number;
+  fixAccuracy: number;
+  courseAccuracy: number;
+  distanceAccuracy: number;
+  altitudeAccuracy: number;
+  coordinateAccuracy: number;
+  sourceEvidenceCoverage: number;
+  schemaValid: boolean;
+  errors: EvaluationError[];
+  warnings: EvaluationWarning[];
+}
+
+export interface EvaluationError {
+  code: string;
+  message: string;
+  procedureName?: string;
+  sequence?: number;
+  fieldName?: string;
+  expected?: unknown;
+  actual?: unknown;
+}
+
+export interface EvaluationWarning {
+  code: string;
+  message: string;
+  procedureName?: string;
+  sequence?: number;
+  fieldName?: string;
+}
+
 export interface AiRequestPreview {
   model: string;
   prompt: string;
@@ -172,4 +320,20 @@ export interface AiRequestPreview {
   inputPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>;
   supportPages: Array<Pick<PdfPageAsset, 'pageNo' | 'aipPageNo' | 'chartRole' | 'imageUrl' | 'thumbnailUrl'>>;
   candidateSummary: Record<string, unknown>;
+  aiInputPackage?: AiInputPackage;
+}
+
+export interface BuiltPromptPreview {
+  promptTemplateId: string;
+  promptTemplateName?: string;
+  promptVersion: string;
+  outputSchemaName: string;
+  outputSchemaVersion: string;
+  systemPrompt: string;
+  userPrompt: string;
+  responseSchema: unknown;
+  inputImages: AiInputPage[];
+  supportSummaries: SupportingInfoRef[];
+  excludedSupport: SupportingInfoRef[];
+  renderedAt?: string;
 }

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "arinc424-candidate.schema.json",
+  "title": "Arinc424Candidate",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "recordType": { "type": ["string", "null"] },
+    "sectionCode": { "type": ["string", "null"] },
+    "subsectionCode": { "type": ["string", "null"] },
+    "pathTerminator": { "type": ["string", "null"] },
+    "fixIdentifier": { "type": ["string", "null"] },
+    "courseDegMag": { "type": ["number", "null"] },
+    "distanceNm": { "type": ["number", "null"] },
+    "altitudeDescription": { "type": ["string", "null"] },
+    "derivationMethod": { "type": ["string", "null"] },
+    "sourceEvidenceIds": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+    "reviewRequired": { "type": "boolean" }
+  }
+}
