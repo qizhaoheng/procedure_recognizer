@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import express from 'express';
 import multer from 'multer';
+import { PDFDocument } from 'pdf-lib';
 import { createTask, getUploadDir, listTasks, readTask, saveTask, updateTask } from '../storage/taskStore';
 import { extractCandidates } from '../services/candidateExtractor';
 import { validateProcedureGeoJson } from '../services/geojsonValidator';
@@ -109,6 +110,44 @@ router.get('/:taskId/pdf', async (req, res, next) => {
     res.sendFile(path.resolve(task.filePath));
   } catch (error) {
     next(error);
+  }
+});
+
+router.get('/:taskId/groups/:groupId/pdf', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.groupId);
+    const pageNos = Array.from(
+      new Set([
+        ...group.chartPages,
+        ...group.tabularPages,
+        ...group.coordinatePages,
+        ...group.minimaPages,
+        ...(group.textSupplementPages ?? []),
+        ...group.otherPages,
+      ]),
+    ).sort((a, b) => a - b);
+    if (!pageNos.length) return res.status(400).json({ error: '该分组没有关联页面。' });
+
+    const source = await PDFDocument.load(await fs.readFile(task.filePath), { ignoreEncryption: true });
+    const pageIndices = pageNos.filter((no) => no >= 1 && no <= source.getPageCount()).map((no) => no - 1);
+    if (!pageIndices.length) return res.status(400).json({ error: '分组页码超出 PDF 页数范围。' });
+
+    const output = await PDFDocument.create();
+    const copiedPages = await output.copyPages(source, pageIndices);
+    for (const page of copiedPages) output.addPage(page);
+    const bytes = await output.save();
+
+    const baseName = (group.packageName || group.groupName || group.groupId).replace(/[\\/:*?"<>|]+/g, ' ').replace(/\s+/g, ' ').trim() || group.groupId;
+    const asciiName = baseName.replace(/[^\x20-\x7E]+/g, '').trim() || 'group';
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiName}.pdf"; filename*=UTF-8''${encodeURIComponent(`${baseName}.pdf`)}`,
+    );
+    return res.send(Buffer.from(bytes));
+  } catch (error) {
+    return next(error);
   }
 });
 

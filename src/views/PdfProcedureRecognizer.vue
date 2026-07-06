@@ -273,6 +273,18 @@ async function deleteSelectedGroup() {
   selectedPageNo.value = groups[0] ? allGroupPages(groups[0])[0] : task.value?.pages[0]?.pageNo;
 }
 
+function exportGroupPdf() {
+  if (!task.value || !selectedGroup.value) return;
+  const url = `/api/procedure-tasks/${encodeURIComponent(task.value.taskId)}/groups/${encodeURIComponent(selectedGroup.value.groupId)}/pdf`;
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = '';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  message.value = `正在导出「${selectedGroup.value.packageName || selectedGroup.value.groupName}」PDF`;
+}
+
 async function saveGroupMetadata() {
   if (!selectedGroup.value) return;
   await saveGroups(cloneGroups());
@@ -341,8 +353,26 @@ async function runAiRecognition() {
   }
 }
 
-function previewGeoJson() {
+async function previewGeoJson() {
   if (!task.value || !selectedGroup.value) return;
+  if (!selectedGroup.value.geojson) {
+    busy.value = true;
+    message.value = '正在生成 GeoJSON 预览结果';
+    try {
+      await requestJson(`/api/procedure-tasks/${task.value.taskId}/groups/${selectedGroup.value.groupId}/run-ai`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode: 'geojson' }),
+      });
+      await refreshTask(false);
+    } catch (previewError) {
+      error.value = toErrorMessage(previewError);
+      message.value = 'GeoJSON 预览生成失败';
+      busy.value = false;
+      return;
+    }
+    busy.value = false;
+  }
   window.location.href = `/procedure-geojson?taskId=${encodeURIComponent(task.value.taskId)}&groupId=${encodeURIComponent(selectedGroup.value.groupId)}`;
 }
 
@@ -725,10 +755,13 @@ function toErrorMessage(value: unknown) {
             <button type="button" class="primary" @click="runAiRecognition">
               <Bot :size="15" /> 发送AI识别
             </button>
-            <button type="button" :disabled="!hasGeoJson" @click="previewGeoJson">
-              <Eye :size="15" /> 预览GeoJSON
+            <button type="button" :disabled="!selectedGroup || busy" @click="previewGeoJson">
+              <Eye :size="15" /> {{ hasGeoJson ? '预览GeoJSON' : '生成并预览GeoJSON' }}
             </button>
             <button type="button" :disabled="!hasGeoJson" @click="downloadGroupGeoJson">下载GeoJSON</button>
+            <button type="button" @click="exportGroupPdf">
+              <Download :size="15" /> 导出PDF
+            </button>
             <button type="button" class="danger" @click="deleteSelectedGroup">
               <Trash2 :size="15" /> 删除分组
             </button>
