@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue';
-import { useRoute } from 'vue-router';
-import { Loader2, RotateCcw, Upload } from 'lucide-vue-next';
+import { useRoute, useRouter } from 'vue-router';
+import { Download, Loader2, RotateCcw, Upload } from 'lucide-vue-next';
 import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
 import ProcedureLayerControl, { type LayerVisibility } from '../components/procedure/ProcedureLayerControl.vue';
 import ProcedureLegend from '../components/procedure/ProcedureLegend.vue';
@@ -13,6 +13,7 @@ const CACHE_NAME_KEY = 'procedure-geojson:last-filename';
 const DEFAULT_SAMPLE = '/data/WMKJ_STAR_RWY16_11DME_ARC_v3.geojson';
 
 const route = useRoute();
+const router = useRouter();
 const emptyModel = parseProcedureGeoJson({ type: 'FeatureCollection', features: [] });
 const model = ref<ProcedureGeoJsonModel>();
 const loading = ref(false);
@@ -21,6 +22,7 @@ const fileName = ref('');
 const fileInput = ref<HTMLInputElement>();
 const resetCounter = ref(0);
 const mapVersion = ref(0);
+const taskGeoJson = ref<{ taskId: string; packageId: string }>();
 const uploadStatus = ref('等待加载 GeoJSON');
 
 const activeModel = computed(() => model.value ?? emptyModel);
@@ -57,24 +59,25 @@ const featureSummary = computed(() => {
 
 onMounted(async () => {
   const taskId = String(route.query.taskId || '');
-  const groupId = String(route.query.groupId || '');
-  if (taskId && groupId) {
-    await loadTaskGeoJson(taskId, groupId);
+  const packageId = String(route.query.packageId || route.query.groupId || '');
+  if (taskId && packageId) {
+    await loadTaskGeoJson(taskId, packageId);
     return;
   }
   if (restoreCachedGeoJson()) return;
   await loadDefaultSample();
 });
 
-async function loadTaskGeoJson(taskId: string, groupId: string) {
+async function loadTaskGeoJson(taskId: string, packageId: string) {
   loading.value = true;
   error.value = '';
+  taskGeoJson.value = { taskId, packageId };
   uploadStatus.value = '正在加载任务 GeoJSON';
   try {
-    const response = await fetch(`/api/procedure-tasks/${encodeURIComponent(taskId)}/groups/${encodeURIComponent(groupId)}/geojson`);
+    const response = await fetch(`/api/procedure-tasks/${encodeURIComponent(taskId)}/packages/${encodeURIComponent(packageId)}/geojson`);
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '任务 GeoJSON 加载失败');
     const geojson = await response.json();
-    loadGeoJson(geojson, `${taskId}-${groupId}.geojson`, false);
+    loadGeoJson(geojson, `${taskId}-${packageId}.geojson`, false);
     uploadStatus.value = '已从识别任务加载 GeoJSON';
   } catch (loadError) {
     clearModelOnly();
@@ -83,6 +86,37 @@ async function loadTaskGeoJson(taskId: string, groupId: string) {
   } finally {
     loading.value = false;
   }
+}
+
+function backToRecognizer() {
+  if (!taskGeoJson.value) return;
+  router.push({
+    path: '/pdf-procedure-recognizer',
+    query: {
+      taskId: taskGeoJson.value.taskId,
+      packageId: taskGeoJson.value.packageId,
+    },
+  });
+}
+
+function downloadGeoJson() {
+  if (taskGeoJson.value) {
+    const anchor = document.createElement('a');
+    anchor.href = `/api/procedure-tasks/${encodeURIComponent(taskGeoJson.value.taskId)}/packages/${encodeURIComponent(taskGeoJson.value.packageId)}/geojson/download`;
+    anchor.download = '';
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    return;
+  }
+  if (!model.value?.raw) return;
+  const blob = new Blob([JSON.stringify(model.value.raw, null, 2)], { type: 'application/geo+json' });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = fileName.value || 'procedure.geojson';
+  anchor.click();
+  URL.revokeObjectURL(url);
 }
 
 function restoreCachedGeoJson() {
@@ -106,6 +140,7 @@ function restoreCachedGeoJson() {
 async function loadDefaultSample() {
   loading.value = true;
   error.value = '';
+  taskGeoJson.value = undefined;
   try {
     const response = await fetch(DEFAULT_SAMPLE);
     if (!response.ok) throw new Error('默认示例 GeoJSON 加载失败');
@@ -127,6 +162,7 @@ function onFileSelected(event: Event) {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
+  taskGeoJson.value = undefined;
 
   if (!file.name.toLowerCase().endsWith('.geojson') && !file.name.toLowerCase().endsWith('.json')) {
     error.value = '请选择 .geojson 或 .json 文件';
@@ -194,6 +230,7 @@ function resetView() {
 
 function clearData() {
   clearModelOnly();
+  taskGeoJson.value = undefined;
   localStorage.removeItem(CACHE_KEY);
   localStorage.removeItem(CACHE_NAME_KEY);
   uploadStatus.value = '已清空，等待上传 GeoJSON';
@@ -235,6 +272,11 @@ function clearModelOnly() {
         <button type="button" class="primary" @click="openFilePicker">
           <Upload :size="16" aria-hidden="true" />
           上传 GeoJSON
+        </button>
+        <button v-if="taskGeoJson" type="button" @click="backToRecognizer">返回分组页</button>
+        <button type="button" :disabled="!hasData" @click="downloadGeoJson">
+          <Download :size="16" aria-hidden="true" />
+          下载 GeoJSON
         </button>
         <button type="button" @click="resetView">
           <RotateCcw :size="16" aria-hidden="true" />
