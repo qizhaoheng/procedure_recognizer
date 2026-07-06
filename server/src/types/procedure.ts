@@ -147,6 +147,9 @@ export interface ProcedureGroup {
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
+  geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'ERROR';
+  geojsonGeneratedAt?: string;
+  geojsonError?: string;
   reviewRequired?: boolean;
 }
 

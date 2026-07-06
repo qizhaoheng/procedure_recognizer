@@ -278,6 +278,9 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
     };
     group.aiResponse = await runProcedureRecognition(group, preview);
     group.geojson = group.aiResponse.geojson;
+    group.geojsonStatus = group.geojson ? 'GENERATED' : 'ERROR';
+    group.geojsonGeneratedAt = group.geojson ? new Date().toISOString() : undefined;
+    group.geojsonError = group.geojson ? undefined : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
     group.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
     task.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
     await saveTask(task);
@@ -289,6 +292,69 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
       geojson: group.geojson,
     });
   } catch (error) {
+    next(error);
+  }
+});
+
+router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, next) => {
+  try {
+    await updateTask(req.params.taskId, (draft) => {
+      const group = findGroup(draft.groups, req.params.packageId);
+      group.geojsonStatus = 'GENERATING';
+      group.geojsonError = undefined;
+    });
+
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    const model = req.body?.model || process.env.LLM_MODEL || 'mock-procedure-recognizer';
+    const preview = buildAiRequestPreview(group, task.pages, model);
+    group.aiRequest = {
+      model,
+      prompt: preview.prompt,
+      schemaName: 'ProcedureGeoJsonFeatureCollection',
+      inputPageNos: Array.from(new Set([
+        ...preview.aiInputPackage.includedImages.map((page) => page.pageNo),
+        ...preview.aiInputPackage.includedSummaries.flatMap((item) => item.pageNos),
+      ])).sort((a, b) => a - b),
+      createdAt: new Date().toISOString(),
+    };
+    group.aiResponse = await runProcedureRecognition(group, preview);
+    group.geojson = group.aiResponse.geojson;
+    group.geojsonStatus = group.geojson ? 'GENERATED' : 'ERROR';
+    group.geojsonGeneratedAt = group.geojson ? new Date().toISOString() : undefined;
+    group.geojsonError = group.geojson ? undefined : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
+    group.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
+    task.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
+    await saveTask(task);
+
+    if (!group.geojson) {
+      return res.status(500).json({
+        ok: false,
+        taskId: task.taskId,
+        packageId: group.packageId || group.groupId,
+        error: group.geojsonError,
+      });
+    }
+
+    const packageId = group.packageId || group.groupId;
+    return res.json({
+      ok: true,
+      taskId: task.taskId,
+      packageId,
+      geojsonId: `geojson_${packageId}`,
+      geojsonPreview: group.geojson,
+      downloadUrl: `/api/procedure-tasks/${encodeURIComponent(task.taskId)}/packages/${encodeURIComponent(packageId)}/geojson/download`,
+    });
+  } catch (error) {
+    try {
+      await updateTask(req.params.taskId, (draft) => {
+        const group = findGroup(draft.groups, req.params.packageId);
+        group.geojsonStatus = 'ERROR';
+        group.geojsonError = error instanceof Error ? error.message : 'GeoJSON generation failed';
+      });
+    } catch {
+      // Keep the original error.
+    }
     next(error);
   }
 });
@@ -412,6 +478,34 @@ router.get('/:taskId/groups/:groupId/geojson', async (req, res, next) => {
   }
 });
 
+router.get('/:taskId/packages/:packageId/geojson', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    if (!group.geojson) return res.status(404).json({ error: 'GeoJSON has not been generated for this package.' });
+    res.json(group.geojson);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get('/:taskId/packages/:packageId/geojson/download', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    if (!group.geojson) return res.status(404).json({ error: 'GeoJSON has not been generated for this package.' });
+    const fileName = geojsonFileName(group);
+    res.setHeader('Content-Type', 'application/geo+json; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiFileName(fileName)}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    );
+    res.send(JSON.stringify(group.geojson, null, 2));
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/:taskId/groups/:groupId/validate-geojson', async (req, res, next) => {
   try {
     const task = await readTask(req.params.taskId);
@@ -426,6 +520,18 @@ function findGroup(groups: ProcedureGroup[], groupId: string) {
   const group = groups.find((item) => item.groupId === groupId || item.packageId === groupId);
   if (!group) throw new Error('分组不存在。');
   return group;
+}
+
+function geojsonFileName(group: ProcedureGroup) {
+  const baseName = (group.packageName || group.groupName || group.packageId || group.groupId)
+    .replace(/[\\/:*?"<>|]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim() || 'procedure';
+  return `${baseName}.geojson`;
+}
+
+function asciiFileName(fileName: string) {
+  return fileName.replace(/[^\x20-\x7E]+/g, '').trim() || 'procedure.geojson';
 }
 
 async function loadGoldenCase(fileName: string) {

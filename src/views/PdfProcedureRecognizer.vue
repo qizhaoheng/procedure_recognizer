@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import {
@@ -34,6 +35,9 @@ import type {
 } from '../types/procedureTask';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+const route = useRoute();
+const router = useRouter();
 
 const statusLabels: Record<string, string> = {
   UPLOADED: '已上传',
@@ -91,6 +95,7 @@ let pollTimer: number | undefined;
 let pdfDocumentTaskId = '';
 let pdfDocument: any;
 let renderSerial = 0;
+let restoringFromRoute = false;
 
 const previewStageStyle = computed(() => ({
   transform: `translate(${previewPanX.value}px, ${previewPanY.value}px) scale(${previewZoom.value})`,
@@ -195,9 +200,90 @@ onBeforeUnmount(() => {
   void pdfDocument?.destroy?.();
 });
 
+onMounted(() => {
+  void restoreFromRoute();
+});
+
 watch([() => task.value?.taskId, selectedPageNo], () => {
   void renderSelectedPdfPage();
 });
+
+watch(
+  () => [route.query.taskId, route.query.packageId],
+  () => {
+    void restoreFromRoute();
+  },
+);
+
+async function restoreFromRoute() {
+  if (restoringFromRoute) return;
+  const taskId = queryString(route.query.taskId);
+  const packageId = queryString(route.query.packageId);
+  if (!taskId) {
+    task.value = undefined;
+    selectedGroupId.value = '';
+    selectedPageNo.value = undefined;
+    aiInputPackage.value = undefined;
+    aiPreview.value = undefined;
+    promptPreview.value = undefined;
+    message.value = '等待上传 PDF';
+    return;
+  }
+  if (task.value?.taskId === taskId && !packageId && selectedGroupId.value) {
+    replaceRecognizerRoute(taskId, selectedGroupId.value);
+    return;
+  }
+  if (task.value?.taskId === taskId && packageId && selectedGroupId.value === packageId) return;
+
+  restoringFromRoute = true;
+  busy.value = true;
+  error.value = '';
+  try {
+    await loadTaskById(taskId, packageId || undefined, false);
+  } catch (restoreError) {
+    task.value = undefined;
+    selectedGroupId.value = '';
+    selectedPageNo.value = undefined;
+    aiInputPackage.value = undefined;
+    aiPreview.value = undefined;
+    promptPreview.value = undefined;
+    error.value = '任务不存在或已过期';
+    message.value = toErrorMessage(restoreError);
+  } finally {
+    busy.value = false;
+    restoringFromRoute = false;
+  }
+}
+
+async function loadTaskById(taskId: string, packageId?: string, updateUrl = true) {
+  const nextTask = await requestJson<ProcedureTask>(`/api/procedure-tasks/${encodeURIComponent(taskId)}`);
+  task.value = nextTask;
+  const activeGroup = selectRestoredGroup(nextTask, packageId);
+  selectedGroupId.value = activeGroup?.groupId || '';
+  selectedPageNo.value = activeGroup ? allGroupPages(activeGroup)[0] : nextTask.pages[0]?.pageNo;
+  message.value = nextTask.error || `任务状态：${statusLabels[nextTask.status] || nextTask.status}`;
+  await loadAiInputPackage(false);
+  if (updateUrl) replaceRecognizerRoute(nextTask.taskId, selectedGroupId.value || undefined);
+  else if (activeGroup && (!packageId || activeGroup.groupId !== packageId)) replaceRecognizerRoute(nextTask.taskId, activeGroup.packageId || activeGroup.groupId);
+}
+
+function selectRestoredGroup(nextTask: ProcedureTask, packageId?: string) {
+  return nextTask.groups.find((group) => group.groupId === packageId || group.packageId === packageId) || nextTask.groups[0];
+}
+
+function replaceRecognizerRoute(taskId: string, packageId?: string) {
+  router.replace({
+    path: '/pdf-procedure-recognizer',
+    query: {
+      taskId,
+      ...(packageId ? { packageId } : {}),
+    },
+  });
+}
+
+function queryString(value: unknown) {
+  return Array.isArray(value) ? String(value[0] || '') : String(value || '');
+}
 
 function openFilePicker() {
   fileInput.value?.click();
@@ -234,6 +320,7 @@ async function onFileSelected(event: Event) {
       createdAt: '',
       updatedAt: '',
     };
+    replaceRecognizerRoute(uploaded.taskId);
     selectedPageNo.value = undefined;
     selectedGroupId.value = '';
     aiPreview.value = undefined;
@@ -287,11 +374,12 @@ async function refreshTask(showBusy = true) {
   try {
     const nextTask = await requestJson<ProcedureTask>(`/api/procedure-tasks/${task.value.taskId}`);
     task.value = nextTask;
-    selectedGroupId.value ||= nextTask.groups[0]?.groupId || '';
-    const activeGroup = nextTask.groups.find((group) => group.groupId === selectedGroupId.value) || nextTask.groups[0];
+    const activeGroup = nextTask.groups.find((group) => group.groupId === selectedGroupId.value || group.packageId === selectedGroupId.value) || nextTask.groups[0];
+    selectedGroupId.value = activeGroup?.groupId || '';
     selectedPageNo.value ??= activeGroup ? allGroupPages(activeGroup)[0] : nextTask.pages[0]?.pageNo;
     message.value = nextTask.error || `任务状态：${statusLabels[nextTask.status] || nextTask.status}`;
     await loadAiInputPackage(false);
+    replaceRecognizerRoute(nextTask.taskId, selectedGroupId.value || undefined);
   } catch (refreshError) {
     error.value = toErrorMessage(refreshError);
   } finally {
@@ -361,6 +449,7 @@ async function createGroup() {
   await saveGroups(groups);
   selectedGroupId.value = group.groupId;
   selectedPageNo.value = page?.pageNo;
+  if (task.value) replaceRecognizerRoute(task.value.taskId, group.groupId);
 }
 
 async function deleteSelectedGroup() {
@@ -369,6 +458,7 @@ async function deleteSelectedGroup() {
   await saveGroups(groups);
   selectedGroupId.value = groups[0]?.groupId || '';
   selectedPageNo.value = groups[0] ? allGroupPages(groups[0])[0] : task.value?.pages[0]?.pageNo;
+  if (task.value) replaceRecognizerRoute(task.value.taskId, selectedGroupId.value || undefined);
 }
 
 function exportGroupPdf() {
@@ -489,7 +579,7 @@ async function previewGeoJson() {
     busy.value = true;
     message.value = '正在生成 GeoJSON 预览结果';
     try {
-      await requestJson(`/api/procedure-tasks/${task.value.taskId}/groups/${selectedGroup.value.groupId}/run-ai`, {
+      await requestJson(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/generate-geojson`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mode: 'geojson' }),
@@ -502,13 +592,28 @@ async function previewGeoJson() {
       return;
     }
     busy.value = false;
+    message.value = 'GeoJSON 已生成，可以预览或下载';
+    return;
   }
-  window.location.href = `/procedure-geojson?taskId=${encodeURIComponent(task.value.taskId)}&groupId=${encodeURIComponent(selectedGroup.value.groupId)}`;
+  router.push({
+    path: '/procedure-geojson',
+    query: {
+      taskId: task.value.taskId,
+      packageId: selectedGroup.value.packageId || selectedGroup.value.groupId,
+      from: 'pdf-procedure-recognizer',
+    },
+  });
 }
 
 function downloadGroupGeoJson() {
-  if (!selectedGroup.value?.geojson) return;
-  downloadJson(selectedGroup.value.geojson, `${selectedGroup.value.groupId}.geojson`);
+  if (!task.value || !selectedGroup.value?.geojson) return;
+  const packageId = selectedGroup.value.packageId || selectedGroup.value.groupId;
+  const anchor = document.createElement('a');
+  anchor.href = `/api/procedure-tasks/${encodeURIComponent(task.value.taskId)}/packages/${encodeURIComponent(packageId)}/geojson/download`;
+  anchor.download = '';
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
 }
 
 function exportTaskJson() {
@@ -525,6 +630,7 @@ function selectGroup(group: ProcedureGroup) {
   selectedPageNo.value = allGroupPages(group)[0] || selectedPageNo.value;
   aiPreview.value = undefined;
   promptPreview.value = undefined;
+  if (task.value) replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
   void loadAiInputPackage(false);
 }
 
@@ -534,6 +640,7 @@ function handleSelectedGroupChanged() {
   selectedPageNo.value = allGroupPages(group)[0] || selectedPageNo.value;
   aiPreview.value = undefined;
   promptPreview.value = undefined;
+  if (task.value) replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
   void loadAiInputPackage(false);
 }
 
@@ -687,6 +794,14 @@ function sentLabel(ref: SupportingInfoRef) {
   if (ref.sendPolicy === 'EXCLUDED' || ref.sendMode === 'NOT_SENT') return '否';
   if (ref.sendPolicy === 'OPTIONAL') return '可选，当前发送';
   return '是';
+}
+
+function geojsonStatusLabel(group: ProcedureGroup | undefined) {
+  if (!group) return '-';
+  if (group.geojsonStatus === 'GENERATING') return 'GeoJSON 生成中';
+  if (group.geojsonStatus === 'ERROR') return 'GeoJSON 生成失败';
+  if (group.geojson || group.geojsonStatus === 'GENERATED') return 'GeoJSON 已生成';
+  return 'GeoJSON 未生成';
 }
 
 function summaryLines(summary: Record<string, unknown>) {
@@ -959,7 +1074,7 @@ function toErrorMessage(value: unknown) {
           分组
           <select v-model="selectedGroupId" :disabled="!task?.groups.length" @change="handleSelectedGroupChanged">
             <option v-for="group in task?.groups" :key="group.groupId" :value="group.groupId">
-              {{ group.packageName || group.groupName }}
+              {{ group.packageName || group.groupName }} / {{ geojsonStatusLabel(group) }}
             </option>
           </select>
         </label>
@@ -974,6 +1089,8 @@ function toErrorMessage(value: unknown) {
             <p>{{ selectedGroup.procedureNames.join(' / ') || selectedGroup.chartTitle || '未识别程序名' }}</p>
             <p>{{ selectedGroup.chartNo || 'chartNo?' }} · 来源：{{ sourceLabels[selectedGroup.source || ''] || selectedGroup.source || '-' }} · 置信度 {{ selectedGroup.confidence ?? '-' }}</p>
             <em>{{ selectedGroup.reviewRequired ? '需复核' : (statusLabels[selectedGroup.status] || selectedGroup.status) }}</em>
+            <em>{{ geojsonStatusLabel(selectedGroup) }}</em>
+            <p v-if="selectedGroup.geojsonError">{{ selectedGroup.geojsonError }}</p>
           </div>
 
           <div class="form-grid">
