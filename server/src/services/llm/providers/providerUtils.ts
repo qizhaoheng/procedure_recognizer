@@ -7,14 +7,21 @@ export function endpointUrl(config: LlmRuntimeConfig, path: string) {
 
 export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new Error(`LLM_TIMEOUT_MS elapsed after ${timeoutMs}ms.`)), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
-    if (error instanceof Error && error.name === 'AbortError') {
-      throw new LlmApiError('TIMEOUT', `LLM request timed out after ${timeoutMs}ms.`);
+    const message = summarizeError(error);
+    const raw = describeError(error);
+    const code = errorCode(error);
+    if ((error instanceof Error && error.name === 'AbortError') || controller.signal.aborted || isUndiciTimeout(code)) {
+      throw new LlmApiError(
+        'TIMEOUT',
+        `LLM request timed out after ${timeoutMs}ms. ${message}`,
+        raw,
+      );
     }
-    throw new LlmApiError('NETWORK_ERROR', error instanceof Error ? error.message : 'LLM network request failed.');
+    throw new LlmApiError('NETWORK_ERROR', `LLM network request failed. ${message}`, raw);
   } finally {
     clearTimeout(timeout);
   }
@@ -106,7 +113,7 @@ export function normalizeError(error: unknown) {
   return new LlmApiError(
     'UNKNOWN',
     error instanceof Error ? error.message : 'LLM request failed.',
-    error instanceof Error ? error.stack || error.message : String(error),
+    describeError(error),
   );
 }
 
@@ -127,4 +134,36 @@ function isRetryable(error: unknown) {
 
 function delay(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function describeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const stack = error.stack && error.stack !== error.message ? `\n${error.stack}` : '';
+  return `${summarizeSingleError(error)}${cause ? `; cause: ${describeError(cause)}` : ''}${stack}`;
+}
+
+function summarizeError(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const cause = (error as Error & { cause?: unknown }).cause;
+  const causeDetails = cause ? `; cause=${summarizeError(cause)}` : '';
+  return `${summarizeSingleError(error)}${causeDetails}`;
+}
+
+function summarizeSingleError(error: Error): string {
+  const parts = [error.name, error.message].filter(Boolean).join(': ') || 'Error';
+  const code = errorCode(error);
+  const codeDetails = code ? `; code=${code}` : '';
+  return `${parts}${codeDetails}`;
+}
+
+function errorCode(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const record = error as { code?: unknown; cause?: unknown };
+  if (typeof record.code === 'string') return record.code;
+  return errorCode(record.cause);
+}
+
+function isUndiciTimeout(code: string | undefined) {
+  return code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT' || code === 'UND_ERR_CONNECT_TIMEOUT';
 }

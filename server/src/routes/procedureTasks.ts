@@ -15,6 +15,7 @@ import { evaluateProcedureUnderstanding } from '../services/evaluation/procedure
 import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
 import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
+import { normalizeProcedureUnderstandingResult } from '../services/procedureUnderstandingNormalizer';
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
 import { getLlmRuntimeConfig } from '../services/llm/llmClient';
@@ -368,7 +369,12 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
       group.status = 'AI_RUNNING';
+      group.aiResponse = undefined;
+      group.procedureUnderstanding = undefined;
+      group.visionRunRecord = undefined;
+      group.recognitionEvaluation = undefined;
       draft.status = 'AI_RUNNING';
+      draft.error = undefined;
     });
 
     const task = await readTask(req.params.taskId);
@@ -400,9 +406,12 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       createdAt: new Date().toISOString(),
     };
     group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model);
+    group.aiResponse.parsedJson = normalizeProcedureUnderstandingResult(group.aiResponse.parsedJson, group, aiInputPackage);
     const completedAt = new Date().toISOString();
     const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson, builtPrompt.responseSchema);
+    const validationErrorMessage = validationResult.schemaValid ? undefined : schemaValidationMessage(validationResult.errors);
     group.procedureUnderstanding = group.aiResponse.parsedJson as ProcedureUnderstandingResult;
+    group.aiResponse.errors = validationResult.schemaValid ? undefined : validationResult.errors;
     group.visionRunRecord = {
       runId: `vision_run_${Date.now()}`,
       provider: group.aiResponse.provider,
@@ -427,6 +436,8 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
         valid: validationResult.schemaValid,
         errors: validationResult.errors,
       },
+      errorType: validationResult.schemaValid ? undefined : 'SCHEMA_VALIDATION',
+      errorMessage: validationErrorMessage,
     };
     group.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
     task.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
@@ -447,7 +458,15 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
     });
   } catch (error) {
     await markRecognitionError(req.params.taskId, req.params.packageId, error, { startedAt, model, builtPrompt, promptRun });
-    next(error);
+    const normalized = normalizeRecognitionError(error);
+    res.status(500).json({
+      ok: false,
+      taskId: req.params.taskId,
+      packageId: req.params.packageId,
+      errorType: normalized.errorType,
+      error: normalized.message,
+      rawError: normalized.rawError,
+    });
   }
 });
 
@@ -567,6 +586,12 @@ function validateProcedureUnderstandingResult(value: unknown, schema?: unknown) 
     if (key in record && !Array.isArray(record[key])) errors.push(`Field must be an array: ${key}`);
   }
   return { schemaValid: errors.length === 0, errors };
+}
+
+function schemaValidationMessage(errors: string[]) {
+  const shown = errors.slice(0, 8).join('; ');
+  const suffix = errors.length > 8 ? `; ...and ${errors.length - 8} more` : '';
+  return `AI returned JSON but it did not match ProcedureUnderstanding schema: ${shown}${suffix}`;
 }
 
 async function markRecognitionError(
