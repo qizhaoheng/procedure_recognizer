@@ -12,6 +12,9 @@ import { LlmApiError, runProcedureRecognition, runProcedureUnderstandingRecognit
 import { parsePdfTask } from '../services/pdfService';
 import { buildAiInputPackage } from '../services/aiInputPackageBuilder';
 import { evaluateProcedureUnderstanding } from '../services/evaluation/procedureUnderstandingEvaluator';
+import { aiProcedureToSimpleLegs } from '../services/jeppesen424/aiProcedureToSimpleLegs';
+import { parseJeppesen424Text } from '../services/jeppesen424/jeppesen424TextParser';
+import { compareSimpleProcedureLegs } from '../services/jeppesen424/simpleProcedureComparator';
 import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
 import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
@@ -498,6 +501,59 @@ router.post('/:taskId/packages/:packageId/evaluate-recognition', async (req, res
   }
 });
 
+router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    if (!group.procedureUnderstanding) return res.status(400).json({ error: 'No ProcedureUnderstanding result to compare.' });
+
+    const text = String(req.body?.text ?? '');
+    if (!text.trim()) return res.status(400).json({ error: 'Jeppesen 424 text is required.' });
+
+    const procedureFilter = Array.isArray(req.body?.procedureFilter)
+      ? req.body.procedureFilter.map((item: unknown) => normalizeCompareText(item)).filter(Boolean)
+      : [];
+    const runway = normalizeRunway(req.body?.runway ?? group.runway ?? group.procedureUnderstanding.runway ?? '');
+
+    const parsedJeppesenLegs = filterSimpleLegs(parseJeppesen424Text(text), procedureFilter, runway);
+    const aiLegs = filterSimpleLegs(aiProcedureToSimpleLegs(group.procedureUnderstanding), procedureFilter, runway);
+    const procedureResults = compareSimpleProcedureLegs(aiLegs, parsedJeppesenLegs);
+
+    const totalLegs = procedureResults.reduce((sum, result) => sum + result.totalLegs, 0);
+    const matchedLegs = procedureResults.reduce((sum, result) => sum + result.matchedLegs, 0);
+    const missingAiLegs = procedureResults.reduce((sum, result) => sum + result.legResults.filter((leg) => leg.status === 'MISSING_AI').length, 0);
+    const missingJeppesenLegs = procedureResults.reduce((sum, result) => sum + result.legResults.filter((leg) => leg.status === 'MISSING_JEPPESEN').length, 0);
+    const fieldMismatchCount = procedureResults.reduce(
+      (sum, result) => sum + result.legResults.reduce((legSum, leg) => legSum + leg.fieldResults.filter((field) => !field.matched).length, 0),
+      0,
+    );
+    const issueCount = fieldMismatchCount + missingAiLegs + missingJeppesenLegs;
+    const overallScore = totalLegs
+      ? Math.round((procedureResults.reduce((sum, result) => sum + result.score * result.totalLegs, 0) / totalLegs) * 10) / 10
+      : 0;
+
+    res.json({
+      ok: true,
+      summary: {
+        totalProcedures: procedureResults.length,
+        matchedProcedures: procedureResults.filter((result) => result.score >= 99.999).length,
+        totalLegs,
+        matchedLegs,
+        missingAiLegs,
+        missingJeppesenLegs,
+        fieldMismatchCount,
+        issueCount,
+        overallScore,
+      },
+      procedureResults,
+      parsedJeppesenLegs,
+      aiLegs,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/:taskId/groups/:groupId/geojson', async (req, res, next) => {
   try {
     const task = await readTask(req.params.taskId);
@@ -551,6 +607,25 @@ function findGroup(groups: ProcedureGroup[], groupId: string) {
   const group = groups.find((item) => item.groupId === groupId || item.packageId === groupId);
   if (!group) throw new Error('分组不存在。');
   return group;
+}
+
+function filterSimpleLegs<T extends { procedureName: string; runway: string }>(legs: T[], procedureFilter: string[], runway: string) {
+  const allowedProcedures = new Set(procedureFilter);
+  return legs.filter((leg) => {
+    if (allowedProcedures.size && !allowedProcedures.has(normalizeCompareText(leg.procedureName))) return false;
+    if (runway && normalizeRunway(leg.runway) !== runway) return false;
+    return true;
+  });
+}
+
+function normalizeCompareText(value: unknown) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').toUpperCase();
+}
+
+function normalizeRunway(value: unknown) {
+  const text = normalizeCompareText(value).replace(/\s+/g, '').replace(/^RWY/, 'RW');
+  if (!text) return '';
+  return text.startsWith('RW') ? text : `RW${text}`;
 }
 
 function geojsonFileName(group: ProcedureGroup) {

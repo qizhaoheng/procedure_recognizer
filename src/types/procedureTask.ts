@@ -449,6 +449,69 @@ export interface EvaluationWarning {
   fieldName?: string;
 }
 
+export type Jeppesen424CompareStatus = 'MATCH' | 'PARTIAL' | 'MISMATCH' | 'MISSING_AI' | 'MISSING_JEPPESEN';
+export type Jeppesen424CompareSeverity = 'INFO' | 'WARNING' | 'ERROR';
+
+export interface SimpleProcedureLeg {
+  procedureName: string;
+  runway: string;
+  routeKey: string;
+  sequence: string;
+  fix: string;
+  pathTerminator?: string;
+  turnDirection?: 'L' | 'R' | '';
+  distanceNm?: number;
+  altitudeRaw?: string;
+  altitudeValue?: number;
+  source: 'AI' | 'JEPPESEN_424';
+  rawRecord?: string;
+}
+
+export interface FieldCompareResult {
+  field: string;
+  aiValue: unknown;
+  jeppesenValue: unknown;
+  matched: boolean;
+  severity: Jeppesen424CompareSeverity;
+}
+
+export interface LegCompareResult {
+  procedureName: string;
+  sequence: string;
+  ai?: SimpleProcedureLeg;
+  jeppesen?: SimpleProcedureLeg;
+  fieldResults: FieldCompareResult[];
+  score: number;
+  status: Jeppesen424CompareStatus;
+}
+
+export interface ProcedureCompareResult {
+  procedureName: string;
+  runway: string;
+  totalLegs: number;
+  matchedLegs: number;
+  score: number;
+  legResults: LegCompareResult[];
+}
+
+export interface Jeppesen424CompareResponse {
+  ok: true;
+  summary: {
+    totalProcedures: number;
+    matchedProcedures: number;
+    totalLegs: number;
+    matchedLegs: number;
+    missingAiLegs: number;
+    missingJeppesenLegs: number;
+    fieldMismatchCount: number;
+    issueCount: number;
+    overallScore: number;
+  };
+  procedureResults: ProcedureCompareResult[];
+  parsedJeppesenLegs: SimpleProcedureLeg[];
+  aiLegs: SimpleProcedureLeg[];
+}
+
 export interface AiRequestPreview {
   model: string;
   prompt: string;
