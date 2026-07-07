@@ -416,7 +416,7 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       schemaName: builtPrompt.outputSchemaName,
       schemaVersion: builtPrompt.outputSchemaVersion,
       inputPackageHash: promptRun.inputPackageHash,
-      imagePages: imagePageRecords(builtPrompt, group.aiResponse.imageMode),
+      imagePages: group.aiResponse.imagePages ?? imagePageRecords(builtPrompt, group.aiResponse.imageMode),
       supportSummaryPages: Array.from(new Set(builtPrompt.supportSummaries.flatMap((item) => item.pageNos))).sort((a, b) => a - b),
       startedAt,
       completedAt,
@@ -636,6 +636,7 @@ function imagePageRecords(builtPrompt: BuiltPrompt, imageMode: 'base64' | 'url' 
     pageNo: page.pageNo,
     aipPageNo: page.aipPageNo,
     role: page.role,
+    region: page.region || 'full_page',
     imageMode,
   }));
 }

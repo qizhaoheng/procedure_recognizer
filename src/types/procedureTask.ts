@@ -11,6 +11,17 @@ export type SupportType = 'AIRPORT_METADATA' | 'RUNWAY_DATA' | 'RUNWAY_OPERATION
 export type SendPolicy = 'REQUIRED' | 'OPTIONAL' | 'EXCLUDED';
 export type SendMode = 'SUMMARY_ONLY' | 'IMAGE_ONLY' | 'SUMMARY_AND_IMAGE' | 'NOT_SENT';
 export type AiInputPageRole = 'CHART' | 'TABULAR' | 'COORDINATES' | 'MINIMA';
+export type AiImageRegion = 'full_page' | 'header' | 'main_chart' | 'table' | 'notes' | 'msa' | 'profile' | 'minima';
+
+export interface AiImageQuality {
+  expectedWidthPx: number;
+  expectedHeightPx: number;
+  renderScale: number;
+  format: 'png' | 'jpeg';
+  isHighRes: boolean;
+  isThumbnail: boolean;
+  warning?: string;
+}
 
 export interface SupportingInfoRefs {
   airportMetadata?: number[];
@@ -111,10 +122,32 @@ export interface ProcedureGroup {
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
-  geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'ERROR';
+  geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'GENERATED_WITHOUT_GEOMETRY' | 'ERROR';
   geojsonGeneratedAt?: string;
   geojsonError?: string;
   reviewRequired?: boolean;
+}
+
+export interface PackageWorkflowState {
+  groupingReady: boolean;
+  aiRequestReady: boolean;
+  recognitionStatus: 'NOT_STARTED' | 'RUNNING' | 'COMPLETED' | 'ERROR';
+  geojsonStatus: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'GENERATED_WITHOUT_GEOMETRY' | 'ERROR';
+  recognitionSummary?: {
+    procedureCount: number;
+    chartTextCount: number;
+    tableLegCount: number;
+    geometrySemanticCount: number;
+    warningCount: number;
+  };
+  geojsonSummary?: {
+    featureCount: number;
+    renderableCount: number;
+    pointCount: number;
+    lineStringCount: number;
+    polygonCount: number;
+    nullGeometryCount: number;
+  };
 }
 
 export interface SupportPageRef {
@@ -151,12 +184,14 @@ export interface AiInputPage {
   pageNo: number;
   aipPageNo?: string;
   role: AiInputPageRole;
+  region?: AiImageRegion;
   imageUrl?: string;
   thumbnailUrl?: string;
   sendMode: Extract<SendMode, 'IMAGE_ONLY' | 'SUMMARY_AND_IMAGE'>;
   reason: string;
   confidence: number;
   reviewRequired: boolean;
+  imageQuality?: AiImageQuality;
 }
 
 export interface AiInputPackage {
@@ -275,7 +310,72 @@ export interface VisionRunImagePage {
   pageNo: number;
   aipPageNo?: string;
   role: AiInputPageRole;
+  region?: AiImageRegion;
   imageMode: 'base64' | 'url';
+  widthPx?: number;
+  heightPx?: number;
+  fileSizeBytes?: number;
+  renderScale?: number;
+  isHighRes?: boolean;
+}
+
+export interface ProcedureClassificationResult {
+  packageType?: string | null;
+  procedureCategory?: string | null;
+  navigationType?: string | null;
+  runway?: string | null;
+  chartPurpose?: string | null;
+  procedureNames?: string[];
+  confidence?: number;
+}
+
+export interface ChartTextItem {
+  text: string;
+  normalizedText?: string | null;
+  role?: string;
+  region?: string;
+  sourcePageNo?: number | null;
+  usedInProcedure?: boolean;
+  confidence?: number;
+}
+
+export interface GeometrySemanticItem {
+  type: string;
+  labelText?: string | null;
+  centerNavaid?: string | null;
+  radiusNm?: number | null;
+  radialDeg?: number | null;
+  inboundTrackDeg?: number | null;
+  direction?: string | null;
+  relatedProcedures?: string[];
+  sourcePageNo?: number | null;
+  confidence?: number;
+  reviewRequired?: boolean;
+}
+
+export interface SupportObjectItem {
+  ident: string;
+  type?: string;
+  sourcePageNo?: number | null;
+  usedInProcedure?: boolean;
+  supportOnly?: boolean;
+  reason?: string | null;
+  confidence?: number;
+}
+
+export interface TableLegItem {
+  procedureName?: string | null;
+  sequence?: number | null;
+  pathTerminator?: string | null;
+  fromFix?: string | null;
+  toFix?: string | null;
+  courseDeg?: number | null;
+  distanceNm?: number | null;
+  altitudeConstraint?: string | null;
+  turnDirection?: string | null;
+  remarks?: string | null;
+  sourcePageNo?: number | null;
+  confidence?: number;
 }
 
 export interface ProcedureUnderstandingResult {
@@ -285,6 +385,11 @@ export interface ProcedureUnderstandingResult {
   procedureCategory?: string | null;
   navigationType?: string | null;
   runway?: string | null;
+  procedureClassification?: ProcedureClassificationResult | null;
+  chartTexts?: ChartTextItem[];
+  geometrySemantics?: GeometrySemanticItem[];
+  supportObjects?: SupportObjectItem[];
+  tableLegs?: TableLegItem[];
   procedures?: ProcedureUnderstandingProcedure[];
   fixes?: Array<Record<string, unknown>>;
   navaids?: Array<Record<string, unknown>>;

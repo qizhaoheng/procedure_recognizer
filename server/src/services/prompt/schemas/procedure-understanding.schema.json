@@ -11,6 +11,11 @@
     "procedureCategory",
     "navigationType",
     "runway",
+    "procedureClassification",
+    "chartTexts",
+    "geometrySemantics",
+    "supportObjects",
+    "tableLegs",
     "procedures",
     "fixes",
     "navaids",
@@ -30,6 +35,23 @@
     "procedureCategory": { "type": ["string", "null"] },
     "navigationType": { "type": ["string", "null"] },
     "runway": { "type": ["string", "null"] },
+    "procedureClassification": { "$ref": "#/$defs/procedureClassification" },
+    "chartTexts": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/chartText" }
+    },
+    "geometrySemantics": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/geometrySemantic" }
+    },
+    "supportObjects": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/supportObject" }
+    },
+    "tableLegs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/tableLeg" }
+    },
     "procedures": {
       "type": "array",
       "items": { "$ref": "#/$defs/procedure" }
@@ -70,6 +92,148 @@
     "reviewRequired": { "type": "boolean" }
   },
   "$defs": {
+    "procedureClassification": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["packageType", "procedureCategory", "navigationType", "runway", "chartPurpose", "procedureNames", "confidence"],
+      "properties": {
+        "packageType": { "type": ["string", "null"], "enum": ["SID", "STAR", "APPROACH", null] },
+        "procedureCategory": { "type": ["string", "null"], "enum": ["DEPARTURE", "ARRIVAL", "APPROACH", null] },
+        "navigationType": {
+          "type": ["string", "null"],
+          "enum": ["RNAV", "RNP", "DME_ARC", "ILS", "VOR", "NDB", "RADAR", "CONVENTIONAL", null]
+        },
+        "runway": { "type": ["string", "null"] },
+        "chartPurpose": { "type": ["string", "null"] },
+        "procedureNames": { "type": "array", "items": { "type": "string" } },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "chartText": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "normalizedText", "role", "region", "sourcePageNo", "usedInProcedure", "confidence"],
+      "properties": {
+        "text": { "type": "string" },
+        "normalizedText": { "type": ["string", "null"] },
+        "role": {
+          "type": "string",
+          "enum": [
+            "PROCEDURE_NAME",
+            "FIX",
+            "NAVAID",
+            "DME_LABEL",
+            "RADIAL_LABEL",
+            "LEAD_RADIAL",
+            "COURSE",
+            "ALTITUDE",
+            "SPEED",
+            "HOLDING",
+            "RUNWAY",
+            "NOTE",
+            "MSA",
+            "OTHER"
+          ]
+        },
+        "region": {
+          "type": "string",
+          "enum": ["HEADER", "MAIN_CHART", "TABLE", "NOTES", "MSA", "PROFILE", "UNKNOWN"]
+        },
+        "sourcePageNo": { "type": ["integer", "null"], "minimum": 1 },
+        "usedInProcedure": { "type": "boolean" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "geometrySemantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "labelText",
+        "centerNavaid",
+        "radiusNm",
+        "radialDeg",
+        "inboundTrackDeg",
+        "direction",
+        "relatedProcedures",
+        "sourcePageNo",
+        "confidence",
+        "reviewRequired"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "DME_ARC",
+            "RADIAL",
+            "LEAD_RADIAL",
+            "PROCEDURE_TRACK",
+            "COMMON_SEGMENT",
+            "TURN",
+            "HOLDING",
+            "RUNWAY_ALIGNMENT",
+            "MSA_SECTOR",
+            "LABEL_BINDING"
+          ]
+        },
+        "labelText": { "type": ["string", "null"] },
+        "centerNavaid": { "type": ["string", "null"] },
+        "radiusNm": { "type": ["number", "null"], "minimum": 0 },
+        "radialDeg": { "type": ["number", "null"], "minimum": 0, "maximum": 360 },
+        "inboundTrackDeg": { "type": ["number", "null"], "minimum": 0, "maximum": 360 },
+        "direction": { "type": ["string", "null"], "enum": ["CLOCKWISE", "COUNTERCLOCKWISE", "UNKNOWN", null] },
+        "relatedProcedures": { "type": "array", "items": { "type": "string" } },
+        "sourcePageNo": { "type": ["integer", "null"], "minimum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      }
+    },
+    "supportObject": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ident", "type", "sourcePageNo", "usedInProcedure", "supportOnly", "reason", "confidence"],
+      "properties": {
+        "ident": { "type": "string" },
+        "type": { "type": "string", "enum": ["NAVAID", "RUNWAY", "AIRPORT", "COMMUNICATION", "OTHER"] },
+        "sourcePageNo": { "type": ["integer", "null"], "minimum": 1 },
+        "usedInProcedure": { "type": "boolean" },
+        "supportOnly": { "type": "boolean" },
+        "reason": { "type": ["string", "null"] },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "tableLeg": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "procedureName",
+        "sequence",
+        "pathTerminator",
+        "fromFix",
+        "toFix",
+        "courseDeg",
+        "distanceNm",
+        "altitudeConstraint",
+        "turnDirection",
+        "remarks",
+        "sourcePageNo",
+        "confidence"
+      ],
+      "properties": {
+        "procedureName": { "type": ["string", "null"] },
+        "sequence": { "type": ["integer", "null"], "minimum": 1 },
+        "pathTerminator": { "type": ["string", "null"] },
+        "fromFix": { "type": ["string", "null"] },
+        "toFix": { "type": ["string", "null"] },
+        "courseDeg": { "type": ["number", "null"], "minimum": 0, "maximum": 360 },
+        "distanceNm": { "type": ["number", "null"], "minimum": 0 },
+        "altitudeConstraint": { "type": ["string", "null"] },
+        "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", "NONE", "UNKNOWN", null] },
+        "remarks": { "type": ["string", "null"] },
+        "sourcePageNo": { "type": ["integer", "null"], "minimum": 1 },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
     "procedure": {
       "type": "object",
       "additionalProperties": false,

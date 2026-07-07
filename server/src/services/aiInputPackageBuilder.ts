@@ -1,4 +1,5 @@
 import type {
+  AiImageRegion,
   AiInputPackage,
   AiInputPage,
   AiInputPageRole,
@@ -10,6 +11,7 @@ import type {
   SupportType,
   SupportingInfoRef,
 } from '../types/procedure';
+import { predictImageQuality } from './llm/imageRegions';
 import { routePromptTemplate } from './prompt/promptRouter';
 import { extractSupportingInfo } from './supportingInfoExtractor';
 
@@ -97,9 +99,10 @@ function buildCorePages(group: ProcedureGroup, pages: PdfPageAsset[]): AiInputPa
     ...coreItems(group.coordinatePages, 'COORDINATES', '识别 waypoint 坐标，支撑 ARINC 424 Fix / Waypoint 生成。', 'SUMMARY_AND_IMAGE', pages),
     ...coreItems(group.minimaPages, 'MINIMA', '识别最低标准、OCA/H、DA/MDA 和复飞相关约束。', 'SUMMARY_AND_IMAGE', pages),
   ];
-  const byPageNo = new Map<number, AiInputPage>();
-  for (const item of ordered) byPageNo.set(item.pageNo, item);
-  return Array.from(byPageNo.values()).sort((a, b) => a.pageNo - b.pageNo);
+  const byKey = new Map<string, AiInputPage>();
+  for (const item of ordered) byKey.set(`${item.pageNo}:${item.region || 'full_page'}`, item);
+  const deduped = Array.from(byKey.values()).sort((a, b) => a.pageNo - b.pageNo);
+  return [...deduped, ...chartRegionCrops(group, pages)];
 }
 
 function coreItems(
@@ -108,18 +111,48 @@ function coreItems(
   reason: string,
   sendMode: Extract<SendMode, 'IMAGE_ONLY' | 'SUMMARY_AND_IMAGE'>,
   pages: PdfPageAsset[],
-) {
+  region: AiImageRegion = 'full_page',
+): AiInputPage[] {
   return pagesForNos(pages, pageNos ?? []).map((page) => ({
     pageNo: page.pageNo,
     aipPageNo: page.aipPageNo,
     role,
+    region,
     imageUrl: page.imageUrl,
     thumbnailUrl: page.thumbnailUrl,
     sendMode,
     reason,
     confidence: page.confidence ?? 0.8,
     reviewRequired: Boolean(page.reviewRequired),
+    imageQuality: predictImageQuality(page, region),
   }));
+}
+
+// 复杂传统程序图（DME ARC 等）除整页外，再裁剪主图区和页头单独发送，帮助模型识别小字标签。
+function chartRegionCrops(group: ProcedureGroup, pages: PdfPageAsset[]): AiInputPage[] {
+  const nav = String(group.navigationType || '').toUpperCase();
+  if (!/DME_ARC|CONVENTIONAL|VOR|NDB|ILS|LOC/.test(nav)) return [];
+
+  const cropReasons: Array<{ region: AiImageRegion; reason: string }> = [
+    { region: 'main_chart', reason: '主图区高倍裁剪：识别 DME ARC、radial、lead radial、航迹与标签绑定等小字要素。' },
+    { region: 'header', reason: '页头裁剪：识别图名、程序名、跑道和图件编号。' },
+  ];
+
+  return pagesForNos(pages, group.chartPages ?? []).flatMap((page) =>
+    cropReasons.map(({ region, reason }) => ({
+      pageNo: page.pageNo,
+      aipPageNo: page.aipPageNo,
+      role: 'CHART' as AiInputPageRole,
+      region,
+      imageUrl: page.imageUrl,
+      thumbnailUrl: page.thumbnailUrl,
+      sendMode: 'IMAGE_ONLY' as const,
+      reason,
+      confidence: page.confidence ?? 0.8,
+      reviewRequired: Boolean(page.reviewRequired),
+      imageQuality: predictImageQuality(page, region),
+    })),
+  );
 }
 
 function buildSupportingInfo(group: ProcedureGroup, pages: PdfPageAsset[]): SupportingInfoRef[] {
@@ -291,12 +324,14 @@ function supportImagePage(item: SupportingInfoRef, page: PdfPageAsset): AiInputP
     pageNo: page.pageNo,
     aipPageNo: page.aipPageNo,
     role: 'CHART',
+    region: 'full_page',
     imageUrl: page.imageUrl,
     thumbnailUrl: page.thumbnailUrl,
     sendMode: item.sendMode === 'IMAGE_ONLY' ? 'IMAGE_ONLY' : 'SUMMARY_AND_IMAGE',
     reason: item.reason,
     confidence: item.confidence,
     reviewRequired: item.reviewRequired,
+    imageQuality: predictImageQuality(page, 'full_page'),
   };
 }
 
