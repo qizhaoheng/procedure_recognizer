@@ -16,17 +16,17 @@ import {
   Upload,
   Wand2,
 } from 'lucide-vue-next';
+import ProcedureMap from '../components/procedure/ProcedureMap.vue';
+import type { LayerVisibility } from '../components/procedure/ProcedureLayerControl.vue';
+import { parseProcedureGeoJson } from '../utils/procedureGeojsonParser';
 import type {
   AiInputPackage,
   AiInputPage,
-  AiRequestPreview,
   BuiltPromptPreview,
-  ChartRole,
   EvaluationResult,
-  NavigationType,
   PackageType,
+  PackageWorkflowState,
   PdfPageAsset,
-  ProcedureCategory,
   ProcedureGroup,
   ProcedureTask,
   SendMode,
@@ -38,6 +38,16 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const route = useRoute();
 const router = useRouter();
+
+type StepKey = 'grouping' | 'request' | 'recognition' | 'preview';
+
+const steps: Array<{ key: StepKey; title: string }> = [
+  { key: 'grouping', title: 'PDF 分组' },
+  { key: 'request', title: 'AI 请求预览' },
+  { key: 'recognition', title: 'AI 识别结果' },
+  { key: 'preview', title: 'GeoJSON 预览' },
+];
+const stepKeys = steps.map((step) => step.key);
 
 const statusLabels: Record<string, string> = {
   UPLOADED: '已上传',
@@ -51,11 +61,8 @@ const statusLabels: Record<string, string> = {
   ERROR: '失败',
 };
 
-const chartRoles: ChartRole[] = ['CHART', 'TABULAR_DESCRIPTION', 'WAYPOINT_COORDINATES', 'MINIMA_TABLE', 'CHART_INDEX', 'BLANK', 'SUPPORT', 'OTHER', 'UNKNOWN'];
-const procedureCategories: ProcedureCategory[] = ['ARRIVAL', 'DEPARTURE', 'APPROACH', 'AERODROME', 'AIRSPACE', 'UNKNOWN'];
-const groupCategories: ProcedureGroup['procedureCategory'][] = ['ARRIVAL', 'DEPARTURE', 'APPROACH', 'UNKNOWN'];
-const navigationTypes: NavigationType[] = ['RNAV', 'RNP', 'RNP_AR', 'ILS', 'ILS_LOC', 'LOC', 'VOR', 'NDB', 'DME_ARC', 'RADAR', 'CONVENTIONAL', 'UNKNOWN'];
 const packageTypes: PackageType[] = ['STAR', 'SID', 'APPROACH', 'OTHER'];
+const groupCategories: ProcedureGroup['procedureCategory'][] = ['ARRIVAL', 'DEPARTURE', 'APPROACH', 'UNKNOWN'];
 const sourceLabels: Record<string, string> = {
   AD_2_24_CHART_INDEX: 'AD 2.24 图件目录',
   PAGE_HEADER_RULE: '页头规则',
@@ -70,15 +77,18 @@ const selectedGroupId = ref('');
 const busy = ref(false);
 const message = ref('等待上传 PDF');
 const error = ref('');
-const aiPreview = ref<AiRequestPreview>();
+const currentStep = ref<StepKey>('grouping');
 const aiInputPackage = ref<AiInputPackage>();
 const aiInputBusy = ref(false);
-const aiInputTab = ref<'core' | 'support' | 'summary' | 'manifest'>('support');
+const recognitionBusy = ref(false);
+const geojsonBusy = ref(false);
 const evaluationBusy = ref(false);
 const promptPreview = ref<BuiltPromptPreview>();
-const promptPreviewOpen = ref(false);
+const promptModalOpen = ref(false);
+const promptModalTab = ref<'prompt' | 'schema' | 'request'>('prompt');
 const promptPreviewBusy = ref(false);
-const promptPreviewTab = ref<'images' | 'support' | 'prompt' | 'schema' | 'manifest'>('prompt');
+const rawJsonOpen = ref(false);
+const mapResetCounter = ref(0);
 const pdfCanvas = ref<HTMLCanvasElement>();
 const pdfFrame = ref<HTMLDivElement>();
 const pdfRenderBusy = ref(false);
@@ -97,6 +107,23 @@ let pdfDocument: any;
 let renderSerial = 0;
 let restoringFromRoute = false;
 
+const mapLayerVisibility = ref<LayerVisibility>({
+  procedureTrack: true,
+  procedureLeg: true,
+  procedureFix: true,
+  derivedFix: true,
+  navaid: true,
+  runway: true,
+  dmeArc: true,
+  radial: true,
+  leadRadial: true,
+  msaSector: true,
+  directionArrows: true,
+  tangentMarks: true,
+  labels: true,
+  reviewOnly: false,
+});
+
 const previewStageStyle = computed(() => ({
   transform: `translate(${previewPanX.value}px, ${previewPanY.value}px) scale(${previewZoom.value})`,
 }));
@@ -110,89 +137,255 @@ const selectedGroupPages = computed(() => {
   return task.value.pages.filter((page) => pageNos.has(page.pageNo));
 });
 const hasGeoJson = computed(() => Boolean(selectedGroup.value?.geojson));
-const corePageNoSet = computed(() => new Set(aiInputPackage.value?.corePages.map((page) => page.pageNo) ?? []));
-const includedSupportImages = computed(() => aiInputPackage.value?.includedImages.filter((page) => !corePageNoSet.value.has(page.pageNo)) ?? []);
-const supportSummaryJson = computed(() => JSON.stringify(aiInputPackage.value?.supportSummary ?? {}, null, 2));
-const promptTextForCopy = computed(() => promptPreview.value ? `${promptPreview.value.systemPrompt}\n\n${promptPreview.value.userPrompt}` : '');
-const promptSchemaJson = computed(() => JSON.stringify(promptPreview.value?.responseSchema ?? {}, null, 2));
-const promptManifestJson = computed(() => JSON.stringify(promptPreview.value
-  ? {
-      promptTemplateId: promptPreview.value.promptTemplateId,
-      promptTemplateName: promptPreview.value.promptTemplateName,
-      promptVersion: promptPreview.value.promptVersion,
-      outputSchemaName: promptPreview.value.outputSchemaName,
-      outputSchemaVersion: promptPreview.value.outputSchemaVersion,
-      inputImages: promptPreview.value.inputImages.map(({ pageNo, aipPageNo, role, sendMode }) => ({ pageNo, aipPageNo, role, sendMode })),
-      supportSummaries: promptPreview.value.supportSummaries.map(({ title, supportType, pageNos, sendMode }) => ({ title, supportType, pageNos, sendMode })),
-      excludedSupport: promptPreview.value.excludedSupport.map(({ title, supportType, pageNos, reason }) => ({ title, supportType, pageNos, reason })),
-    }
-  : {}, null, 2));
-const aiPreviewText = computed(() => {
-  if (!aiPreview.value) return '';
-  const inputPackage = aiPreview.value.aiInputPackage || aiInputPackage.value;
-  return JSON.stringify({
-    model: aiPreview.value.model,
-    procedurePackage: inputPackage
-      ? {
-          packageId: inputPackage.packageId,
-          packageName: inputPackage.packageName,
-          promptTemplate: inputPackage.promptTemplate,
-          outputSchemaName: inputPackage.outputSchemaName,
-        }
-      : undefined,
-    corePages: inputPackage?.corePages ?? aiPreview.value.inputPages,
-    supportingInfoPackage: inputPackage?.supportingInfo,
-    images: inputPackage?.includedImages.map(({ pageNo, role, sendMode }) => ({ pageNo, role, sendMode })),
-    supportSummaries: inputPackage?.includedSummaries.map(({ supportType, pageNos, sendMode }) => ({ supportType, pageNos, sendMode })),
-    excludedSupport: inputPackage?.excludedSupport.map(({ supportType, pageNos, reason }) => ({ supportType, pageNos, reason })),
-    prompt: aiPreview.value.prompt,
-    outputSchema: aiPreview.value.schema,
-  }, null, 2);
+
+const supportingPageCount = computed(() => {
+  const group = selectedGroup.value;
+  if (!group) return 0;
+  if (aiInputPackage.value) {
+    return new Set(aiInputPackage.value.supportingInfo.flatMap((info) => info.pageNos)).size;
+  }
+  return group.supportingPages?.length ?? group.supportingInfoDetails?.length ?? 0;
 });
-const selectedGroupIndexLabel = computed(() => {
-  const index = task.value?.groups.findIndex((group) => group.groupId === selectedGroupId.value) ?? -1;
-  return index >= 0 ? `${index + 1} / ${task.value?.groups.length || 0}` : '-';
-});
+
 const procedureUnderstanding = computed(() => selectedGroup.value?.procedureUnderstanding);
 const visionRunRecord = computed(() => selectedGroup.value?.visionRunRecord);
 const recognitionEvaluation = computed(() => selectedGroup.value?.recognitionEvaluation);
-const llmRunStatus = computed(() => {
-  if (selectedGroup.value?.status === 'AI_RUNNING') return 'RUNNING';
+const llmRunStatus = computed<PackageWorkflowState['recognitionStatus']>(() => {
+  if (recognitionBusy.value || selectedGroup.value?.status === 'AI_RUNNING') return 'RUNNING';
   if (visionRunRecord.value?.errorType || selectedGroup.value?.status === 'ERROR') return 'ERROR';
   if (procedureUnderstanding.value || selectedGroup.value?.status === 'AI_COMPLETED') return 'COMPLETED';
   return 'NOT_STARTED';
 });
-const visionImagePagesText = computed(() => {
-  const pages = visionRunRecord.value?.imagePages ?? [];
-  return pages.map((page) => `PDF ${page.pageNo}${page.aipPageNo ? ` / ${page.aipPageNo}` : ''} / ${page.role} / ${page.imageMode}`).join(', ') || '-';
+const recognitionClassification = computed(() => procedureUnderstanding.value?.procedureClassification);
+const recognitionChartTexts = computed(() => procedureUnderstanding.value?.chartTexts ?? []);
+const recognitionTableLegs = computed(() => procedureUnderstanding.value?.tableLegs ?? []);
+const recognitionGeometry = computed(() => procedureUnderstanding.value?.geometrySemantics ?? []);
+const recognitionSupportObjects = computed(() => procedureUnderstanding.value?.supportObjects ?? []);
+const understandingJson = computed(() => JSON.stringify(procedureUnderstanding.value ?? {}, null, 2));
+const supportSummaryJson = computed(() => JSON.stringify(aiInputPackage.value?.supportSummary ?? {}, null, 2));
+const promptTextForCopy = computed(() => promptPreview.value ? `${promptPreview.value.systemPrompt}\n\n${promptPreview.value.userPrompt}` : '');
+const promptSchemaJson = computed(() => JSON.stringify(promptPreview.value?.responseSchema ?? {}, null, 2));
+const fullRequestJson = computed(() => {
+  if (!promptPreview.value) return '';
+  return JSON.stringify({
+    model: aiInputPackage.value?.model,
+    promptTemplateId: promptPreview.value.promptTemplateId,
+    promptVersion: promptPreview.value.promptVersion,
+    outputSchemaName: promptPreview.value.outputSchemaName,
+    outputSchemaVersion: promptPreview.value.outputSchemaVersion,
+    systemPrompt: promptPreview.value.systemPrompt,
+    userPrompt: promptPreview.value.userPrompt,
+    inputImages: promptPreview.value.inputImages.map(({ pageNo, aipPageNo, role, region, sendMode }) => ({ pageNo, aipPageNo, role, region, sendMode })),
+    supportSummaries: promptPreview.value.supportSummaries.map(({ title, supportType, pageNos, sendMode }) => ({ title, supportType, pageNos, sendMode })),
+    excludedSupport: promptPreview.value.excludedSupport.map(({ title, supportType, pageNos, reason }) => ({ title, supportType, pageNos, reason })),
+    responseSchema: promptPreview.value.responseSchema,
+  }, null, 2);
 });
-const supportSummaryPagesText = computed(() => pageRangeText(visionRunRecord.value?.supportSummaryPages ?? []));
-const llmBaseUrlHost = computed(() => hostText(visionRunRecord.value?.baseUrl));
-const recognitionLegRows = computed(() => {
-  const evidence = procedureUnderstanding.value?.sourceEvidence ?? [];
-  return (procedureUnderstanding.value?.procedures ?? []).flatMap((procedure) => (procedure.legs ?? []).map((leg) => {
-    const evidenceIds = Array.isArray(leg.sourceEvidenceIds) ? leg.sourceEvidenceIds : [];
-    const firstEvidence = evidence.find((item) => evidenceIds.includes(String(item.id)));
-    return {
-      procedureName: procedure.procedureName || '-',
-      sequence: leg.sequence,
-      pathTerminator: leg.pathTerminator,
-      fromFix: leg.fromFix,
-      fixIdentifier: leg.fixIdentifier,
-      courseDegMag: leg.courseDegMag,
-      distanceNm: leg.distanceNm,
-      turnDirection: leg.turnDirection,
-      altitudeConstraint: leg.altitudeConstraint,
-      speedLimitKias: leg.speedLimitKias,
-      navigationSpec: leg.navigationSpec || procedure.navigationSpec,
-      sourcePage: firstEvidence?.pageNo,
-      confidence: leg.confidence,
-      reviewRequired: leg.reviewRequired,
-    };
-  }));
+
+const classificationWarning = computed(() => {
+  if (llmRunStatus.value !== 'COMPLETED') return '';
+  const cls = recognitionClassification.value;
+  if (!cls || !cls.packageType || !cls.navigationType || !cls.runway) {
+    return 'AI 未正确判断程序类型，后续 GeoJSON 可能无效。';
+  }
+  if ((cls.confidence ?? 1) < 0.5) return '程序类型识别置信度过低，后续 GeoJSON 可能无效。';
+  return '';
 });
-const recognitionFixRows = computed(() => procedureUnderstanding.value?.fixes ?? []);
-const recognitionEvidenceRows = computed(() => procedureUnderstanding.value?.sourceEvidence ?? []);
+
+const effectiveNavigationType = computed(() => String(recognitionClassification.value?.navigationType || selectedGroup.value?.navigationType || '').toUpperCase());
+
+const keyTextChecks = computed(() => {
+  if (!effectiveNavigationType.value.includes('DME')) return [];
+  return [
+    { label: 'DME ARC（如 11 DME ARC）', pattern: /\d+\s*DME\s*ARC/i },
+    { label: 'DME 距离（如 13 DME）', pattern: /\d+\s*DME\b/i },
+    { label: '径向线 RDL（如 RDL340 / 160）', pattern: /RDL\s*\d{2,3}/i },
+    { label: '提前转弯径向 L-R（如 L-R332 / L-R348）', pattern: /L-?R\s*\d{2,3}/i },
+  ];
+});
+
+const missingKeyTexts = computed(() => {
+  if (llmRunStatus.value !== 'COMPLETED') return [];
+  return keyTextChecks.value
+    .filter((check) => !recognitionChartTexts.value.some((item) => check.pattern.test(item.text || '') || check.pattern.test(item.normalizedText || '')))
+    .map((check) => check.label);
+});
+
+const geometryMissing = computed(() => llmRunStatus.value === 'COMPLETED' && !recognitionGeometry.value.length);
+const supportLeakObjects = computed(() => recognitionSupportObjects.value.filter((item) => item.supportOnly === true && item.usedInProcedure === true));
+
+const recognitionSummary = computed<PackageWorkflowState['recognitionSummary']>(() => {
+  const understanding = procedureUnderstanding.value;
+  if (!understanding) return undefined;
+  return {
+    procedureCount: recognitionClassification.value?.procedureNames?.length || understanding.procedures?.length || 0,
+    chartTextCount: recognitionChartTexts.value.length,
+    tableLegCount: recognitionTableLegs.value.length,
+    geometrySemanticCount: recognitionGeometry.value.length,
+    warningCount:
+      (understanding.warnings?.length || 0)
+      + (classificationWarning.value ? 1 : 0)
+      + missingKeyTexts.value.length
+      + (geometryMissing.value ? 1 : 0)
+      + (supportLeakObjects.value.length ? 1 : 0),
+  };
+});
+
+const geojsonFeatures = computed(() => selectedGroup.value?.geojson?.features ?? []);
+const geojsonStats = computed<PackageWorkflowState['geojsonSummary']>(() => {
+  const features = geojsonFeatures.value;
+  let pointCount = 0;
+  let lineStringCount = 0;
+  let polygonCount = 0;
+  let nullGeometryCount = 0;
+  for (const feature of features) {
+    const type = feature.geometry?.type;
+    if (!type) nullGeometryCount += 1;
+    else if (type.includes('Point')) pointCount += 1;
+    else if (type.includes('LineString')) lineStringCount += 1;
+    else if (type.includes('Polygon')) polygonCount += 1;
+  }
+  return {
+    featureCount: features.length,
+    renderableCount: features.length - nullGeometryCount,
+    pointCount,
+    lineStringCount,
+    polygonCount,
+    nullGeometryCount,
+  };
+});
+
+const MAIN_OBJECT_TYPES = [
+  'Navaid',
+  'Runway',
+  'ProcedureFix',
+  'ProcedureLeg',
+  'ProcedureTrack',
+  'DMEReferenceCircle',
+  'RadialReference',
+  'LeadRadial',
+  'LabelPoint',
+  'SourceEvidence',
+];
+
+const objectTypeStats = computed(() => {
+  const counts = new Map<string, number>();
+  for (const feature of geojsonFeatures.value) {
+    const type = String((feature.properties as Record<string, unknown> | null)?.object_type || 'Unknown');
+    counts.set(type, (counts.get(type) || 0) + 1);
+  }
+  const rows = MAIN_OBJECT_TYPES
+    .map((type) => ({ type, count: counts.get(type) || 0 }))
+    .filter((row) => row.count > 0);
+  const otherCount = [...counts.entries()]
+    .filter(([type]) => !MAIN_OBJECT_TYPES.includes(type))
+    .reduce((sum, [, count]) => sum + count, 0);
+  if (otherCount) rows.push({ type: '其他', count: otherCount });
+  return rows;
+});
+
+const geojsonModel = computed(() => {
+  const geojson = selectedGroup.value?.geojson;
+  return geojson ? parseProcedureGeoJson(geojson) : undefined;
+});
+
+const geojsonDisplayStatus = computed<PackageWorkflowState['geojsonStatus']>(() => {
+  if (geojsonBusy.value || selectedGroup.value?.geojsonStatus === 'GENERATING') return 'GENERATING';
+  if (selectedGroup.value?.geojsonStatus === 'ERROR') return 'ERROR';
+  if (selectedGroup.value?.geojson) {
+    return geojsonStats.value?.renderableCount ? 'GENERATED' : 'GENERATED_WITHOUT_GEOMETRY';
+  }
+  return 'NOT_GENERATED';
+});
+
+const geojsonIssues = computed(() => {
+  if (!selectedGroup.value?.geojson) return [];
+  const issues: string[] = [];
+  const stats = geojsonStats.value;
+  if (stats && !stats.lineStringCount) {
+    issues.push('未生成程序航迹线。请返回 AI 识别结果，检查 geometrySemantics 是否包含 DME_ARC / RADIAL / PROCEDURE_TRACK。');
+  }
+  const excludedIdents = new Set(
+    recognitionSupportObjects.value
+      .filter((item) => item.usedInProcedure === false)
+      .map((item) => item.ident.toUpperCase()),
+  );
+  const leakedIdents = geojsonFeatures.value
+    .filter((feature) => {
+      const props = feature.properties as Record<string, unknown> | null;
+      if (props?.object_type !== 'Navaid') return false;
+      const ident = String(props.ident ?? props.identifier ?? props.name ?? '').toUpperCase();
+      return ident && excludedIdents.has(ident);
+    })
+    .map((feature) => String((feature.properties as Record<string, unknown>).ident ?? (feature.properties as Record<string, unknown>).identifier ?? (feature.properties as Record<string, unknown>).name));
+  if (leakedIdents.length) {
+    issues.push(`疑似辅助导航台（${[...new Set(leakedIdents)].join(' / ')}）被错误渲染，请检查 Step 3 的辅助对象过滤。`);
+  }
+  const hasDmeSemantics = recognitionGeometry.value.some((item) => String(item.type || '').toUpperCase().includes('DME'));
+  const hasDmeFeature = geojsonFeatures.value.some((feature) => {
+    const type = String((feature.properties as Record<string, unknown> | null)?.object_type || '');
+    return type === 'DMEReferenceCircle' || type === 'DMEArc';
+  });
+  if ((effectiveNavigationType.value.includes('DME') || hasDmeSemantics) && !hasDmeFeature) {
+    issues.push('未生成 DME ARC 参考圆，请检查 Step 3 是否识别出 DME_ARC（如 center=VJB radius=11）。');
+  }
+  return issues;
+});
+
+const stepDone = computed<Record<StepKey, boolean>>(() => ({
+  grouping: Boolean(task.value?.groups.length && selectedGroup.value),
+  request: Boolean(aiInputPackage.value),
+  recognition: llmRunStatus.value === 'COMPLETED',
+  preview: Boolean(selectedGroup.value?.geojson),
+}));
+
+const groupingSummaryText = computed(() => {
+  if (!task.value?.groups.length) return '';
+  const name = selectedGroup.value?.packageName || selectedGroup.value?.groupName || '-';
+  return `已识别 ${task.value.groups.length} 个程序包，当前选择 ${name}。`;
+});
+
+const requestSummaryText = computed(() => {
+  const pkg = aiInputPackage.value;
+  if (!pkg) return '';
+  return `将发送 ${pkg.includedImages.length} 张图片、${pkg.includedSummaries.length} 类辅助摘要，模板 ${pkg.promptTemplate}。`;
+});
+
+const recognitionSummaryText = computed(() => {
+  if (llmRunStatus.value === 'ERROR') return `AI 识别失败：${visionRunRecord.value?.errorMessage || '请查看 Step 3 详情'}`;
+  const summary = recognitionSummary.value;
+  if (!summary) return '';
+  const warningText = summary.warningCount ? `，${summary.warningCount} 条警告` : '';
+  return `识别出 ${summary.procedureCount} 个程序、${summary.chartTextCount} 条关键文本、${summary.geometrySemanticCount} 个几何语义${warningText}。`;
+});
+
+const geojsonSummaryText = computed(() => {
+  const stats = geojsonStats.value;
+  if (!selectedGroup.value?.geojson || !stats) return '';
+  return `生成 ${stats.featureCount} 个 Feature，其中 LineString ${stats.lineStringCount}，Point ${stats.pointCount}，Polygon ${stats.polygonCount}。`;
+});
+
+const stepSummaries = computed(() => [
+  { key: 'grouping', label: 'PDF 分组', text: groupingSummaryText.value },
+  { key: 'request', label: 'AI 请求', text: requestSummaryText.value },
+  { key: 'recognition', label: 'AI 识别', text: recognitionSummaryText.value },
+  { key: 'preview', label: 'GeoJSON', text: geojsonSummaryText.value },
+].filter((item) => item.text));
+
+function stepState(key: StepKey) {
+  if (currentStep.value === key) return 'current';
+  return stepDone.value[key] ? 'done' : 'todo';
+}
+
+function stepStateLabel(key: StepKey) {
+  const state = stepState(key);
+  return state === 'current' ? '当前' : state === 'done' ? '已完成' : '待处理';
+}
+
+function goToStep(step: StepKey) {
+  currentStep.value = step;
+  if (task.value) replaceRecognizerRoute(task.value.taskId, selectedGroup.value?.packageId || selectedGroupId.value || undefined);
+}
 
 onBeforeUnmount(() => {
   stopPolling();
@@ -204,8 +397,9 @@ onMounted(() => {
   void restoreFromRoute();
 });
 
-watch([() => task.value?.taskId, selectedPageNo], () => {
-  void renderSelectedPdfPage();
+watch([() => task.value?.taskId, selectedPageNo, currentStep], () => {
+  if (currentStep.value !== 'grouping') return;
+  void nextTick(() => renderSelectedPdfPage());
 });
 
 watch(
@@ -215,16 +409,28 @@ watch(
   },
 );
 
+watch(
+  () => route.query.step,
+  () => {
+    readStepFromRoute();
+  },
+);
+
+function readStepFromRoute() {
+  const step = queryString(route.query.step) as StepKey;
+  if (stepKeys.includes(step)) currentStep.value = step;
+}
+
 async function restoreFromRoute() {
   if (restoringFromRoute) return;
   const taskId = queryString(route.query.taskId);
   const packageId = queryString(route.query.packageId);
+  readStepFromRoute();
   if (!taskId) {
     task.value = undefined;
     selectedGroupId.value = '';
     selectedPageNo.value = undefined;
     aiInputPackage.value = undefined;
-    aiPreview.value = undefined;
     promptPreview.value = undefined;
     message.value = '等待上传 PDF';
     return;
@@ -245,7 +451,6 @@ async function restoreFromRoute() {
     selectedGroupId.value = '';
     selectedPageNo.value = undefined;
     aiInputPackage.value = undefined;
-    aiPreview.value = undefined;
     promptPreview.value = undefined;
     error.value = '任务不存在或已过期';
     message.value = toErrorMessage(restoreError);
@@ -277,6 +482,7 @@ function replaceRecognizerRoute(taskId: string, packageId?: string) {
     query: {
       taskId,
       ...(packageId ? { packageId } : {}),
+      step: currentStep.value,
     },
   });
 }
@@ -320,10 +526,11 @@ async function onFileSelected(event: Event) {
       createdAt: '',
       updatedAt: '',
     };
+    currentStep.value = 'grouping';
     replaceRecognizerRoute(uploaded.taskId);
     selectedPageNo.value = undefined;
     selectedGroupId.value = '';
-    aiPreview.value = undefined;
+    aiInputPackage.value = undefined;
     promptPreview.value = undefined;
     message.value = 'PDF 已上传，可以开始解析';
   } catch (uploadError) {
@@ -339,7 +546,6 @@ async function startParse() {
   if (!task.value) return;
   busy.value = true;
   error.value = '';
-  aiPreview.value = undefined;
   promptPreview.value = undefined;
   message.value = '正在创建解析任务';
 
@@ -385,26 +591,6 @@ async function refreshTask(showBusy = true) {
   } finally {
     if (showBusy) busy.value = false;
   }
-}
-
-async function saveSelectedPage() {
-  if (!task.value || !selectedPage.value) return;
-  const page = selectedPage.value;
-  const payload = {
-    aipPageNo: page.aipPageNo,
-    chartRole: page.chartRole,
-    procedureCategory: page.procedureCategory,
-    navigationType: page.navigationType,
-    runway: page.runway,
-    chartTitle: page.chartTitle,
-    procedureNames: page.procedureNames,
-  };
-  task.value = await requestJson<ProcedureTask>(`/api/procedure-tasks/${task.value.taskId}/pages/${page.pageNo}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  message.value = `已保存第 ${page.pageNo} 页识别结果`;
 }
 
 async function autoRegroup() {
@@ -479,26 +665,6 @@ async function saveGroupMetadata() {
   message.value = '已保存分组';
 }
 
-async function addSelectedPageToGroup() {
-  if (!selectedPage.value || !selectedGroup.value) return;
-  const groups = cloneGroups();
-  groups.forEach((group) => removePageNoFromGroup(group, selectedPage.value!.pageNo));
-  const group = groups.find((item) => item.groupId === selectedGroup.value?.groupId);
-  if (!group) return;
-  addPageNoToGroup(group, selectedPage.value);
-  group.procedureNames = Array.from(new Set([...group.procedureNames, ...(selectedPage.value.procedureNames ?? [])]));
-  await saveGroups(groups);
-}
-
-async function removeSelectedPageFromGroup() {
-  if (!selectedPage.value || !selectedGroup.value) return;
-  const groups = cloneGroups();
-  const group = groups.find((item) => item.groupId === selectedGroup.value?.groupId);
-  if (!group) return;
-  removePageNoFromGroup(group, selectedPage.value.pageNo);
-  await saveGroups(groups);
-}
-
 async function extractSelectedCandidates() {
   if (!task.value || !selectedGroup.value) return;
   busy.value = true;
@@ -515,15 +681,17 @@ async function extractSelectedCandidates() {
   }
 }
 
-async function loadAiPreview() {
-  await loadPromptPreview('prompt');
+async function openPromptModal(tab: typeof promptModalTab.value = 'prompt') {
+  if (!task.value || !selectedGroup.value) return;
+  promptModalTab.value = tab;
+  promptModalOpen.value = true;
+  if (promptPreview.value) return;
+  await loadPromptPreview();
 }
 
-async function loadPromptPreview(tab: typeof promptPreviewTab.value = 'prompt') {
+async function loadPromptPreview() {
   if (!task.value || !selectedGroup.value) return;
-  promptPreviewTab.value = tab;
   promptPreviewBusy.value = true;
-  promptPreviewOpen.value = true;
   try {
     promptPreview.value = await requestJson<BuiltPromptPreview>(
       `/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/prompt-preview`,
@@ -536,9 +704,12 @@ async function loadPromptPreview(tab: typeof promptPreviewTab.value = 'prompt') 
   }
 }
 
-async function runAiRecognition() {
+async function sendRecognition() {
   if (!task.value || !selectedGroup.value) return;
-  busy.value = true;
+  goToStep('recognition');
+  recognitionBusy.value = true;
+  error.value = '';
+  message.value = '正在调用 AI 识别';
   try {
     const result = await requestJson<{ status: string }>(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/run-vision-recognition`, {
       method: 'POST',
@@ -552,7 +723,7 @@ async function runAiRecognition() {
     message.value = `AI 识别未完成：${error.value}`;
     await refreshTask(false);
   } finally {
-    busy.value = false;
+    recognitionBusy.value = false;
   }
 }
 
@@ -565,7 +736,7 @@ async function evaluateRecognition() {
       { method: 'POST' },
     );
     selectedGroup.value.recognitionEvaluation = result;
-    message.value = 'Golden Case evaluation completed';
+    message.value = 'Golden Case 评测已完成';
   } catch (evaluationError) {
     error.value = toErrorMessage(evaluationError);
   } finally {
@@ -573,28 +744,39 @@ async function evaluateRecognition() {
   }
 }
 
-async function previewGeoJson() {
+async function generateGeoJson() {
   if (!task.value || !selectedGroup.value) return;
-  if (!selectedGroup.value.geojson) {
-    busy.value = true;
-    message.value = '正在生成 GeoJSON 预览结果';
-    try {
-      await requestJson(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/generate-geojson`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'geojson' }),
-      });
-      await refreshTask(false);
-    } catch (previewError) {
-      error.value = toErrorMessage(previewError);
-      message.value = 'GeoJSON 预览生成失败';
-      busy.value = false;
-      return;
-    }
-    busy.value = false;
-    message.value = 'GeoJSON 已生成，可以预览或下载';
-    return;
+  geojsonBusy.value = true;
+  error.value = '';
+  message.value = '正在生成 GeoJSON';
+  try {
+    await requestJson(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/generate-geojson`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode: 'geojson' }),
+    });
+    await refreshTask(false);
+    mapResetCounter.value += 1;
+    message.value = 'GeoJSON 已生成';
+  } catch (generateError) {
+    error.value = toErrorMessage(generateError);
+    message.value = 'GeoJSON 生成失败';
+  } finally {
+    geojsonBusy.value = false;
   }
+}
+
+async function proceedToPreview() {
+  if (geometryMissing.value) {
+    const confirmed = window.confirm('AI 识别结果缺少关键几何语义，生成的 GeoJSON 可能不完整，是否继续？');
+    if (!confirmed) return;
+  }
+  goToStep('preview');
+  if (!selectedGroup.value?.geojson) await generateGeoJson();
+}
+
+function openFullMapPreview() {
+  if (!task.value || !selectedGroup.value) return;
   router.push({
     path: '/procedure-geojson',
     query: {
@@ -625,20 +807,10 @@ function selectPage(page: PdfPageAsset) {
   selectedPageNo.value = page.pageNo;
 }
 
-function selectGroup(group: ProcedureGroup) {
-  selectedGroupId.value = group.groupId;
-  selectedPageNo.value = allGroupPages(group)[0] || selectedPageNo.value;
-  aiPreview.value = undefined;
-  promptPreview.value = undefined;
-  if (task.value) replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
-  void loadAiInputPackage(false);
-}
-
 function handleSelectedGroupChanged() {
   const group = selectedGroup.value;
   if (!group) return;
   selectedPageNo.value = allGroupPages(group)[0] || selectedPageNo.value;
-  aiPreview.value = undefined;
   promptPreview.value = undefined;
   if (task.value) replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
   void loadAiInputPackage(false);
@@ -669,13 +841,6 @@ function addPageNoToGroup(group: ProcedureGroup, page: PdfPageAsset) {
           ? group.minimaPages
           : group.otherPages;
   if (!target.includes(page.pageNo)) target.push(page.pageNo);
-}
-
-function removePageNoFromGroup(group: ProcedureGroup, pageNo: number) {
-  [group.chartPages, group.tabularPages, group.coordinatePages, group.minimaPages, group.otherPages].forEach((list) => {
-    const index = list.indexOf(pageNo);
-    if (index >= 0) list.splice(index, 1);
-  });
 }
 
 function allGroupPages(group: ProcedureGroup) {
@@ -742,13 +907,12 @@ async function setSupportSendMode(ref: SupportingInfoRef, sendMode: SendMode) {
   };
   await saveGroups(groups);
   await loadAiInputPackage(false);
-  aiPreview.value = undefined;
   promptPreview.value = undefined;
   message.value = 'AI 输入包发送策略已更新';
 }
 
 async function copyPrompt() {
-  if (!promptPreview.value) await loadPromptPreview('prompt');
+  if (!promptPreview.value) await loadPromptPreview();
   if (!promptTextForCopy.value) return;
   await navigator.clipboard.writeText(promptTextForCopy.value);
   message.value = 'Prompt 已复制';
@@ -760,12 +924,6 @@ function manualPolicyFor(ref: SupportingInfoRef, sendMode: SendMode): SendPolicy
   return ref.sendPolicy;
 }
 
-function previewPage(pageNo: number | undefined) {
-  if (!pageNo) return;
-  selectedPageNo.value = pageNo;
-  message.value = `正在预览 PDF ${pageNo}`;
-}
-
 function roleLabel(role: AiInputPage['role']) {
   const labels: Record<AiInputPage['role'], string> = {
     CHART: '图面页',
@@ -774,6 +932,32 @@ function roleLabel(role: AiInputPage['role']) {
     MINIMA: '最低标准页',
   };
   return labels[role];
+}
+
+function regionLabel(region: AiInputPage['region']) {
+  const labels: Record<NonNullable<AiInputPage['region']>, string> = {
+    full_page: 'full_page',
+    header: 'header_crop',
+    main_chart: 'main_chart_crop',
+    table: 'table_crop',
+    notes: 'notes_crop',
+    msa: 'msa_crop',
+    profile: 'profile_crop',
+    minima: 'minima_crop',
+  };
+  return labels[region || 'full_page'];
+}
+
+function imageSizeText(page: AiInputPage) {
+  const quality = page.imageQuality;
+  if (!quality) return '-';
+  return `${quality.expectedWidthPx} x ${quality.expectedHeightPx}`;
+}
+
+function fileSizeText(bytes: number | undefined) {
+  if (!bytes) return '-';
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  return `${Math.round(bytes / 1024)} KB`;
 }
 
 function policyLabel(policy: SendPolicy) {
@@ -796,77 +980,32 @@ function sentLabel(ref: SupportingInfoRef) {
   return '是';
 }
 
-function geojsonStatusLabel(group: ProcedureGroup | undefined) {
-  if (!group) return '-';
-  if (group.geojsonStatus === 'GENERATING') return 'GeoJSON 生成中';
-  if (group.geojsonStatus === 'ERROR') return 'GeoJSON 生成失败';
-  if (group.geojson || group.geojsonStatus === 'GENERATED') return 'GeoJSON 已生成';
-  return 'GeoJSON 未生成';
-}
-
-function summaryLines(summary: Record<string, unknown>) {
-  return flattenSummary(summary).slice(0, 12);
-}
-
 function valueText(value: unknown) {
   if (value === undefined || value === null || value === '') return '-';
   if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(2).replace(/\.?0+$/, '');
-  if (typeof value === 'boolean') return value ? 'Yes' : 'No';
+  if (typeof value === 'boolean') return value ? '是' : '否';
   return String(value);
-}
-
-function hostText(value: unknown) {
-  if (!value || typeof value !== 'string') return '-';
-  try {
-    return new URL(value).host;
-  } catch {
-    return value.replace(/^https?:\/\//, '').split('/')[0] || '-';
-  }
-}
-
-function altitudeText(value: unknown) {
-  if (!value || typeof value !== 'object') return '-';
-  const record = value as Record<string, unknown>;
-  const type = valueText(record.type);
-  const altitude = record.altitudeFt ?? record.lowerFt ?? record.upperFt;
-  return `${type !== '-' ? `${type} ` : ''}${valueText(altitude)}${altitude !== undefined ? ' FT' : ''}`.trim() || '-';
-}
-
-function fixIdent(fix: Record<string, unknown>) {
-  return valueText(fix.identifier ?? fix.ident ?? fix.fixIdentifier ?? fix.name);
-}
-
-function evidenceText(evidence: Record<string, unknown>) {
-  return valueText(evidence.rawText ?? evidence.visualDescription);
 }
 
 function scoreText(value: number | undefined) {
   return value === undefined ? '-' : `${Math.round(value * 100)}%`;
 }
 
-function flattenSummary(value: unknown, prefix = ''): string[] {
-  if (value === undefined || value === null || value === '') return [];
-  if (Array.isArray(value)) {
-    if (!value.length) return [];
-    if (value.every((item) => typeof item !== 'object' || item === null)) return [`${prefix}${value.join(', ')}`];
-    return value.flatMap((item, index) => flattenSummary(item, `${prefix}${index + 1}. `));
-  }
-  if (typeof value === 'object') {
-    return Object.entries(value as Record<string, unknown>)
-      .filter(([key]) => key !== 'textSample')
-      .flatMap(([key, item]) => flattenSummary(item, prefix ? `${prefix}${key}: ` : `${key}: `));
-  }
-  return [`${prefix}${String(value)}`];
-}
+const visionImagePagesText = computed(() => {
+  const pages = visionRunRecord.value?.imagePages ?? [];
+  return pages
+    .map((page) => {
+      const region = page.region && page.region !== 'full_page' ? ` / ${page.region}` : '';
+      const size = page.widthPx ? ` / ${page.widthPx}×${page.heightPx}px / ${fileSizeText(page.fileSizeBytes)}` : '';
+      return `PDF ${page.pageNo}${page.aipPageNo ? ` / ${page.aipPageNo}` : ''} / ${page.role}${region} / ${page.imageMode}${size}`;
+    })
+    .join(', ') || '-';
+});
 
 async function downloadGroupingDebug() {
   if (!task.value) return;
   const debug = await requestJson(`/api/procedure-tasks/${task.value.taskId}/grouping-debug`);
   downloadJson(debug, `${task.value.taskId}-grouping-debug.json`);
-}
-
-function candidatePreview(group: ProcedureGroup | undefined) {
-  return (group?.textCandidates ?? []).slice(0, 10);
 }
 
 function updateProcedureNames(event: Event) {
@@ -1029,7 +1168,7 @@ function toErrorMessage(value: unknown) {
     <header class="topbar">
       <div class="title">
         <h1>PDF 程序识别流程</h1>
-        <p>{{ task?.fileName || '上传 AIP AD PDF，按分组发给 AI，并跳转现有 GeoJSON 预览页校核。' }}</p>
+        <p>上传 PDF 后，按步骤完成程序分组、AI识别和地图预览。{{ task?.fileName ? ` · ${task.fileName}` : '' }}</p>
       </div>
       <div class="actions">
         <input ref="fileInput" class="file-input" type="file" accept="application/pdf,.pdf" @change="onFileSelected" />
@@ -1038,9 +1177,6 @@ function toErrorMessage(value: unknown) {
         </button>
         <button type="button" :disabled="!task || busy" @click="startParse">
           <FileText :size="16" /> 开始解析
-        </button>
-        <button type="button" :disabled="!task" @click="exportTaskJson">
-          <Download :size="16" /> 导出任务数据
         </button>
         <span class="status">{{ taskStatusLabel }}</span>
       </div>
@@ -1053,486 +1189,591 @@ function toErrorMessage(value: unknown) {
       </button>
     </div>
 
-    <section class="workspace">
-      <section class="column group-panel">
-        <div class="column-head">
-          <h2>当前分组</h2>
-          <div class="mini-actions">
-            <button type="button" :disabled="!task" title="重新自动分组" @click="autoRegroup">
-              <Wand2 :size="15" />
-            </button>
-            <button type="button" :disabled="!task" title="新建分组" @click="createGroup">
-              <Plus :size="15" />
-            </button>
-            <button type="button" :disabled="!task" title="调试 JSON" @click="downloadGroupingDebug">
-              <FileJson :size="15" />
-            </button>
+    <nav class="stepper">
+      <button
+        v-for="(step, index) in steps"
+        :key="step.key"
+        type="button"
+        class="step"
+        :class="stepState(step.key)"
+        @click="goToStep(step.key)"
+      >
+        <span class="step-no">{{ index + 1 }}</span>
+        <span class="step-text">
+          <strong>{{ step.title }}</strong>
+          <em>{{ stepStateLabel(step.key) }}</em>
+        </span>
+      </button>
+    </nav>
+
+    <div v-if="stepSummaries.length" class="step-summaries">
+      <p v-for="item in stepSummaries" :key="item.key">
+        <b>{{ item.label }}：</b>{{ item.text }}
+      </p>
+    </div>
+
+    <section class="step-scroll">
+      <!-- ==================== Step 1：PDF 分组 ==================== -->
+      <section v-if="currentStep === 'grouping'" class="step-panel">
+        <div class="grouping-layout">
+          <div class="package-detail">
+            <div class="panel-head">
+              <h2>当前程序包</h2>
+              <div class="mini-actions">
+                <button type="button" :disabled="!task" title="重新自动分组" @click="autoRegroup">
+                  <Wand2 :size="15" />
+                </button>
+                <button type="button" :disabled="!task" title="新建分组" @click="createGroup">
+                  <Plus :size="15" />
+                </button>
+              </div>
+            </div>
+
+            <label class="group-picker">
+              分组
+              <select v-model="selectedGroupId" :disabled="!task?.groups.length" @change="handleSelectedGroupChanged">
+                <option v-for="group in task?.groups" :key="group.groupId" :value="group.groupId">
+                  {{ group.packageName || group.groupName }} / {{ group.packageType || '-' }} / {{ group.runway || '-' }}
+                </option>
+              </select>
+            </label>
+
+            <template v-if="selectedGroup">
+              <p class="hint">
+                来源：{{ sourceLabels[selectedGroup.source || ''] || selectedGroup.source || '-' }}
+                · 置信度 {{ selectedGroup.confidence ?? '-' }}
+                · {{ selectedGroup.reviewRequired ? '需复核' : (statusLabels[selectedGroup.status] || selectedGroup.status) }}
+              </p>
+
+              <div class="form-grid">
+                <label>程序包名称<input v-model="selectedGroup.packageName" @input="selectedGroup.groupName = selectedGroup.packageName || selectedGroup.groupName" /></label>
+                <label>程序类型<select v-model="selectedGroup.packageType"><option v-for="type in packageTypes" :key="type">{{ type }}</option></select></label>
+                <label>程序类别<select v-model="selectedGroup.procedureCategory"><option v-for="category in groupCategories" :key="category">{{ category }}</option></select></label>
+                <label>导航类型<input v-model="selectedGroup.navigationType" /></label>
+                <label>跑道<input v-model="selectedGroup.runway" /></label>
+                <label class="wide">程序名<input :value="selectedGroup.procedureNames.join(' / ')" @input="updateProcedureNames" /></label>
+              </div>
+
+              <div class="manifest-grid">
+                <span>主图页</span><strong>P{{ pageNosText(selectedGroup.chartPages) }}</strong>
+                <span>表格页</span><strong>P{{ pageNosText(selectedGroup.tabularPages) }}</strong>
+                <span>坐标页</span><strong>P{{ pageNosText(selectedGroup.coordinatePages) }}</strong>
+                <span>辅助页数量</span><strong>{{ supportingPageCount }}</strong>
+              </div>
+
+              <div class="button-row compact">
+                <button type="button" @click="saveGroupMetadata">保存分组</button>
+                <button type="button" class="danger" @click="deleteSelectedGroup">
+                  <Trash2 :size="15" /> 删除分组
+                </button>
+              </div>
+            </template>
+            <p v-else class="empty">解析后自动生成程序包，也可以人工新建。</p>
+
+            <div class="step-footer">
+              <button type="button" class="primary" :disabled="!selectedGroup" @click="goToStep('request')">
+                下一步：预览 AI 请求
+              </button>
+            </div>
+          </div>
+
+          <div class="package-detail">
+            <div class="panel-head">
+              <h2>核心页预览</h2>
+              <div class="page-tabs">
+                <button
+                  v-for="page in selectedGroupPages"
+                  :key="page.pageNo"
+                  type="button"
+                  :class="{ active: page.pageNo === selectedPageNo }"
+                  @click="selectPage(page)"
+                >
+                  P{{ page.pageNo }}
+                </button>
+              </div>
+            </div>
+
+            <div
+              ref="pdfFrame"
+              class="pdf-page-frame"
+              :class="{ panning: previewPanning }"
+              @wheel.prevent="onPreviewWheel"
+              @pointerdown="onPreviewPointerDown"
+              @pointermove="onPreviewPointerMove"
+              @pointerup="endPreviewPan"
+              @pointercancel="endPreviewPan"
+              @dblclick="resetPreviewView"
+            >
+              <div v-if="pdfRenderBusy" class="pdf-state">正在渲染页面...</div>
+              <div v-if="pdfRenderError" class="pdf-state error">{{ pdfRenderError }}</div>
+              <div class="pdf-stage" :style="previewStageStyle">
+                <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
+              </div>
+            </div>
           </div>
         </div>
+      </section>
 
-        <label class="group-picker">
-          分组
-          <select v-model="selectedGroupId" :disabled="!task?.groups.length" @change="handleSelectedGroupChanged">
-            <option v-for="group in task?.groups" :key="group.groupId" :value="group.groupId">
-              {{ group.packageName || group.groupName }} / {{ geojsonStatusLabel(group) }}
-            </option>
-          </select>
-        </label>
-
-        <div v-if="selectedGroup" class="editor">
-          <div class="group-title">
-            <h3>{{ selectedGroup.packageName || selectedGroup.groupName }}</h3>
-            <span>{{ selectedGroupIndexLabel }}</span>
-          </div>
-
-          <div class="summary">
-            <p>{{ selectedGroup.procedureNames.join(' / ') || selectedGroup.chartTitle || '未识别程序名' }}</p>
-            <p>{{ selectedGroup.chartNo || 'chartNo?' }} · 来源：{{ sourceLabels[selectedGroup.source || ''] || selectedGroup.source || '-' }} · 置信度 {{ selectedGroup.confidence ?? '-' }}</p>
-            <em>{{ selectedGroup.reviewRequired ? '需复核' : (statusLabels[selectedGroup.status] || selectedGroup.status) }}</em>
-            <em>{{ geojsonStatusLabel(selectedGroup) }}</em>
-            <p v-if="selectedGroup.geojsonError">{{ selectedGroup.geojsonError }}</p>
-          </div>
-
-          <div class="form-grid">
-            <label>程序包名称<input v-model="selectedGroup.packageName" @input="selectedGroup.groupName = selectedGroup.packageName || selectedGroup.groupName" /></label>
-            <label>程序包类型<select v-model="selectedGroup.packageType"><option v-for="type in packageTypes" :key="type">{{ type }}</option></select></label>
-            <label>程序类别<select v-model="selectedGroup.procedureCategory"><option v-for="category in groupCategories" :key="category">{{ category }}</option></select></label>
-            <label>导航类型<input v-model="selectedGroup.navigationType" /></label>
-            <label>跑道<input v-model="selectedGroup.runway" /></label>
-            <label>主图件编号<input v-model="selectedGroup.chartNo" /></label>
-            <label class="wide">程序名<input :value="selectedGroup.procedureNames.join(' / ')" @input="updateProcedureNames" /></label>
-          </div>
-
-          <section class="summary">
-            <h4>程序包页面</h4>
-            <p>图面 P{{ pageNosText(selectedGroup.chartPages) }} · 表格 P{{ pageNosText(selectedGroup.tabularPages) }} · 坐标 P{{ pageNosText(selectedGroup.coordinatePages) }} · 最低标准 P{{ pageNosText(selectedGroup.minimaPages) }}</p>
+      <!-- ==================== Step 2：AI 请求预览 ==================== -->
+      <section v-else-if="currentStep === 'request'" class="step-panel">
+        <p v-if="!selectedGroup" class="empty">请先返回 Step 1 选择程序包。</p>
+        <template v-else>
+          <section class="block">
+            <h2>当前程序包</h2>
+            <div class="manifest-grid">
+              <span>packageName</span><strong>{{ selectedGroup.packageName || selectedGroup.groupName }}</strong>
+              <span>packageType</span><strong>{{ selectedGroup.packageType || '-' }}</strong>
+              <span>navigationType</span><strong>{{ selectedGroup.navigationType || '-' }}</strong>
+              <span>runway</span><strong>{{ selectedGroup.runway || '-' }}</strong>
+              <span>procedureNames</span><strong>{{ selectedGroup.procedureNames.join(' / ') || '-' }}</strong>
+            </div>
           </section>
 
-          <section class="ai-package">
-            <div class="ai-package-head">
-              <div>
-                <h4>AI 输入包</h4>
-                <p>本程序包发送给 AI 的核心页、辅助页、结构化摘要和发送方式。</p>
+          <p v-if="aiInputBusy" class="empty">正在加载 AI 输入包...</p>
+          <p v-else-if="!aiInputPackage" class="empty">暂无 AI 输入包。解析或选择程序包后会自动生成。</p>
+          <template v-else>
+            <section class="block">
+              <h2>发送图片（{{ aiInputPackage.includedImages.length }}）</h2>
+              <div class="image-cards">
+                <article
+                  v-for="page in aiInputPackage.includedImages"
+                  :key="`${page.role}-${page.pageNo}-${page.region || 'full_page'}`"
+                  class="input-card"
+                >
+                  <div class="card-top">
+                    <strong>PDF {{ page.pageNo }} / {{ page.aipPageNo || '-' }}</strong>
+                    <span v-if="page.imageQuality && !page.imageQuality.isHighRes" class="tag warn">分辨率不足</span>
+                  </div>
+                  <div class="meta-grid">
+                    <span>角色：{{ roleLabel(page.role) }}</span>
+                    <span>区域：{{ regionLabel(page.region) }}</span>
+                    <span>发送：是（{{ sendModeLabel(page.sendMode) }}）</span>
+                    <span>图片：{{ imageSizeText(page) }}</span>
+                  </div>
+                  <p v-if="page.imageQuality?.warning" class="quality-warning">{{ page.imageQuality.warning }}</p>
+                </article>
               </div>
-              <span v-if="selectedGroup.manualOverride" class="tag warn">手动策略</span>
-            </div>
+            </section>
 
-            <div v-if="aiInputPackage" class="prompt-panel">
-              <div class="manifest-grid">
-                <span>当前模型</span><strong>{{ aiInputPackage.model || 'qwen3-vl-plus' }}</strong>
-                <span>当前模板</span><strong>{{ aiInputPackage.promptTemplateName || aiInputPackage.promptTemplate }} {{ aiInputPackage.promptVersion || '' }}</strong>
-                <span>输出 Schema</span><strong>{{ aiInputPackage.outputSchemaName }} {{ aiInputPackage.outputSchemaVersion || '' }}</strong>
-                <span>Prompt 状态</span><strong>{{ promptPreview ? '已渲染' : '待预览' }}</strong>
-              </div>
-              <div class="button-row compact">
-                <button type="button" @click="loadPromptPreview('prompt')">
-                  <FileText :size="15" /> 查看 Prompt
-                </button>
-                <button type="button" @click="loadPromptPreview('schema')">
-                  <FileJson :size="15" /> 查看 Schema
-                </button>
-                <button type="button" @click="copyPrompt">
-                  <Clipboard :size="15" /> 复制 Prompt
-                </button>
-                <button type="button" @click="loadPromptPreview('manifest')">重新选择模板</button>
-                <button type="button" class="primary" @click="runAiRecognition">
-                  <Bot :size="15" /> 发送 AI 识别
-                </button>
-              </div>
-            </div>
-
-            <div class="tab-row">
-              <button type="button" :class="{ active: aiInputTab === 'core' }" @click="aiInputTab = 'core'">核心页</button>
-              <button type="button" :class="{ active: aiInputTab === 'support' }" @click="aiInputTab = 'support'">辅助信息</button>
-              <button type="button" :class="{ active: aiInputTab === 'summary' }" @click="aiInputTab = 'summary'">结构化摘要</button>
-              <button type="button" :class="{ active: aiInputTab === 'manifest' }" @click="aiInputTab = 'manifest'">发送清单</button>
-            </div>
-
-            <p v-if="aiInputBusy" class="empty">正在加载 AI 输入包...</p>
-            <p v-else-if="!aiInputPackage" class="empty">暂无 AI 输入包。解析或选择分组后会自动生成。</p>
-
-            <div v-else-if="aiInputTab === 'core'" class="card-list">
-              <article v-for="page in aiInputPackage.corePages" :key="`${page.role}-${page.pageNo}`" class="input-card">
-                <div class="card-top">
-                  <strong>{{ roleLabel(page.role) }}</strong>
-                  <span class="tag required">发送给 AI</span>
-                </div>
-                <div class="meta-grid">
-                  <span>PDF页：{{ page.pageNo }}</span>
-                  <span>AIP页码：{{ page.aipPageNo || '-' }}</span>
-                  <span>发送形式：{{ sendModeLabel(page.sendMode) }}</span>
-                  <span>置信度：{{ page.confidence }}</span>
-                </div>
-                <p>{{ page.reason }}</p>
-                <button type="button" @click="previewPage(page.pageNo)">预览页面</button>
-              </article>
-            </div>
-
-            <div v-else-if="aiInputTab === 'support'" class="card-list">
-              <article v-for="info in aiInputPackage.supportingInfo" :key="info.id" class="input-card">
-                <div class="card-top">
-                  <strong>{{ info.title }}</strong>
-                  <div class="tag-row">
-                    <span class="tag" :class="info.sendPolicy.toLowerCase()">{{ policyLabel(info.sendPolicy) }}</span>
+            <section class="block">
+              <h2>辅助摘要（{{ aiInputPackage.supportingInfo.length }}）</h2>
+              <div class="support-rows">
+                <div v-for="info in aiInputPackage.supportingInfo" :key="info.id" class="support-row">
+                  <div class="support-main">
+                    <strong>{{ info.supportType }}</strong>
+                    <span>PDF {{ pageRangeText(info.pageNos) }}</span>
+                    <span class="tag" :class="info.sendPolicy.toLowerCase()">发送：{{ sentLabel(info) }}</span>
                     <span class="tag">{{ sendModeLabel(info.sendMode) }}</span>
-                    <span class="tag" :class="{ warn: info.reviewRequired }">{{ info.reviewRequired ? '需复核' : '已识别' }}</span>
+                  </div>
+                  <p class="support-reason">{{ info.reason }}</p>
+                  <div class="button-row compact">
+                    <button type="button" @click="setSupportSendMode(info, 'SUMMARY_ONLY')">发送摘要</button>
+                    <button type="button" @click="setSupportSendMode(info, 'SUMMARY_AND_IMAGE')">发送截图</button>
+                    <button type="button" @click="setSupportSendMode(info, 'NOT_SENT')">不发送</button>
                   </div>
                 </div>
-                <div class="meta-grid">
-                  <span>PDF页：{{ pageRangeText(info.pageNos) }}</span>
-                  <span>AIP章节：{{ info.aipSection || info.aipPageNos.join(', ') || '-' }}</span>
-                  <span>发送给AI：{{ sentLabel(info) }}</span>
-                  <span>置信度：{{ info.confidence }}</span>
-                </div>
-                <p>{{ info.reason }}</p>
-                <div class="summary-lines">
-                  <b>提取摘要</b>
-                  <ul>
-                    <li v-for="line in summaryLines(info.summary)" :key="line">{{ line }}</li>
-                  </ul>
-                </div>
-                <div class="button-row compact">
-                  <button type="button" @click="previewPage(info.pageNos[0])">预览</button>
-                  <button type="button" @click="setSupportSendMode(info, 'SUMMARY_ONLY')">发送摘要</button>
-                  <button type="button" @click="setSupportSendMode(info, 'SUMMARY_AND_IMAGE')">发送截图</button>
-                  <button type="button" @click="setSupportSendMode(info, 'NOT_SENT')">不发送</button>
-                </div>
-              </article>
-            </div>
+              </div>
+            </section>
 
-            <div v-else-if="aiInputTab === 'summary'">
-              <pre>{{ supportSummaryJson }}</pre>
-            </div>
-
-            <div v-else class="manifest">
+            <section class="block">
+              <h2>Prompt 摘要</h2>
               <div class="manifest-grid">
                 <span>模型</span><strong>{{ aiInputPackage.model }}</strong>
-                <span>程序包</span><strong>{{ aiInputPackage.packageName }}</strong>
-                <span>Prompt 模板</span><strong>{{ aiInputPackage.promptTemplate }}</strong>
-                <span>输出 Schema</span><strong>{{ aiInputPackage.outputSchemaName }}</strong>
-                <span>OCR/TextLayer</span><strong>{{ aiInputPackage.ocrTextLayerIncluded ? '包含' : '不包含' }}</strong>
-                <span>预计图片数</span><strong>{{ aiInputPackage.includedImages.length }}</strong>
+                <span>Prompt 模板</span><strong>{{ aiInputPackage.promptTemplateName || aiInputPackage.promptTemplate }} {{ aiInputPackage.promptVersion || '' }}</strong>
+                <span>输出 Schema</span><strong>{{ aiInputPackage.outputSchemaName }} {{ aiInputPackage.outputSchemaVersion || '' }}</strong>
+                <span>识别目标</span><strong>程序类型 · 图面文本 · 表格腿段 · 几何语义 · 辅助对象过滤</strong>
               </div>
-              <h4>核心页面截图</h4>
-              <ul>
-                <li v-for="page in aiInputPackage.corePages" :key="`manifest-core-${page.pageNo}`">
-                  PDF {{ page.pageNo }} / {{ page.aipPageNo || '-' }} / {{ roleLabel(page.role) }} / {{ sendModeLabel(page.sendMode) }}
-                </li>
-              </ul>
-              <h4>辅助截图</h4>
-              <ul>
-                <li v-if="!includedSupportImages.length">无</li>
-                <li v-for="page in includedSupportImages" :key="`manifest-image-${page.pageNo}`">
-                  PDF {{ page.pageNo }} / {{ page.aipPageNo || '-' }} / {{ sendModeLabel(page.sendMode) }}
-                </li>
-              </ul>
-              <h4>结构化摘要</h4>
-              <ul>
-                <li v-for="info in aiInputPackage.includedSummaries" :key="`manifest-summary-${info.id}`">
-                  PDF {{ pageRangeText(info.pageNos) }} / {{ info.title }} / {{ sendModeLabel(info.sendMode) }}
-                </li>
-              </ul>
-              <h4>当前不发送</h4>
-              <ul>
-                <li v-for="info in aiInputPackage.excludedSupport" :key="`manifest-excluded-${info.id}`">
-                  PDF {{ pageRangeText(info.pageNos) }} / {{ info.title }} / {{ policyLabel(info.sendPolicy) }} / {{ info.reason }}
-                </li>
-              </ul>
-            </div>
-          </section>
-
-          <section v-if="procedureUnderstanding || visionRunRecord || selectedGroup.status === 'AI_RUNNING' || selectedGroup.status === 'ERROR'" class="ai-result">
-            <div class="ai-package-head">
-              <div>
-                <h4>AI Recognition Result</h4>
-                <p>ProcedureUnderstanding JSON from {{ visionRunRecord?.model || selectedGroup.aiRequest?.model || 'qwen3-vl-plus' }}</p>
+              <div class="button-row compact">
+                <button type="button" @click="openPromptModal('prompt')">
+                  <FileText :size="15" /> 查看完整 Prompt
+                </button>
+                <button type="button" @click="openPromptModal('request')">
+                  <FileJson :size="15" /> 查看完整请求 JSON
+                </button>
               </div>
-              <button type="button" :disabled="evaluationBusy || !procedureUnderstanding" @click="evaluateRecognition">Compare Golden Case</button>
-            </div>
-
-            <div class="manifest-grid">
-              <span>LLM Status</span><strong>{{ llmRunStatus }}</strong>
-              <span>Provider</span><strong>{{ visionRunRecord?.provider || '-' }}</strong>
-              <span>Model</span><strong>{{ visionRunRecord?.model || selectedGroup.aiRequest?.model || '-' }}</strong>
-              <span>Base URL</span><strong>{{ llmBaseUrlHost }}</strong>
-              <span>Image Mode</span><strong>{{ visionRunRecord?.imageMode || '-' }}</strong>
-              <span>Structured Output</span><strong>{{ visionRunRecord?.structuredOutputModeUsed || '-' }}</strong>
-              <span>Prompt</span><strong>{{ visionRunRecord?.promptTemplateId || selectedGroup.aiRequest?.promptTemplateId || '-' }} {{ visionRunRecord?.promptVersion || selectedGroup.aiRequest?.promptVersion || '' }}</strong>
-              <span>Schema</span><strong>{{ visionRunRecord?.schemaName || selectedGroup.aiRequest?.schemaName || '-' }} {{ visionRunRecord?.schemaVersion || selectedGroup.aiRequest?.schemaVersion || '' }}</strong>
-              <span>Schema Valid</span><strong>{{ valueText(visionRunRecord?.schemaValidation?.valid ?? visionRunRecord?.validationResult.schemaValid) }}</strong>
-              <span>Image Pages</span><strong>{{ visionImagePagesText }}</strong>
-              <span>Support Summary</span><strong>{{ supportSummaryPagesText }}</strong>
-              <span>Input Hash</span><strong>{{ visionRunRecord?.inputPackageHash || '-' }}</strong>
-              <span>Confidence</span><strong>{{ valueText(procedureUnderstanding?.confidence) }}</strong>
-              <span>Review</span><strong>{{ valueText(procedureUnderstanding?.reviewRequired) }}</strong>
-              <span>Validation</span><strong>{{ visionRunRecord?.validationResult.schemaValid ? 'Schema valid' : 'Needs review' }}</strong>
-            </div>
-
-            <div v-if="visionRunRecord?.errorType || visionRunRecord?.errorMessage" class="summary-lines">
-              <b>Error</b>
-              <div class="manifest-grid">
-                <span>Type</span><strong>{{ visionRunRecord?.errorType || '-' }}</strong>
-                <span>Message</span><strong>{{ visionRunRecord?.errorMessage || selectedGroup.aiResponse?.errors?.[0] || '-' }}</strong>
-              </div>
-              <details v-if="visionRunRecord?.rawError">
-                <summary>rawError</summary>
-                <pre>{{ visionRunRecord.rawError }}</pre>
-              </details>
-            </div>
-
-            <div v-if="procedureUnderstanding?.warnings?.length" class="summary-lines">
-              <b>Warnings</b>
-              <ul>
-                <li v-for="(warning, index) in procedureUnderstanding?.warnings" :key="`ai-warning-${index}`">
-                  {{ valueText(warning.message ?? warning) }}
-                </li>
-              </ul>
-            </div>
-
-            <div v-if="recognitionEvaluation" class="evaluation-box">
-              <div class="manifest-grid">
-                <span>Total Score</span><strong>{{ scoreText(recognitionEvaluation.totalScore) }}</strong>
-                <span>Procedure Names</span><strong>{{ scoreText(recognitionEvaluation.procedureNameAccuracy) }}</strong>
-                <span>Leg Count</span><strong>{{ scoreText(recognitionEvaluation.legCountAccuracy) }}</strong>
-                <span>Path Terminators</span><strong>{{ scoreText(recognitionEvaluation.pathTerminatorAccuracy) }}</strong>
-                <span>Fixes</span><strong>{{ scoreText(recognitionEvaluation.fixAccuracy) }}</strong>
-                <span>Course</span><strong>{{ scoreText(recognitionEvaluation.courseAccuracy) }}</strong>
-                <span>Distance</span><strong>{{ scoreText(recognitionEvaluation.distanceAccuracy) }}</strong>
-                <span>Altitude</span><strong>{{ scoreText(recognitionEvaluation.altitudeAccuracy) }}</strong>
-                <span>Coordinates</span><strong>{{ scoreText(recognitionEvaluation.coordinateAccuracy) }}</strong>
-                <span>Evidence</span><strong>{{ scoreText(recognitionEvaluation.sourceEvidenceCoverage) }}</strong>
-              </div>
-              <ul v-if="recognitionEvaluation.errors.length">
-                <li v-for="(item, index) in recognitionEvaluation.errors" :key="`eval-error-${index}`">
-                  {{ item.code }} / {{ item.procedureName || '-' }} / {{ item.fieldName || '-' }}: {{ item.message }}
-                </li>
-              </ul>
-            </div>
-
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Procedure</th>
-                    <th>Seq</th>
-                    <th>PT</th>
-                    <th>From</th>
-                    <th>To/Fix</th>
-                    <th>Course</th>
-                    <th>Dist</th>
-                    <th>Turn</th>
-                    <th>Altitude</th>
-                    <th>Speed</th>
-                    <th>Nav</th>
-                    <th>Page</th>
-                    <th>Conf</th>
-                    <th>Review</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(leg, index) in recognitionLegRows" :key="`leg-${index}`">
-                    <td>{{ leg.procedureName }}</td>
-                    <td>{{ valueText(leg.sequence) }}</td>
-                    <td>{{ valueText(leg.pathTerminator) }}</td>
-                    <td>{{ valueText(leg.fromFix) }}</td>
-                    <td>{{ valueText(leg.fixIdentifier) }}</td>
-                    <td>{{ valueText(leg.courseDegMag) }}</td>
-                    <td>{{ valueText(leg.distanceNm) }}</td>
-                    <td>{{ valueText(leg.turnDirection) }}</td>
-                    <td>{{ altitudeText(leg.altitudeConstraint) }}</td>
-                    <td>{{ valueText(leg.speedLimitKias) }}</td>
-                    <td>{{ valueText(leg.navigationSpec) }}</td>
-                    <td>{{ valueText(leg.sourcePage) }}</td>
-                    <td>{{ valueText(leg.confidence) }}</td>
-                    <td>{{ valueText(leg.reviewRequired) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Ident</th>
-                    <th>Lat</th>
-                    <th>Lon</th>
-                    <th>Source Page</th>
-                    <th>Confidence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(fix, index) in recognitionFixRows" :key="`fix-${index}`">
-                    <td>{{ fixIdent(fix) }}</td>
-                    <td>{{ valueText(fix.latitude ?? fix.lat) }}</td>
-                    <td>{{ valueText(fix.longitude ?? fix.lon) }}</td>
-                    <td>{{ valueText(fix.sourcePage ?? fix.pageNo) }}</td>
-                    <td>{{ valueText(fix.confidence) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-
-            <div class="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Field</th>
-                    <th>Page</th>
-                    <th>Type</th>
-                    <th>Raw Text / Visual</th>
-                    <th>Confidence</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr v-for="(evidence, index) in recognitionEvidenceRows" :key="`evidence-${index}`">
-                    <td>{{ valueText(evidence.fieldName) }}</td>
-                    <td>{{ valueText(evidence.pageNo) }}</td>
-                    <td>{{ valueText(evidence.evidenceType) }}</td>
-                    <td>{{ evidenceText(evidence) }}</td>
-                    <td>{{ valueText(evidence.confidence) }}</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          <section class="summary">
-            <h4>候选摘要</h4>
-            <p>文字 {{ selectedGroup.textCandidates?.length || 0 }} · 坐标 {{ selectedGroup.waypointCandidates?.length || 0 }} · 表格 {{ selectedGroup.tableCandidates?.length || 0 }} · 几何 {{ selectedGroup.geometryCandidates?.length || 0 }}</p>
-            <ul>
-              <li v-for="candidate in candidatePreview(selectedGroup)" :key="candidate.id">
-                P{{ candidate.pageNo }} · {{ candidate.typeCandidate }} · {{ candidate.text }}
-              </li>
-            </ul>
-          </section>
-
-          <div class="button-row">
-            <button type="button" @click="saveGroupMetadata">保存分组</button>
-            <button type="button" @click="extractSelectedCandidates">提取候选</button>
-            <button type="button" @click="loadAiPreview">
-              <FileJson :size="15" /> AI 请求预览
-            </button>
-            <button type="button" class="primary" @click="runAiRecognition">
-              <Bot :size="15" /> 发送AI识别
-            </button>
-            <button type="button" :disabled="!selectedGroup || busy" @click="previewGeoJson">
-              <Eye :size="15" /> {{ hasGeoJson ? '预览GeoJSON' : '生成并预览GeoJSON' }}
-            </button>
-            <button type="button" :disabled="!hasGeoJson" @click="downloadGroupGeoJson">下载GeoJSON</button>
-            <button type="button" @click="exportGroupPdf">
-              <Download :size="15" /> 导出PDF
-            </button>
-            <button type="button" class="danger" @click="deleteSelectedGroup">
-              <Trash2 :size="15" /> 删除分组
-            </button>
-          </div>
-
-          <details v-if="aiPreview" open>
-            <summary>AI 请求预览</summary>
-            <pre>{{ aiPreviewText }}</pre>
-          </details>
-          <div v-if="promptPreviewOpen" class="modal-backdrop" @click.self="promptPreviewOpen = false">
-            <section class="prompt-modal">
-              <div class="modal-head">
-                <div>
-                  <h3>AI 请求预览</h3>
-                  <p v-if="promptPreview">{{ promptPreview.promptTemplateName || promptPreview.promptTemplateId }} · {{ promptPreview.promptVersion }}</p>
-                </div>
-                <button type="button" class="ghost" @click="promptPreviewOpen = false">关闭</button>
-              </div>
-              <div class="tab-row">
-                <button type="button" :class="{ active: promptPreviewTab === 'images' }" @click="promptPreviewTab = 'images'">输入图片</button>
-                <button type="button" :class="{ active: promptPreviewTab === 'support' }" @click="promptPreviewTab = 'support'">辅助摘要</button>
-                <button type="button" :class="{ active: promptPreviewTab === 'prompt' }" @click="promptPreviewTab = 'prompt'">Prompt</button>
-                <button type="button" :class="{ active: promptPreviewTab === 'schema' }" @click="promptPreviewTab = 'schema'">Schema</button>
-                <button type="button" :class="{ active: promptPreviewTab === 'manifest' }" @click="promptPreviewTab = 'manifest'">发送清单</button>
-              </div>
-              <p v-if="promptPreviewBusy" class="empty">正在渲染 Prompt...</p>
-              <template v-else-if="promptPreview">
-                <div v-if="promptPreviewTab === 'images'" class="card-list">
-                  <article v-for="page in promptPreview.inputImages" :key="`prompt-image-${page.pageNo}`" class="input-card">
-                    <div class="card-top">
-                      <strong>PDF {{ page.pageNo }} / {{ page.aipPageNo || '-' }}</strong>
-                      <span class="tag">{{ roleLabel(page.role) }}</span>
-                    </div>
-                    <div class="meta-grid">
-                      <span>发送形式：{{ sendModeLabel(page.sendMode) }}</span>
-                      <span>置信度：{{ page.confidence }}</span>
-                    </div>
-                    <p>{{ page.reason }}</p>
-                  </article>
-                </div>
-                <div v-else-if="promptPreviewTab === 'support'" class="card-list">
-                  <article v-for="info in promptPreview.supportSummaries" :key="`prompt-support-${info.id}`" class="input-card">
-                    <div class="card-top">
-                      <strong>{{ info.title }}</strong>
-                      <span class="tag">{{ sendModeLabel(info.sendMode) }}</span>
-                    </div>
-                    <div class="meta-grid">
-                      <span>PDF页：{{ pageRangeText(info.pageNos) }}</span>
-                      <span>{{ info.aipSection || info.supportType }}</span>
-                    </div>
-                    <p>{{ info.reason }}</p>
-                  </article>
-                </div>
-                <div v-else-if="promptPreviewTab === 'prompt'" class="prompt-stack">
-                  <h4>System Prompt</h4>
-                  <pre>{{ promptPreview.systemPrompt }}</pre>
-                  <h4>User Prompt</h4>
-                  <pre>{{ promptPreview.userPrompt }}</pre>
-                </div>
-                <pre v-else-if="promptPreviewTab === 'schema'">{{ promptSchemaJson }}</pre>
-                <pre v-else>{{ promptManifestJson }}</pre>
-              </template>
             </section>
-          </div>
-          <details v-if="selectedGroup.aiResponse">
-            <summary>AI 返回结果</summary>
-            <pre>{{ selectedGroup.aiResponse.rawText.slice(0, 3600) }}</pre>
-          </details>
-        </div>
+          </template>
 
-        <p v-if="!task?.groups.length" class="empty">解析后自动生成分组，也可以人工新建。</p>
-      </section>
-
-      <section class="column page-preview">
-        <div class="column-head">
-          <h2>PDF 页面</h2>
-          <div v-if="selectedGroupPages.length" class="page-tabs">
-            <button
-              v-for="page in selectedGroupPages"
-              :key="page.pageNo"
-              type="button"
-              :class="{ active: page.pageNo === selectedPageNo }"
-              @click="selectPage(page)"
-            >
-              P{{ page.pageNo }}
+          <div class="step-footer">
+            <button type="button" @click="goToStep('grouping')">返回 PDF 分组</button>
+            <button type="button" class="primary" :disabled="!aiInputPackage || recognitionBusy" @click="sendRecognition">
+              <Bot :size="15" /> 发送 AI 识别
             </button>
           </div>
-          <span v-else>P{{ selectedPageNo || '-' }}</span>
-        </div>
-
-        <div
-          ref="pdfFrame"
-          class="pdf-page-frame"
-          :class="{ panning: previewPanning }"
-          @wheel.prevent="onPreviewWheel"
-          @pointerdown="onPreviewPointerDown"
-          @pointermove="onPreviewPointerMove"
-          @pointerup="endPreviewPan"
-          @pointercancel="endPreviewPan"
-          @dblclick="resetPreviewView"
-        >
-          <div v-if="pdfRenderBusy" class="pdf-state">正在渲染页面...</div>
-          <div v-if="pdfRenderError" class="pdf-state error">{{ pdfRenderError }}</div>
-          <div class="pdf-stage" :style="previewStageStyle">
-            <canvas ref="pdfCanvas" class="pdf-canvas"></canvas>
-          </div>
-        </div>
-
+        </template>
       </section>
+
+      <!-- ==================== Step 3：AI 识别结果 ==================== -->
+      <section v-else-if="currentStep === 'recognition'" class="step-panel">
+        <p v-if="!selectedGroup" class="empty">请先返回 Step 1 选择程序包。</p>
+        <template v-else>
+          <div class="run-status" :class="llmRunStatus.toLowerCase()">
+            <strong>运行状态：{{ llmRunStatus }}</strong>
+            <span v-if="llmRunStatus === 'RUNNING'">AI 识别中，完成后自动刷新结果...</span>
+            <span v-else-if="llmRunStatus === 'ERROR'">{{ visionRunRecord?.errorMessage || selectedGroup.aiResponse?.errors?.[0] || 'AI 调用失败' }}</span>
+            <span v-else-if="llmRunStatus === 'NOT_STARTED'">尚未发送 AI 识别，请返回 Step 2 点击「发送 AI 识别」。</span>
+          </div>
+
+          <div v-if="classificationWarning" class="alert error">{{ classificationWarning }}</div>
+          <div v-if="missingKeyTexts.length" class="alert warn">
+            <b>关键文本缺失：</b>
+            <ul>
+              <li v-for="text in missingKeyTexts" :key="text">{{ text }}</li>
+            </ul>
+          </div>
+          <div v-if="geometryMissing" class="alert error">AI 没有识别出图面几何语义，无法生成完整程序图形。</div>
+          <div v-if="supportLeakObjects.length" class="alert warn">
+            疑似把辅助页对象错误加入当前程序：{{ supportLeakObjects.map((item) => item.ident).join(' / ') }}
+          </div>
+
+          <template v-if="llmRunStatus === 'COMPLETED'">
+            <section class="block">
+              <h2>1. 程序类型识别</h2>
+              <p v-if="!recognitionClassification" class="empty">模型没有返回 procedureClassification。</p>
+              <div v-else class="manifest-grid">
+                <span>packageType</span><strong>{{ valueText(recognitionClassification.packageType) }}</strong>
+                <span>procedureCategory</span><strong>{{ valueText(recognitionClassification.procedureCategory) }}</strong>
+                <span>navigationType</span><strong>{{ valueText(recognitionClassification.navigationType) }}</strong>
+                <span>runway</span><strong>{{ valueText(recognitionClassification.runway) }}</strong>
+                <span>procedureNames</span><strong>{{ recognitionClassification.procedureNames?.join(' / ') || '-' }}</strong>
+                <span>chartPurpose</span><strong>{{ valueText(recognitionClassification.chartPurpose) }}</strong>
+                <span>confidence</span><strong>{{ valueText(recognitionClassification.confidence) }}</strong>
+              </div>
+            </section>
+
+            <section class="block">
+              <h2>2. 图面关键文本（{{ recognitionChartTexts.length }}）</h2>
+              <p v-if="!recognitionChartTexts.length" class="empty">模型没有返回 chartTexts（图面关键文本）。</p>
+              <div v-else class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>文本</th>
+                      <th>角色</th>
+                      <th>区域</th>
+                      <th>用于当前程序</th>
+                      <th>来源页</th>
+                      <th>置信度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(item, index) in recognitionChartTexts" :key="`chart-text-${index}`">
+                      <td>{{ item.text }}</td>
+                      <td>{{ valueText(item.role) }}</td>
+                      <td>{{ valueText(item.region) }}</td>
+                      <td>{{ valueText(item.usedInProcedure) }}</td>
+                      <td>{{ valueText(item.sourcePageNo) }}</td>
+                      <td>{{ valueText(item.confidence) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="block">
+              <h2>3. 表格腿段（{{ recognitionTableLegs.length }}）</h2>
+              <p v-if="!recognitionTableLegs.length" class="empty">
+                {{ selectedGroup.tabularPages.length ? '模型没有返回 tableLegs（表格腿段）。' : '当前程序包未识别到表格页，表格腿段为空。' }}
+              </p>
+              <div v-else class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>程序名</th>
+                      <th>序号</th>
+                      <th>Path Terminator</th>
+                      <th>From</th>
+                      <th>To</th>
+                      <th>Course</th>
+                      <th>Distance</th>
+                      <th>Altitude</th>
+                      <th>Turn</th>
+                      <th>来源页</th>
+                      <th>置信度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(leg, index) in recognitionTableLegs" :key="`table-leg-${index}`">
+                      <td>{{ valueText(leg.procedureName) }}</td>
+                      <td>{{ valueText(leg.sequence) }}</td>
+                      <td>{{ valueText(leg.pathTerminator) }}</td>
+                      <td>{{ valueText(leg.fromFix) }}</td>
+                      <td>{{ valueText(leg.toFix) }}</td>
+                      <td>{{ valueText(leg.courseDeg) }}</td>
+                      <td>{{ valueText(leg.distanceNm) }}</td>
+                      <td>{{ valueText(leg.altitudeConstraint) }}</td>
+                      <td>{{ valueText(leg.turnDirection) }}</td>
+                      <td>{{ valueText(leg.sourcePageNo) }}</td>
+                      <td>{{ valueText(leg.confidence) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="block">
+              <h2>4. 几何语义（{{ recognitionGeometry.length }}）</h2>
+              <p v-if="!recognitionGeometry.length" class="empty">模型没有返回 geometrySemantics（图面几何语义）。</p>
+              <div v-else class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>类型</th>
+                      <th>标签</th>
+                      <th>中心导航台</th>
+                      <th>半径 NM</th>
+                      <th>径向</th>
+                      <th>入航航迹</th>
+                      <th>关联程序</th>
+                      <th>来源页</th>
+                      <th>置信度</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(item, index) in recognitionGeometry" :key="`geometry-${index}`">
+                      <td>{{ item.type }}</td>
+                      <td>{{ valueText(item.labelText) }}</td>
+                      <td>{{ valueText(item.centerNavaid) }}</td>
+                      <td>{{ valueText(item.radiusNm) }}</td>
+                      <td>{{ valueText(item.radialDeg) }}</td>
+                      <td>{{ valueText(item.inboundTrackDeg) }}</td>
+                      <td>{{ item.relatedProcedures?.join(' / ') || '-' }}</td>
+                      <td>{{ valueText(item.sourcePageNo) }}</td>
+                      <td>{{ valueText(item.confidence) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section class="block">
+              <h2>5. 辅助对象过滤（{{ recognitionSupportObjects.length }}）</h2>
+              <p v-if="!recognitionSupportObjects.length" class="empty">模型没有返回 supportObjects（辅助对象过滤）。</p>
+              <div v-else class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>标识</th>
+                      <th>类型</th>
+                      <th>用于当前程序</th>
+                      <th>仅辅助</th>
+                      <th>原因</th>
+                      <th>来源页</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="(item, index) in recognitionSupportObjects" :key="`support-object-${index}`">
+                      <td>{{ item.ident }}</td>
+                      <td>{{ valueText(item.type) }}</td>
+                      <td>{{ valueText(item.usedInProcedure) }}</td>
+                      <td>{{ valueText(item.supportOnly) }}</td>
+                      <td>{{ valueText(item.reason) }}</td>
+                      <td>{{ valueText(item.sourcePageNo) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <details class="block" :open="rawJsonOpen" @toggle="rawJsonOpen = ($event.target as HTMLDetailsElement).open">
+              <summary>查看原始 AI JSON</summary>
+              <pre class="raw-json">{{ understandingJson }}</pre>
+            </details>
+          </template>
+
+          <div class="step-footer">
+            <button type="button" @click="goToStep('request')">返回 AI 请求预览</button>
+            <button type="button" :disabled="recognitionBusy" @click="sendRecognition">
+              <Bot :size="15" /> 重新发送 AI 识别
+            </button>
+            <button type="button" class="primary" :disabled="llmRunStatus !== 'COMPLETED' || geojsonBusy" @click="proceedToPreview">
+              <Eye :size="15" /> 下一步：生成并预览 GeoJSON
+            </button>
+          </div>
+        </template>
+      </section>
+
+      <!-- ==================== Step 4：GeoJSON 预览 ==================== -->
+      <section v-else class="step-panel">
+        <p v-if="!selectedGroup" class="empty">请先返回 Step 1 选择程序包。</p>
+        <template v-else>
+          <div class="preview-layout">
+            <div class="map-frame">
+              <ProcedureMap
+                v-if="geojsonModel"
+                :key="selectedGroup.geojsonGeneratedAt || selectedGroup.groupId"
+                :model="geojsonModel"
+                :layer-visibility="mapLayerVisibility"
+                :reset-counter="mapResetCounter"
+              />
+              <div v-else class="map-placeholder">
+                <strong>{{ geojsonDisplayStatus === 'GENERATING' ? '正在生成 GeoJSON...' : '尚未生成 GeoJSON' }}</strong>
+                <span v-if="geojsonDisplayStatus !== 'GENERATING'">点击右侧「重新生成 GeoJSON」开始生成。</span>
+              </div>
+            </div>
+
+            <aside class="preview-side">
+              <section class="block">
+                <h2>GeoJSON 状态</h2>
+                <div class="run-status" :class="geojsonDisplayStatus === 'GENERATED' ? 'completed' : geojsonDisplayStatus === 'ERROR' ? 'error' : 'running'">
+                  <strong>{{ geojsonDisplayStatus }}</strong>
+                  <span v-if="selectedGroup.geojsonError">{{ selectedGroup.geojsonError }}</span>
+                </div>
+              </section>
+
+              <section v-if="geojsonStats && hasGeoJson" class="block">
+                <h2>可渲染统计</h2>
+                <div class="manifest-grid">
+                  <span>Feature 总数</span><strong>{{ geojsonStats.featureCount }}</strong>
+                  <span>可渲染 Feature</span><strong>{{ geojsonStats.renderableCount }}</strong>
+                  <span>Point</span><strong>{{ geojsonStats.pointCount }}</strong>
+                  <span>LineString</span><strong>{{ geojsonStats.lineStringCount }}</strong>
+                  <span>Polygon</span><strong>{{ geojsonStats.polygonCount }}</strong>
+                  <span>null geometry</span><strong>{{ geojsonStats.nullGeometryCount }}</strong>
+                </div>
+              </section>
+
+              <section v-if="objectTypeStats.length" class="block">
+                <h2>对象类型统计</h2>
+                <div class="manifest-grid">
+                  <template v-for="row in objectTypeStats" :key="row.type">
+                    <span>{{ row.type }}</span><strong>{{ row.count }}</strong>
+                  </template>
+                </div>
+              </section>
+
+              <section v-if="geojsonIssues.length" class="block">
+                <h2>问题提示</h2>
+                <div v-for="(issue, index) in geojsonIssues" :key="`geojson-issue-${index}`" class="alert warn">{{ issue }}</div>
+              </section>
+
+              <div class="button-col">
+                <button type="button" @click="goToStep('recognition')">返回 AI 识别结果</button>
+                <button type="button" :disabled="geojsonBusy || llmRunStatus !== 'COMPLETED'" @click="generateGeoJson">
+                  <RefreshCw :size="15" /> 重新生成 GeoJSON
+                </button>
+                <button type="button" :disabled="!hasGeoJson" @click="downloadGroupGeoJson">
+                  <Download :size="15" /> 下载 GeoJSON
+                </button>
+                <button type="button" :disabled="!hasGeoJson" @click="openFullMapPreview">
+                  <Eye :size="15" /> 全屏预览
+                </button>
+                <button type="button" @click="goToStep('grouping')">返回分组继续处理</button>
+              </div>
+            </aside>
+          </div>
+        </template>
+      </section>
+
+      <!-- ==================== 高级调试 ==================== -->
+      <details v-if="selectedGroup" class="debug-panel">
+        <summary>高级调试（Prompt / Schema / Request JSON / Raw Response / GeoJSON Raw / 评测 / 日志）</summary>
+        <div class="button-row compact">
+          <button type="button" :disabled="promptPreviewBusy" @click="loadPromptPreview">加载 Prompt 预览</button>
+          <button type="button" @click="copyPrompt">
+            <Clipboard :size="15" /> 复制 Prompt
+          </button>
+          <button type="button" :disabled="evaluationBusy || !procedureUnderstanding" @click="evaluateRecognition">Golden Case 评测</button>
+          <button type="button" :disabled="busy" @click="extractSelectedCandidates">提取候选</button>
+          <button type="button" @click="exportTaskJson">导出任务 JSON</button>
+          <button type="button" @click="downloadGroupingDebug">下载分组调试</button>
+          <button type="button" @click="exportGroupPdf">导出程序包 PDF</button>
+        </div>
+
+        <details>
+          <summary>Prompt</summary>
+          <p v-if="!promptPreview" class="empty">尚未加载，点击上方「加载 Prompt 预览」。</p>
+          <template v-else>
+            <h4>System Prompt</h4>
+            <pre>{{ promptPreview.systemPrompt }}</pre>
+            <h4>User Prompt</h4>
+            <pre>{{ promptPreview.userPrompt }}</pre>
+          </template>
+        </details>
+        <details>
+          <summary>Schema</summary>
+          <p v-if="!promptPreview" class="empty">尚未加载，点击上方「加载 Prompt 预览」。</p>
+          <pre v-else>{{ promptSchemaJson }}</pre>
+        </details>
+        <details>
+          <summary>Request JSON</summary>
+          <p v-if="!promptPreview" class="empty">尚未加载，点击上方「加载 Prompt 预览」。</p>
+          <pre v-else>{{ fullRequestJson }}</pre>
+        </details>
+        <details>
+          <summary>辅助信息结构化摘要</summary>
+          <pre>{{ supportSummaryJson }}</pre>
+        </details>
+        <details>
+          <summary>Raw AI Response</summary>
+          <pre>{{ visionRunRecord?.rawResponse || selectedGroup.aiResponse?.rawText || '-' }}</pre>
+        </details>
+        <details>
+          <summary>Parsed JSON（ProcedureUnderstanding）</summary>
+          <pre>{{ understandingJson }}</pre>
+        </details>
+        <details>
+          <summary>GeoJSON Raw</summary>
+          <pre>{{ hasGeoJson ? JSON.stringify(selectedGroup.geojson, null, 2) : '-' }}</pre>
+        </details>
+        <details>
+          <summary>运行日志 / 元信息</summary>
+          <div class="manifest-grid">
+            <span>Provider</span><strong>{{ visionRunRecord?.provider || '-' }}</strong>
+            <span>Model</span><strong>{{ visionRunRecord?.model || '-' }}</strong>
+            <span>Prompt</span><strong>{{ visionRunRecord?.promptTemplateId || '-' }} {{ visionRunRecord?.promptVersion || '' }}</strong>
+            <span>Schema</span><strong>{{ visionRunRecord?.schemaName || '-' }} {{ visionRunRecord?.schemaVersion || '' }}</strong>
+            <span>Schema Valid</span><strong>{{ valueText(visionRunRecord?.schemaValidation?.valid ?? visionRunRecord?.validationResult.schemaValid) }}</strong>
+            <span>Image Pages</span><strong>{{ visionImagePagesText }}</strong>
+            <span>Support Pages</span><strong>{{ pageRangeText(visionRunRecord?.supportSummaryPages) }}</strong>
+            <span>Input Hash</span><strong>{{ visionRunRecord?.inputPackageHash || '-' }}</strong>
+            <span>Error</span><strong>{{ visionRunRecord?.errorType || '-' }} {{ visionRunRecord?.errorMessage || '' }}</strong>
+          </div>
+          <div v-if="recognitionEvaluation" class="manifest-grid">
+            <span>Total Score</span><strong>{{ scoreText(recognitionEvaluation.totalScore) }}</strong>
+            <span>Procedure Names</span><strong>{{ scoreText(recognitionEvaluation.procedureNameAccuracy) }}</strong>
+            <span>Leg Count</span><strong>{{ scoreText(recognitionEvaluation.legCountAccuracy) }}</strong>
+            <span>Path Terminators</span><strong>{{ scoreText(recognitionEvaluation.pathTerminatorAccuracy) }}</strong>
+            <span>Fixes</span><strong>{{ scoreText(recognitionEvaluation.fixAccuracy) }}</strong>
+            <span>Course</span><strong>{{ scoreText(recognitionEvaluation.courseAccuracy) }}</strong>
+            <span>Distance</span><strong>{{ scoreText(recognitionEvaluation.distanceAccuracy) }}</strong>
+            <span>Altitude</span><strong>{{ scoreText(recognitionEvaluation.altitudeAccuracy) }}</strong>
+            <span>Coordinates</span><strong>{{ scoreText(recognitionEvaluation.coordinateAccuracy) }}</strong>
+            <span>Evidence</span><strong>{{ scoreText(recognitionEvaluation.sourceEvidenceCoverage) }}</strong>
+          </div>
+        </details>
+      </details>
     </section>
+
+    <!-- Prompt / 请求 JSON 弹窗 -->
+    <div v-if="promptModalOpen" class="modal-backdrop" @click.self="promptModalOpen = false">
+      <section class="prompt-modal">
+        <div class="modal-head">
+          <div>
+            <h3>AI 请求详情</h3>
+            <p v-if="promptPreview">{{ promptPreview.promptTemplateName || promptPreview.promptTemplateId }} · {{ promptPreview.promptVersion }}</p>
+          </div>
+          <button type="button" class="ghost" @click="promptModalOpen = false">关闭</button>
+        </div>
+        <div class="tab-row">
+          <button type="button" :class="{ active: promptModalTab === 'prompt' }" @click="promptModalTab = 'prompt'">Prompt</button>
+          <button type="button" :class="{ active: promptModalTab === 'schema' }" @click="promptModalTab = 'schema'">Schema</button>
+          <button type="button" :class="{ active: promptModalTab === 'request' }" @click="promptModalTab = 'request'">完整请求 JSON</button>
+        </div>
+        <p v-if="promptPreviewBusy" class="empty">正在渲染 Prompt...</p>
+        <template v-else-if="promptPreview">
+          <div v-if="promptModalTab === 'prompt'" class="prompt-stack">
+            <h4>System Prompt</h4>
+            <pre>{{ promptPreview.systemPrompt }}</pre>
+            <h4>User Prompt</h4>
+            <pre>{{ promptPreview.userPrompt }}</pre>
+          </div>
+          <pre v-else-if="promptModalTab === 'schema'">{{ promptSchemaJson }}</pre>
+          <pre v-else>{{ fullRequestJson }}</pre>
+        </template>
+        <p v-else class="empty">Prompt 预览加载失败，请重试。</p>
+      </section>
+    </div>
   </main>
 </template>
 
@@ -1550,7 +1791,7 @@ function toErrorMessage(value: unknown) {
 
 .recognizer {
   display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-rows: auto auto auto auto minmax(0, 1fr);
   width: 100vw;
   height: 100vh;
   overflow: hidden;
@@ -1584,7 +1825,7 @@ h1 {
 }
 
 h2 {
-  font-size: 15px;
+  font-size: 14px;
 }
 
 h3 {
@@ -1598,7 +1839,7 @@ h4 {
 .title p,
 .empty,
 .notice,
-.summary p {
+.hint {
   color: #64748b;
   font-size: 12px;
 }
@@ -1677,92 +1918,318 @@ button.ghost {
   color: #b91c1c;
 }
 
-.workspace {
+/* ---------- Stepper ---------- */
+
+.stepper {
   display: grid;
-  grid-template-columns: minmax(360px, 0.7fr) minmax(560px, 1.3fr);
-  gap: 1px;
-  min-height: 0;
-  background: #d7deea;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid #d7deea;
+  background: #fff;
 }
 
-.column {
+.step {
+  justify-content: flex-start;
+  gap: 10px;
+  min-height: 44px;
+  border-radius: 8px;
+  padding: 6px 10px;
+  text-align: left;
+}
+
+.step .step-no {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: none;
+  border-radius: 999px;
+  background: #e2e8f0;
+  color: #475569;
+  font-weight: 700;
+}
+
+.step .step-text {
+  display: grid;
+  gap: 1px;
   min-width: 0;
+}
+
+.step .step-text strong {
+  font-size: 13px;
+}
+
+.step .step-text em {
+  color: #64748b;
+  font-size: 11px;
+  font-style: normal;
+}
+
+.step.current {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+
+.step.current .step-no {
+  background: #2563eb;
+  color: #fff;
+}
+
+.step.done .step-no {
+  background: #16a34a;
+  color: #fff;
+}
+
+.step.done .step-text em {
+  color: #15803d;
+}
+
+.step-summaries {
+  display: flex;
+  gap: 6px 20px;
+  flex-wrap: wrap;
+  padding: 8px 16px;
+  border-bottom: 1px solid #d7deea;
+  background: #f8fafc;
+}
+
+.step-summaries p {
+  color: #475569;
+  font-size: 12px;
+}
+
+.step-summaries b {
+  color: #172033;
+}
+
+/* ---------- Step body ---------- */
+
+.step-scroll {
   min-height: 0;
   overflow: auto;
-  background: #f8fafc;
+  padding: 12px 16px 24px;
+  display: grid;
+  gap: 12px;
+  align-content: start;
+}
+
+.step-panel {
+  display: grid;
+  gap: 12px;
+}
+
+.block {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #fff;
   padding: 12px;
 }
 
-.column-head {
-  position: sticky;
-  top: -12px;
-  z-index: 2;
+.step-footer {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 12px;
+}
+
+/* ---------- Step 1 ---------- */
+
+.grouping-layout {
+  display: grid;
+  grid-template-columns: minmax(360px, 0.8fr) minmax(0, 1.2fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.panel-head {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin: -12px -12px 10px;
-  padding: 12px;
-  border-bottom: 1px solid #e2e8f0;
-  background: #f8fafc;
-}
-
-.group-picker,
-.editor,
-.summary {
-  display: grid;
-  gap: 10px;
 }
 
 .group-picker {
-  margin-bottom: 12px;
+  display: grid;
+  gap: 4px;
 }
 
-.group-title {
+.package-detail {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #fff;
+  padding: 12px;
+}
+
+/* ---------- Step 2 ---------- */
+
+.image-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 8px;
+}
+
+.input-card {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: #f8fafc;
+  padding: 9px;
+}
+
+.input-card strong {
+  color: #172033;
+  font-size: 13px;
+}
+
+.card-top {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 12px;
-}
-
-.group-title span {
-  color: #64748b;
-  font-size: 12px;
-  white-space: nowrap;
-}
-
-.editor {
-  margin-bottom: 14px;
-  border-bottom: 1px solid #e2e8f0;
-  padding-bottom: 14px;
-}
-
-.ai-package {
-  display: grid;
   gap: 10px;
-  border: 1px solid #dbe3ef;
-  border-radius: 7px;
-  background: #fff;
-  padding: 10px;
 }
 
-.ai-result {
-  display: grid;
-  gap: 10px;
-  border: 1px solid #dbe3ef;
-  border-radius: 7px;
-  background: #fff;
-  padding: 10px;
-}
-
-.evaluation-box {
+.support-rows {
   display: grid;
   gap: 8px;
-  border: 1px solid #fde68a;
+}
+
+.support-row {
+  display: grid;
+  gap: 6px;
+  border: 1px solid #e2e8f0;
   border-radius: 7px;
-  background: #fffbeb;
+  background: #f8fafc;
   padding: 9px;
 }
+
+.support-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: #475569;
+}
+
+.support-main strong {
+  color: #172033;
+}
+
+.support-reason {
+  color: #64748b;
+  font-size: 12px;
+}
+
+/* ---------- Step 3 ---------- */
+
+.run-status {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 10px 12px;
+  font-size: 12px;
+  color: #475569;
+}
+
+.run-status.completed {
+  border-color: #bbf7d0;
+  background: #f0fdf4;
+  color: #15803d;
+}
+
+.run-status.running {
+  border-color: #bfdbfe;
+  background: #eff6ff;
+  color: #1d4ed8;
+}
+
+.run-status.error {
+  border-color: #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.alert {
+  display: grid;
+  gap: 4px;
+  border-radius: 8px;
+  padding: 9px 12px;
+  font-size: 12px;
+}
+
+.alert.error {
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.alert.warn {
+  border: 1px solid #fde68a;
+  background: #fffbeb;
+  color: #a16207;
+}
+
+.alert ul {
+  margin: 0;
+  padding-left: 18px;
+}
+
+/* ---------- Step 4 ---------- */
+
+.preview-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.map-frame {
+  position: relative;
+  height: calc(100vh - 300px);
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid #dbe3ef;
+  border-radius: 8px;
+  background: #e5e7eb;
+}
+
+.map-placeholder {
+  display: grid;
+  place-content: center;
+  gap: 6px;
+  height: 100%;
+  text-align: center;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.map-placeholder strong {
+  color: #334155;
+  font-size: 14px;
+}
+
+.preview-side {
+  display: grid;
+  gap: 10px;
+}
+
+.button-col {
+  display: grid;
+  gap: 8px;
+}
+
+/* ---------- shared ---------- */
 
 .table-wrap {
   max-width: 100%;
@@ -1771,9 +2238,19 @@ button.ghost {
   border-radius: 7px;
 }
 
+.quality-warning {
+  color: #b45309;
+  font-size: 12px;
+}
+
+.raw-json {
+  max-height: 420px;
+  overflow: auto;
+}
+
 table {
   width: 100%;
-  min-width: 760px;
+  min-width: 680px;
   border-collapse: collapse;
   background: #fff;
   font-size: 11px;
@@ -1799,39 +2276,11 @@ td {
   color: #475569;
 }
 
-.prompt-panel {
-  display: grid;
-  gap: 9px;
-  border: 1px solid #e2e8f0;
-  border-radius: 7px;
-  background: #f8fafc;
-  padding: 9px;
-}
-
-.ai-package-head,
-.card-top {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-}
-
-.ai-package-head p,
-.input-card p {
-  color: #64748b;
-  font-size: 12px;
-  line-height: 1.5;
-}
-
-.tab-row,
-.tag-row {
+.tab-row {
   display: flex;
   align-items: center;
   gap: 6px;
   flex-wrap: wrap;
-}
-
-.tab-row {
   border-bottom: 1px solid #e2e8f0;
   padding-bottom: 8px;
 }
@@ -1845,25 +2294,6 @@ td {
   border-color: #2563eb;
   background: #eff6ff;
   color: #1d4ed8;
-}
-
-.card-list {
-  display: grid;
-  gap: 8px;
-}
-
-.input-card {
-  display: grid;
-  gap: 8px;
-  border: 1px solid #e2e8f0;
-  border-radius: 7px;
-  background: #f8fafc;
-  padding: 9px;
-}
-
-.input-card strong {
-  color: #172033;
-  font-size: 13px;
 }
 
 .meta-grid,
@@ -1885,21 +2315,6 @@ td {
 .manifest-grid strong {
   color: #172033;
   font-size: 12px;
-}
-
-.summary-lines {
-  display: grid;
-  gap: 5px;
-}
-
-.summary-lines b {
-  color: #334155;
-  font-size: 12px;
-}
-
-.manifest {
-  display: grid;
-  gap: 9px;
 }
 
 .tag {
@@ -1964,9 +2379,6 @@ select {
 }
 
 em {
-  width: fit-content;
-  color: #b45309;
-  font-size: 11px;
   font-style: normal;
 }
 
@@ -1975,6 +2387,20 @@ details {
   border-radius: 7px;
   background: #fff;
   padding: 9px;
+}
+
+details > details {
+  margin-top: 8px;
+}
+
+.debug-panel {
+  display: grid;
+  gap: 8px;
+  background: #f8fafc;
+}
+
+.debug-panel > summary {
+  color: #64748b;
 }
 
 .modal-backdrop {
@@ -2013,7 +2439,6 @@ details {
   font-size: 12px;
 }
 
-.prompt-modal > .card-list,
 .prompt-stack,
 .prompt-modal > pre {
   min-height: 0;
@@ -2043,7 +2468,6 @@ pre {
 }
 
 .page-tabs {
-  flex: 1;
   justify-content: flex-end;
   min-width: 0;
 }
@@ -2054,15 +2478,10 @@ pre {
   color: #1d4ed8;
 }
 
-.page-preview {
-  display: flex;
-  flex-direction: column;
-}
-
 .pdf-page-frame {
   position: relative;
-  flex: 1;
-  min-height: 480px;
+  height: calc(100vh - 330px);
+  min-height: 420px;
   overflow: hidden;
   border: 1px solid #e2e8f0;
   border-radius: 7px;
@@ -2118,7 +2537,7 @@ ul {
   font-size: 12px;
 }
 
-@media (max-width: 980px) {
+@media (max-width: 1080px) {
   .recognizer {
     height: auto;
     min-height: 100vh;
@@ -2131,18 +2550,20 @@ ul {
     flex-direction: column;
   }
 
-  .workspace {
+  .stepper {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .grouping-layout,
+  .preview-layout {
     grid-template-columns: 1fr;
   }
 
-  .column {
-    max-height: none;
+  .map-frame {
+    height: 60vh;
   }
 
-  .form-grid {
-    grid-template-columns: 1fr;
-  }
-
+  .form-grid,
   .meta-grid,
   .manifest-grid {
     grid-template-columns: 1fr;

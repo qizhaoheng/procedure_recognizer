@@ -12,6 +12,10 @@ export async function readBaseSystemPrompt() {
   return readPromptTemplate('base.system.prompt.md');
 }
 
+export async function readPromptExample(examplePath: string) {
+  return fs.readFile(path.join(promptDir, 'examples', examplePath), 'utf-8');
+}
+
 export async function readPromptSchema(schemaName: string) {
   const text = await fs.readFile(path.join(promptDir, 'schemas', schemaName), 'utf-8');
   return JSON.parse(text);

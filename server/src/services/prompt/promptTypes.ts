@@ -15,6 +15,7 @@ export interface PromptTemplate {
   packageType: PromptPackageType;
   navigationTypes: string[];
   templatePath: string;
+  examplePath?: string;
   outputSchemaName: string;
   outputSchemaVersion: string;
   status: PromptTemplateStatus;

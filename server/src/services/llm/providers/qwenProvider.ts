@@ -65,6 +65,7 @@ async function callQwenChatCompletions(
     body: JSON.stringify({
       model: request.model || config.model,
       temperature: 0.1,
+      enable_thinking: config.enableThinking,
       ...(responseFormatFor(mode, request) ? { response_format: responseFormatFor(mode, request) } : {}),
       messages: [
         { role: 'system', content: request.systemPrompt },

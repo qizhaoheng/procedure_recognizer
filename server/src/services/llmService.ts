@@ -1,8 +1,9 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
-import type { AiInputPage, AiResponseRecord, ProcedureGroup } from '../types/procedure';
+import type { AiImageRegion, AiInputPage, AiResponseRecord, ProcedureGroup, VisionRunImagePage } from '../types/procedure';
 import { validateProcedureGeoJson, withBbox } from './geojsonValidator';
+import { HIGH_RES_MIN_WIDTH_PX, REGION_CROPS, regionRenderScale } from './llm/imageRegions';
 import {
   getLlmRuntimeConfig,
   LlmApiError,
@@ -18,6 +19,14 @@ export interface VisionImagePayload {
   page: AiInputPage;
   dataUrl: string;
   imageUrl?: string;
+  meta?: RenderedImageMeta;
+}
+
+export interface RenderedImageMeta {
+  widthPx: number;
+  heightPx: number;
+  fileSizeBytes: number;
+  renderScale: number;
 }
 
 export interface LlmVisionTestResult {
@@ -110,7 +119,23 @@ export async function runProcedureUnderstandingRecognition(
     structuredOutputModeUsed: result.structuredOutputModeUsed,
     rawProviderResponse: result.rawResponse,
     latencyMs: result.latencyMs,
+    imagePages: images.map((image) => visionRunImagePage(image, result.imageMode)),
     createdAt: now,
+  };
+}
+
+function visionRunImagePage(image: VisionImagePayload, imageMode: 'base64' | 'url' = 'base64'): VisionRunImagePage {
+  return {
+    pageNo: image.page.pageNo,
+    aipPageNo: image.page.aipPageNo,
+    role: image.page.role,
+    region: image.page.region || 'full_page',
+    imageMode,
+    widthPx: image.meta?.widthPx,
+    heightPx: image.meta?.heightPx,
+    fileSizeBytes: image.meta?.fileSizeBytes,
+    renderScale: image.meta?.renderScale,
+    isHighRes: image.meta ? image.meta.widthPx >= HIGH_RES_MIN_WIDTH_PX : undefined,
   };
 }
 
@@ -133,15 +158,9 @@ export async function testVisionConnection(model = process.env.LLM_MODEL || getL
     schemaName: 'llm_test_vision',
     images: [
       {
-        page: {
-          pageNo: 0,
-          aipPageNo: 'LLM test image',
-          role: 'CHART',
-          sendMode: 'IMAGE_ONLY',
-          reason: 'LLM connection test',
-          confidence: 1,
-          reviewRequired: false,
-        },
+        pageNo: 0,
+        aipPageNo: 'LLM test image',
+        role: 'CHART',
         dataUrl: await testPngDataUrl(),
       },
     ],
@@ -268,10 +287,12 @@ export async function buildVisionImagePayloads(inputImages: AiInputPage[]): Prom
     if (!image.imageUrl) {
       throw new LlmApiError('MISSING_IMAGE', `Input image page ${image.pageNo} has no imageUrl.`);
     }
+    const rendered = await localImageAsRenderedPng(image.imageUrl, image.region || 'full_page');
     images.push({
       page: image,
-      dataUrl: await localImageAsDataUrl(image.imageUrl),
+      dataUrl: rendered.dataUrl,
       imageUrl: publicImageUrl(image.imageUrl),
+      meta: rendered.meta,
     });
   }
   return images;
@@ -284,17 +305,23 @@ function publicImageUrl(imageUrl: string) {
 }
 
 export async function localImageAsDataUrl(imageUrl: string) {
-  if (/^https?:\/\//i.test(imageUrl) || imageUrl.startsWith('data:')) return imageUrl;
+  return (await localImageAsRenderedPng(imageUrl, 'full_page')).dataUrl;
+}
+
+async function localImageAsRenderedPng(imageUrl: string, region: AiImageRegion): Promise<{ dataUrl: string; meta?: RenderedImageMeta }> {
+  if (/^https?:\/\//i.test(imageUrl) || imageUrl.startsWith('data:')) return { dataUrl: imageUrl };
   const relative = imageUrl.replace(/^\/uploads\//, '');
   const filePath = path.resolve(process.cwd(), 'server', 'data', relative);
   if (path.extname(filePath).toLowerCase() === '.svg') {
-    return await renderPdfPageForTaskAsset(filePath) ?? svgFileAsPngDataUrl(filePath);
+    const rendered = await renderPdfPageForTaskAsset(filePath, region);
+    if (rendered) return rendered;
+    return { dataUrl: await svgFileAsPngDataUrl(filePath) };
   }
   const bytes = await fs.readFile(filePath);
-  return `data:${mimeFor(filePath)};base64,${bytes.toString('base64')}`;
+  return { dataUrl: `data:${mimeFor(filePath)};base64,${bytes.toString('base64')}` };
 }
 
-async function renderPdfPageForTaskAsset(filePath: string) {
+async function renderPdfPageForTaskAsset(filePath: string, region: AiImageRegion = 'full_page') {
   const taskAsset = parseTaskPageAssetPath(filePath);
   if (!taskAsset) return undefined;
 
@@ -302,7 +329,7 @@ async function renderPdfPageForTaskAsset(filePath: string) {
     const taskPath = path.resolve(process.cwd(), 'server', 'data', 'procedure-tasks', taskAsset.taskId, 'task.json');
     const task = JSON.parse(await fs.readFile(taskPath, 'utf-8')) as { filePath?: string };
     if (!task.filePath) return undefined;
-    return await renderPdfPageAsPngDataUrl(task.filePath, taskAsset.pageNo);
+    return await renderPdfPageAsPngDataUrl(task.filePath, taskAsset.pageNo, region);
   } catch {
     return undefined;
   }
@@ -315,7 +342,11 @@ function parseTaskPageAssetPath(filePath: string) {
   return { taskId: match[1], pageNo: Number(match[2]) };
 }
 
-async function renderPdfPageAsPngDataUrl(pdfPath: string, pageNo: number) {
+async function renderPdfPageAsPngDataUrl(
+  pdfPath: string,
+  pageNo: number,
+  region: AiImageRegion = 'full_page',
+): Promise<{ dataUrl: string; meta: RenderedImageMeta }> {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs');
   const { createCanvas } = await import('@napi-rs/canvas');
   const data = new Uint8Array(await fs.readFile(pdfPath));
@@ -327,14 +358,33 @@ async function renderPdfPageAsPngDataUrl(pdfPath: string, pageNo: number) {
   try {
     const pdf = await loadingTask.promise;
     const page = await pdf.getPage(pageNo);
-    const scale = Number(process.env.LLM_IMAGE_RENDER_SCALE || 2.5);
+    const scale = regionRenderScale(region);
     const viewport = page.getViewport({ scale });
-    const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
+    const crop = REGION_CROPS[region];
+    const cropX = Math.floor(viewport.width * crop.x0);
+    const cropY = Math.floor(viewport.height * crop.y0);
+    const cropWidth = Math.max(1, Math.ceil(viewport.width * (crop.x1 - crop.x0)));
+    const cropHeight = Math.max(1, Math.ceil(viewport.height * (crop.y1 - crop.y0)));
+    const canvas = createCanvas(cropWidth, cropHeight);
     const context = canvas.getContext('2d');
     context.fillStyle = '#fff';
-    context.fillRect(0, 0, canvas.width, canvas.height);
-    await page.render({ canvasContext: context, viewport }).promise;
-    return `data:image/png;base64,${canvas.toBuffer('image/png').toString('base64')}`;
+    context.fillRect(0, 0, cropWidth, cropHeight);
+    const renderParams = {
+      canvasContext: context,
+      viewport,
+      transform: [1, 0, 0, 1, -cropX, -cropY],
+    } as unknown as Parameters<typeof page.render>[0];
+    await page.render(renderParams).promise;
+    const buffer = canvas.toBuffer('image/png');
+    return {
+      dataUrl: `data:image/png;base64,${buffer.toString('base64')}`,
+      meta: {
+        widthPx: cropWidth,
+        heightPx: cropHeight,
+        fileSizeBytes: buffer.length,
+        renderScale: scale,
+      },
+    };
   } finally {
     await loadingTask.destroy();
   }

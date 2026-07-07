@@ -36,6 +36,8 @@ export async function parsePdfTask(task: ProcedureTask): Promise<PdfPageAsset[]>
       ...page,
       imageUrl: `/uploads/procedure-tasks/${task.taskId}/pages/${imageFile}`,
       thumbnailUrl: `/uploads/procedure-tasks/${task.taskId}/pages/${thumbFile}`,
+      sourceWidthPt: extracted.width,
+      sourceHeightPt: extracted.height,
     });
   }
 

@@ -53,6 +53,7 @@ export interface LlmRuntimeConfig {
   endpointType: LlmEndpointType;
   imageMode: LlmImageMode;
   structuredOutputMode: StructuredOutputMode;
+  enableThinking: boolean;
   timeoutMs: number;
   maxRetries: number;
 }
@@ -96,6 +97,7 @@ export function getLlmRuntimeConfig(modelOverride?: string): LlmRuntimeConfig {
     endpointType,
     imageMode: normalizeImageMode(process.env.LLM_IMAGE_MODE),
     structuredOutputMode: normalizeStructuredOutputMode(process.env.LLM_STRUCTURED_OUTPUT_MODE),
+    enableThinking: process.env.LLM_ENABLE_THINKING === 'true',
     timeoutMs: Number(process.env.LLM_TIMEOUT_MS || 180000),
     maxRetries: Math.max(0, Number(process.env.LLM_MAX_RETRIES || 1)),
   };

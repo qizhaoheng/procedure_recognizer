@@ -1,12 +1,12 @@
 import type { PromptTemplate } from './promptTypes';
 
-const VERSION = '1.0.0';
-const DATE = '2026-07-06T00:00:00.000Z';
+const VERSION = '1.1.0';
+const DATE = '2026-07-07T00:00:00.000Z';
 
 export const PROMPT_TEMPLATES: PromptTemplate[] = [
   template('generic_procedure_v1', 'Generic Procedure Understanding', 'GENERIC', ['UNKNOWN'], 'generic-procedure.prompt.md'),
   template('rnav_star_v1', 'RNAV STAR Procedure Understanding', 'STAR', ['RNAV'], 'rnav-star.prompt.md'),
-  template('dme_arc_star_v1', 'DME ARC STAR Procedure Understanding', 'STAR', ['DME_ARC'], 'dme-arc-star.prompt.md'),
+  template('dme_arc_star_v1', 'DME ARC STAR Procedure Understanding', 'STAR', ['DME_ARC'], 'dme-arc-star.prompt.md', 'dme-arc-star-wmkj-example.md'),
   template('rnav_sid_v1', 'RNAV SID Procedure Understanding', 'SID', ['RNAV'], 'rnav-sid.prompt.md'),
   template('conventional_sid_v1', 'Conventional SID Procedure Understanding', 'SID', ['CONVENTIONAL'], 'conventional-sid.prompt.md'),
   template('ils_loc_approach_v1', 'ILS/LOC Approach Procedure Understanding', 'APPROACH', ['ILS', 'LOC', 'ILS_LOC'], 'ils-loc-approach.prompt.md'),
@@ -31,6 +31,7 @@ function template(
   packageType: PromptTemplate['packageType'],
   navigationTypes: string[],
   templatePath: string,
+  examplePath?: string,
 ): PromptTemplate {
   return {
     id,
@@ -39,6 +40,7 @@ function template(
     packageType,
     navigationTypes,
     templatePath,
+    examplePath,
     outputSchemaName: 'procedure-understanding.schema.json',
     outputSchemaVersion: VERSION,
     status: 'ACTIVE',
