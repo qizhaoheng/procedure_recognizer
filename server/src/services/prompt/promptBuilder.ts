@@ -1,15 +1,30 @@
 import type { BuildPromptInput, BuiltPrompt } from './promptTypes';
-import { readBaseSystemPrompt, readPromptExample, readPromptSchema, readPromptTemplate, renderTemplate } from './promptRenderer';
+import { readPromptExample, readPromptSchema, readPromptSection, readPromptTemplate, renderTemplate } from './promptRenderer';
 import { routePromptTemplate } from './promptRouter';
+
+// 分层系统 Prompt：按固定顺序组装，通用规则全部放在 system prompt，
+// 程序类型专用模板 + few-shot + 动态输入包放在 user prompt。
+const PROMPT_SECTIONS = [
+  'base-role.prompt.md',
+  'procedure-classification.prompt.md',
+  'input-materials.prompt.md',
+  'chart-text-recognition.prompt.md',
+  'table-semantic-recognition.prompt.md',
+  'support-filtering.prompt.md',
+  'geometry-semantic-recognition.prompt.md',
+  'output-schema-rules.prompt.md',
+  'hallucination-guard.prompt.md',
+];
 
 export async function buildPrompt(input: BuildPromptInput): Promise<BuiltPrompt> {
   const template = routePromptTemplate(input.procedurePackage, input.templateOverrideId);
-  const [baseSystemPrompt, procedureTemplate, responseSchema, fewShotExample] = await Promise.all([
-    readBaseSystemPrompt(),
+  const [sectionTexts, procedureTemplate, responseSchema, fewShotExample] = await Promise.all([
+    Promise.all(PROMPT_SECTIONS.map((section) => readPromptSection(section))),
     readPromptTemplate(template.templatePath),
     readPromptSchema(template.outputSchemaName),
     template.examplePath ? readPromptExample(template.examplePath) : Promise.resolve(''),
   ]);
+  const baseSystemPrompt = sectionTexts.map((text) => text.trim()).join('\n\n');
 
   const renderedAt = new Date().toISOString();
   const metadata = buildPackageMetadata(input);
@@ -49,27 +64,11 @@ export async function buildPrompt(input: BuildPromptInput): Promise<BuiltPrompt>
     '## Excluded Support',
     fencedJson(input.aiInputPackage.excludedSupport),
     '',
-    '## Output Rules',
-    '- Return exactly one JSON object matching the provided ProcedureUnderstanding schema.',
-    '- Do not include markdown fences, comments, prose, or extra top-level keys.',
-    '- Keep procedure-package boundaries strict: do not mix procedures from other packages.',
-    '- Follow the five-stage reading workflow and fill ALL of: procedureClassification (Stage 1), chartTexts (Stage 2), tableLegs (Stage 3), geometrySemantics (Stage 4), procedures/fixes/navaids (Stage 5).',
+    '## Output Reminder',
+    '- Return exactly one JSON object matching the provided ProcedureUnderstanding schema. No markdown fences, no prose.',
+    '- Follow the staged reading workflow and fill ALL of: procedureClassification, chartTexts, tableLegs, geometrySemantics, supportObjects, procedures/fixes/navaids, warnings, confidence, reviewRequired.',
+    '- Apply the support-filtering rules: support-only idents must not enter navaids, fixes, or legs.',
     '- Do NOT return final map coordinates or GeoJSON; return procedure semantics only.',
-    '',
-    '## Support Filtering Rules',
-    '- Supporting information is context, not procedure content.',
-    '- List every navaid/runway/other ident considered from supporting pages in supportObjects with usedInProcedure, supportOnly, and reason.',
-    '- An ident that appears only in a supporting page and is not referenced by the current chart or table must have usedInProcedure=false and supportOnly=true, and must not appear in navaids, fixes, or legs.',
-    '',
-    '## Source Evidence Rules',
-    '- Every key operational field must cite sourceEvidenceIds.',
-    '- Each sourceEvidence item must include pageNo, evidenceType, fieldName, and rawText or visualDescription.',
-    '- Prefer tabular description pages for leg sequence and path terminators; use chart imagery to cross-check geometry and labels.',
-    '',
-    '## Uncertainty Rules',
-    '- Do not guess uncertain values.',
-    '- Set reviewRequired=true on uncertain procedures, legs, fixes, and the overall output.',
-    '- Preserve conflicts in warnings with the page numbers and fields involved.',
     '',
     '## Machine-Readable Input Package',
     fencedJson(dynamicInput),

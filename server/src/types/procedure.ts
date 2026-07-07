@@ -164,6 +164,8 @@ export interface ProcedureGroup {
   geojsonGeneratedAt?: string;
   geojsonError?: string;
   reviewRequired?: boolean;
+  /** 人工标记的识别问题类型，用于后续 Prompt 打磨 */
+  recognitionIssueTags?: string[];
 }
 
 export interface AipAdStructure {
