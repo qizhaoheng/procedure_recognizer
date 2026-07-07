@@ -24,10 +24,13 @@ import type {
   AiInputPage,
   BuiltPromptPreview,
   EvaluationResult,
+  Jeppesen424CompareResponse,
+  LegCompareResult,
   PackageType,
   PackageWorkflowState,
   PdfPageAsset,
   ProcedureGroup,
+  ProcedureCompareResult,
   ProcedureTask,
   SendMode,
   SendPolicy,
@@ -39,7 +42,7 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 const route = useRoute();
 const router = useRouter();
 
-type StepKey = 'grouping' | 'request' | 'recognition' | 'preview';
+type StepKey = 'grouping' | 'request' | 'recognition' | 'preview' | 'jeppesen';
 
 const steps: Array<{ key: StepKey; title: string }> = [
   { key: 'grouping', title: 'PDF 分组' },
@@ -47,6 +50,7 @@ const steps: Array<{ key: StepKey; title: string }> = [
   { key: 'recognition', title: 'AI 识别结果' },
   { key: 'preview', title: 'GeoJSON 预览' },
 ];
+steps.push({ key: 'jeppesen', title: 'Jeppesen 424 对比' });
 const stepKeys = steps.map((step) => step.key);
 
 const statusLabels: Record<string, string> = {
@@ -70,6 +74,9 @@ const sourceLabels: Record<string, string> = {
   MANUAL: '人工',
 };
 
+const RNAV_1E_PROCEDURES = ['ADLOV 1E', 'EMTUV 1E', 'OMKOM 1E', 'PIMOK 1E'];
+const DME_ARC_1G_PROCEDURES = ['ADLOV 1G', 'EMTUV 1G', 'OMKOM 1G', 'PIMOK 1G'];
+
 const fileInput = ref<HTMLInputElement>();
 const task = ref<ProcedureTask>();
 const selectedPageNo = ref<number>();
@@ -88,6 +95,10 @@ const promptModalOpen = ref(false);
 const promptModalTab = ref<'prompt' | 'schema' | 'request'>('prompt');
 const promptPreviewBusy = ref(false);
 const rawJsonOpen = ref(false);
+const jeppesenText = ref('');
+const jeppesenCompareBusy = ref(false);
+const jeppesenCompareResult = ref<Jeppesen424CompareResponse>();
+const jeppesenFilterMode = ref<'CURRENT' | 'RNAV_1E' | 'INCLUDE_1G'>('RNAV_1E');
 const mapResetCounter = ref(0);
 const pdfCanvas = ref<HTMLCanvasElement>();
 const pdfFrame = ref<HTMLDivElement>();
@@ -406,6 +417,7 @@ const stepDone = computed<Record<StepKey, boolean>>(() => ({
   request: Boolean(aiInputPackage.value),
   recognition: llmRunStatus.value === 'COMPLETED',
   preview: Boolean(selectedGroup.value?.geojson),
+  jeppesen: Boolean(jeppesenCompareResult.value),
 }));
 
 const groupingSummaryText = computed(() => {
@@ -434,11 +446,24 @@ const geojsonSummaryText = computed(() => {
   return `生成 ${stats.featureCount} 个 Feature，其中 LineString ${stats.lineStringCount}，Point ${stats.pointCount}，Polygon ${stats.polygonCount}。`;
 });
 
+const jeppesenProcedureFilter = computed(() => {
+  if (jeppesenFilterMode.value === 'CURRENT') return selectedGroup.value?.procedureNames?.length ? selectedGroup.value.procedureNames : [];
+  if (jeppesenFilterMode.value === 'INCLUDE_1G') return [...RNAV_1E_PROCEDURES, ...DME_ARC_1G_PROCEDURES];
+  return RNAV_1E_PROCEDURES;
+});
+
+const jeppesenSummaryText = computed(() => {
+  const summary = jeppesenCompareResult.value?.summary;
+  if (!summary) return '';
+  return `overall ${compareScoreText(summary.overallScore)}, ${summary.matchedLegs}/${summary.totalLegs} legs matched`;
+});
+
 const stepSummaries = computed(() => [
   { key: 'grouping', label: 'PDF 分组', text: groupingSummaryText.value },
   { key: 'request', label: 'AI 请求', text: requestSummaryText.value },
   { key: 'recognition', label: 'AI 识别', text: recognitionSummaryText.value },
   { key: 'preview', label: 'GeoJSON', text: geojsonSummaryText.value },
+  { key: 'jeppesen', label: 'Jeppesen 424', text: jeppesenSummaryText.value },
 ].filter((item) => item.text));
 
 function stepState(key: StepKey) {
@@ -851,6 +876,47 @@ async function evaluateRecognition() {
   }
 }
 
+async function compareJeppesen424() {
+  if (!task.value || !selectedGroup.value) return;
+  jeppesenCompareBusy.value = true;
+  error.value = '';
+  try {
+    jeppesenCompareResult.value = await requestJson<Jeppesen424CompareResponse>(
+      `/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/jeppesen424/compare`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          text: jeppesenText.value,
+          procedureFilter: jeppesenProcedureFilter.value,
+          runway: selectedGroup.value.runway || procedureUnderstanding.value?.runway || 'RW16',
+        }),
+      },
+    );
+    message.value = 'Jeppesen 424 compare completed';
+  } catch (compareError) {
+    error.value = toErrorMessage(compareError);
+  } finally {
+    jeppesenCompareBusy.value = false;
+  }
+}
+
+function statusClass(status: string) {
+  return status.toLowerCase().replace(/_/g, '-');
+}
+
+function legDiffTitle(leg: LegCompareResult) {
+  const mismatches = leg.fieldResults.filter((field) => !field.matched);
+  return mismatches.length ? mismatches.map((field) => field.field).join(', ') : 'All compared fields matched';
+}
+
+function procedureDiffCount(procedure: ProcedureCompareResult) {
+  return procedure.legResults.reduce((sum, leg) => {
+    const missing = leg.status === 'MISSING_AI' || leg.status === 'MISSING_JEPPESEN' ? 1 : 0;
+    return sum + missing + leg.fieldResults.filter((field) => !field.matched).length;
+  }, 0);
+}
+
 async function generateGeoJson() {
   if (!task.value || !selectedGroup.value) return;
   geojsonBusy.value = true;
@@ -919,6 +985,7 @@ function handleSelectedGroupChanged() {
   if (!group) return;
   selectedPageNo.value = allGroupPages(group)[0] || selectedPageNo.value;
   promptPreview.value = undefined;
+  jeppesenCompareResult.value = undefined;
   if (task.value) replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
   void loadAiInputPackage(false);
 }
@@ -1096,6 +1163,10 @@ function valueText(value: unknown) {
 
 function scoreText(value: number | undefined) {
   return value === undefined ? '-' : `${Math.round(value * 100)}%`;
+}
+
+function compareScoreText(value: number | undefined) {
+  return value === undefined ? '-' : `${value.toFixed(1).replace(/\.0$/, '')}%`;
 }
 
 const visionImagePagesText = computed(() => {
@@ -1740,7 +1811,7 @@ function toErrorMessage(value: unknown) {
       </section>
 
       <!-- ==================== Step 4：GeoJSON 预览 ==================== -->
-      <section v-else class="step-panel">
+      <section v-else-if="currentStep === 'preview'" class="step-panel">
         <p v-if="!selectedGroup" class="empty">请先返回 Step 1 选择程序包。</p>
         <template v-else>
           <div class="preview-layout">
@@ -1812,6 +1883,134 @@ function toErrorMessage(value: unknown) {
       </section>
 
       <!-- ==================== 高级调试 ==================== -->
+      <!-- ==================== Step 5: Jeppesen 424 compare ==================== -->
+      <section v-else-if="currentStep === 'jeppesen'" class="step-panel">
+        <p v-if="!selectedGroup" class="empty">请先返回 Step 1 选择程序包。</p>
+        <template v-else>
+          <section class="block">
+            <div class="panel-head">
+              <div>
+                <h2>粘贴 Jeppesen 424 静态文本</h2>
+                <p class="hint">MVP 只解析包含 SSPAP 的 WMKJ RWY16 STAR 记录，并按 procedure / runway / sequence 与当前 AI 结果对比。</p>
+              </div>
+              <button type="button" class="primary" :disabled="jeppesenCompareBusy || !jeppesenText.trim() || !procedureUnderstanding" @click="compareJeppesen424">
+                <RefreshCw :size="15" /> 开始对比
+              </button>
+            </div>
+
+            <textarea
+              v-model="jeppesenText"
+              class="jeppesen-input"
+              placeholder="Paste Jeppesen 424 text here..."
+              spellcheck="false"
+            ></textarea>
+
+            <div class="filter-row">
+              <label>
+                <input v-model="jeppesenFilterMode" type="radio" value="CURRENT" />
+                当前程序包
+              </label>
+              <label>
+                <input v-model="jeppesenFilterMode" type="radio" value="RNAV_1E" />
+                仅 RNAV 1E
+              </label>
+              <label>
+                <input v-model="jeppesenFilterMode" type="radio" value="INCLUDE_1G" />
+                包含 DME ARC 1G
+              </label>
+            </div>
+
+            <div class="manifest-grid">
+              <span>筛选程序</span><strong>{{ jeppesenProcedureFilter.join(' / ') || '当前 AI 程序' }}</strong>
+              <span>跑道</span><strong>{{ selectedGroup.runway || procedureUnderstanding?.runway || 'RW16' }}</strong>
+              <span>AI legs</span><strong>{{ jeppesenCompareResult?.aiLegs.length ?? '-' }}</strong>
+              <span>Parsed 424 legs</span><strong>{{ jeppesenCompareResult?.parsedJeppesenLegs.length ?? '-' }}</strong>
+            </div>
+          </section>
+
+          <p v-if="!procedureUnderstanding" class="alert warn">需要先完成 AI 识别，才能把 ProcedureUnderstanding legs 与 Jeppesen 424 文本对比。</p>
+          <p v-if="jeppesenCompareResult && !jeppesenCompareResult.aiLegs.length && jeppesenCompareResult.parsedJeppesenLegs.length" class="alert warn">
+            当前筛选范围内 Jeppesen 424 有 {{ jeppesenCompareResult.parsedJeppesenLegs.length }} 条腿段，但 AI 结果没有对应腿段。若要验证 RNAV 1E，请选择 RNAV STAR 程序包，并使用“仅 RNAV 1E”筛选。
+          </p>
+          <p v-if="jeppesenCompareBusy" class="empty">正在解析并对比 Jeppesen 424 文本...</p>
+
+          <template v-if="jeppesenCompareResult">
+            <section class="block">
+              <h2>对比摘要</h2>
+              <div class="summary-cards">
+                <div class="metric-card"><span>总体匹配率</span><strong>{{ compareScoreText(jeppesenCompareResult.summary.overallScore) }}</strong></div>
+                <div class="metric-card"><span>程序数</span><strong>{{ jeppesenCompareResult.summary.totalProcedures }}</strong></div>
+                <div class="metric-card"><span>腿段数</span><strong>{{ jeppesenCompareResult.summary.totalLegs }}</strong></div>
+                <div class="metric-card"><span>AI 腿段</span><strong>{{ jeppesenCompareResult.aiLegs.length }}</strong></div>
+                <div class="metric-card"><span>424 腿段</span><strong>{{ jeppesenCompareResult.parsedJeppesenLegs.length }}</strong></div>
+                <div class="metric-card"><span>完全匹配腿段</span><strong>{{ jeppesenCompareResult.summary.matchedLegs }}</strong></div>
+                <div class="metric-card"><span>缺失 AI 腿段</span><strong>{{ jeppesenCompareResult.summary.missingAiLegs }}</strong></div>
+                <div class="metric-card"><span>差异数</span><strong>{{ jeppesenCompareResult.summary.issueCount ?? jeppesenCompareResult.procedureResults.reduce((sum, item) => sum + procedureDiffCount(item), 0) }}</strong></div>
+              </div>
+            </section>
+
+            <details
+              v-for="procedure in jeppesenCompareResult.procedureResults"
+              :key="`${procedure.procedureName}-${procedure.runway}`"
+              class="block compare-panel"
+              open
+            >
+              <summary>
+                {{ procedure.procedureName }} / {{ procedure.runway }} -
+                {{ compareScoreText(procedure.score) }} -
+                {{ procedure.matchedLegs }}/{{ procedure.totalLegs }} legs matched
+              </summary>
+              <div class="table-wrap">
+                <table class="compare-table">
+                  <thead>
+                    <tr>
+                      <th>Seq</th>
+                      <th>AI Fix</th>
+                      <th>424 Fix</th>
+                      <th>AI PT</th>
+                      <th>424 PT</th>
+                      <th>AI Dist</th>
+                      <th>424 Dist</th>
+                      <th>AI Alt</th>
+                      <th>424 Alt</th>
+                      <th>Score</th>
+                      <th>Status</th>
+                      <th>差异字段</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="leg in procedure.legResults" :key="`${procedure.procedureName}-${leg.sequence}`" :class="statusClass(leg.status)">
+                      <td>{{ leg.sequence }}</td>
+                      <td>{{ leg.ai?.fix || '-' }}</td>
+                      <td>{{ leg.jeppesen?.fix || '-' }}</td>
+                      <td>{{ leg.ai?.pathTerminator || '-' }}</td>
+                      <td>{{ leg.jeppesen?.pathTerminator || '-' }}</td>
+                      <td>{{ valueText(leg.ai?.distanceNm) }}</td>
+                      <td>{{ valueText(leg.jeppesen?.distanceNm) }}</td>
+                      <td>{{ leg.ai?.altitudeRaw || valueText(leg.ai?.altitudeValue) }}</td>
+                      <td>{{ leg.jeppesen?.altitudeRaw || valueText(leg.jeppesen?.altitudeValue) }}</td>
+                      <td>{{ compareScoreText(leg.score) }}</td>
+                      <td><span class="status-pill" :class="statusClass(leg.status)">{{ leg.status }}</span></td>
+                      <td>{{ legDiffTitle(leg) }}</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              <details class="raw-evidence">
+                <summary>原始 424 行证据</summary>
+                <pre>{{ procedure.legResults.map((leg) => leg.jeppesen?.rawRecord).filter(Boolean).join('\n\n') || '-' }}</pre>
+              </details>
+            </details>
+          </template>
+
+          <div class="step-footer">
+            <button type="button" @click="goToStep('recognition')">返回 AI 识别结果</button>
+            <button type="button" @click="goToStep('preview')">查看 GeoJSON 预览</button>
+          </div>
+        </template>
+      </section>
+
       <details v-if="selectedGroup" class="debug-panel">
         <summary>高级调试（Prompt / Schema / Request JSON / Raw Response / GeoJSON Raw / 评测 / 日志）</summary>
         <div class="button-row compact">
@@ -2068,7 +2267,7 @@ button.ghost {
 
 .stepper {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
   padding: 10px 16px;
   border-bottom: 1px solid #d7deea;
@@ -2370,6 +2569,117 @@ button.issue-active {
   border-color: #b91c1c;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+/* ---------- Step 5 ---------- */
+
+.jeppesen-input {
+  width: 100%;
+  min-height: 300px;
+  resize: vertical;
+  border: 1px solid #cbd5e1;
+  border-radius: 7px;
+  background: #fff;
+  color: #172033;
+  padding: 10px;
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
+}
+
+.filter-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.filter-row label {
+  display: inline-flex;
+  grid-auto-flow: column;
+  align-items: center;
+  gap: 6px;
+  color: #334155;
+}
+
+.filter-row input {
+  width: auto;
+  min-height: auto;
+}
+
+.summary-cards {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(120px, 1fr));
+  gap: 8px;
+}
+
+.metric-card {
+  display: grid;
+  gap: 4px;
+  border: 1px solid #e2e8f0;
+  border-radius: 7px;
+  background: #f8fafc;
+  padding: 10px;
+}
+
+.metric-card span {
+  color: #64748b;
+  font-size: 11px;
+}
+
+.metric-card strong {
+  color: #172033;
+  font-size: 18px;
+}
+
+.compare-table tr.match {
+  background: #f0fdf4;
+}
+
+.compare-table tr.partial {
+  background: #fffbeb;
+}
+
+.compare-table tr.mismatch {
+  background: #fef2f2;
+}
+
+.compare-table tr.missing-ai,
+.compare-table tr.missing-jeppesen {
+  background: #f1f5f9;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  border-radius: 999px;
+  padding: 0 7px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.status-pill.match {
+  background: #dcfce7;
+  color: #15803d;
+}
+
+.status-pill.partial {
+  background: #fef3c7;
+  color: #a16207;
+}
+
+.status-pill.mismatch {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+
+.status-pill.missing-ai,
+.status-pill.missing-jeppesen {
+  background: #e2e8f0;
+  color: #475569;
+}
+
+.raw-evidence {
+  margin-top: 8px;
 }
 
 /* ---------- Step 4 ---------- */
@@ -2752,7 +3062,8 @@ ul {
 
   .form-grid,
   .meta-grid,
-  .manifest-grid {
+  .manifest-grid,
+  .summary-cards {
     grid-template-columns: 1fr;
   }
 }
