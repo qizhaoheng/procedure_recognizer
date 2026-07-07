@@ -1,6 +1,6 @@
 import type { SimpleProcedureLeg } from './types';
 
-const ROUTE_CODE_TO_PROCEDURE: Record<string, string> = {
+export const ROUTE_CODE_TO_PROCEDURE: Record<string, string> = {
   ADLO1E: 'ADLOV 1E',
   EMTU1E: 'EMTUV 1E',
   OMKO1E: 'OMKOM 1E',
