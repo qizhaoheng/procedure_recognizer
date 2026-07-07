@@ -99,6 +99,9 @@ const jeppesenText = ref('');
 const jeppesenCompareBusy = ref(false);
 const jeppesenCompareResult = ref<Jeppesen424CompareResponse>();
 const jeppesenFilterMode = ref<'CURRENT' | 'RNAV_1E' | 'INCLUDE_1G'>('RNAV_1E');
+const jeppesen424ExportText = ref('');
+const jeppesen424ExportError = ref('');
+const jeppesen424ExportBusy = ref(false);
 const mapResetCounter = ref(0);
 const pdfCanvas = ref<HTMLCanvasElement>();
 const pdfFrame = ref<HTMLDivElement>();
@@ -971,6 +974,32 @@ function downloadGroupGeoJson() {
   anchor.remove();
 }
 
+async function loadJeppesen424Export() {
+  if (!task.value || !selectedGroup.value || !procedureUnderstanding.value) return;
+  const packageId = selectedGroup.value.packageId || selectedGroup.value.groupId;
+  jeppesen424ExportBusy.value = true;
+  jeppesen424ExportError.value = '';
+  try {
+    const response = await fetch(
+      `/api/procedure-tasks/${encodeURIComponent(task.value.taskId)}/packages/${encodeURIComponent(packageId)}/jeppesen424/export`,
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || `${response.status} ${response.statusText}`);
+    }
+    jeppesen424ExportText.value = await response.text();
+  } catch (exportError) {
+    jeppesen424ExportText.value = '';
+    jeppesen424ExportError.value = toErrorMessage(exportError);
+  } finally {
+    jeppesen424ExportBusy.value = false;
+  }
+}
+
+function onJeppesen424ExportToggle(event: Event) {
+  if ((event.target as HTMLDetailsElement).open) void loadJeppesen424Export();
+}
+
 function exportTaskJson() {
   if (!task.value) return;
   downloadJson(task.value, `${task.value.taskId}.json`);
@@ -986,6 +1015,8 @@ function handleSelectedGroupChanged() {
   selectedPageNo.value = allGroupPages(group)[0] || selectedPageNo.value;
   promptPreview.value = undefined;
   jeppesenCompareResult.value = undefined;
+  jeppesen424ExportText.value = '';
+  jeppesen424ExportError.value = '';
   if (task.value) replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
   void loadAiInputPackage(false);
 }
@@ -2003,6 +2034,15 @@ function toErrorMessage(value: unknown) {
               </details>
             </details>
           </template>
+
+          <details class="raw-evidence" @toggle="onJeppesen424ExportToggle">
+            <summary>AI 识别结果生成的 424 标准数据</summary>
+            <p v-if="!procedureUnderstanding" class="empty">需要先完成 AI 识别，才能生成 424 标准数据。</p>
+            <p v-else-if="jeppesen424ExportBusy" class="empty">正在生成 424 标准数据...</p>
+            <p v-else-if="jeppesen424ExportError" class="alert warn">生成 424 标准数据失败：{{ jeppesen424ExportError }}</p>
+            <pre v-else-if="jeppesen424ExportText">{{ jeppesen424ExportText }}</pre>
+            <p v-else class="empty">展开后自动生成。</p>
+          </details>
 
           <div class="step-footer">
             <button type="button" @click="goToStep('recognition')">返回 AI 识别结果</button>

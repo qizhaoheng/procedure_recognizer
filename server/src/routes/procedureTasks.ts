@@ -15,6 +15,7 @@ import { evaluateProcedureUnderstanding } from '../services/evaluation/procedure
 import { aiProcedureToSimpleLegs } from '../services/jeppesen424/aiProcedureToSimpleLegs';
 import { parseJeppesen424Text } from '../services/jeppesen424/jeppesen424TextParser';
 import { compareSimpleProcedureLegs } from '../services/jeppesen424/simpleProcedureComparator';
+import { simpleLegsTo424Text } from '../services/jeppesen424/simpleLegsTo424Text';
 import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
 import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
@@ -554,6 +555,41 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
   }
 });
 
+router.get('/:taskId/packages/:packageId/jeppesen424/export', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    if (!group.procedureUnderstanding) return res.status(400).json({ error: 'No ProcedureUnderstanding result to export.' });
+
+    const aiLegs = aiProcedureToSimpleLegs(group.procedureUnderstanding);
+    if (!aiLegs.length) return res.status(400).json({ error: 'AI 识别结果中没有可导出的腿段。' });
+
+    const holdingFixes = (group.procedureUnderstanding.holdings ?? [])
+      .map((holding) => String(holding.fixIdentifier ?? holding.fix ?? '').trim())
+      .filter(Boolean);
+
+    let text: string;
+    try {
+      text = simpleLegsTo424Text(aiLegs, {
+        airportIcao: group.procedureUnderstanding.airportIcao ?? undefined,
+        holdingFixes,
+      });
+    } catch (error) {
+      return res.status(422).json({ error: error instanceof Error ? error.message : String(error) });
+    }
+
+    const fileName = `${groupBaseName(group)}-jeppesen424.txt`;
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${asciiFileName(fileName)}"; filename*=UTF-8''${encodeURIComponent(fileName)}`,
+    );
+    res.send(`${text}\n`);
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get('/:taskId/groups/:groupId/geojson', async (req, res, next) => {
   try {
     const task = await readTask(req.params.taskId);
@@ -628,12 +664,15 @@ function normalizeRunway(value: unknown) {
   return text.startsWith('RW') ? text : `RW${text}`;
 }
 
-function geojsonFileName(group: ProcedureGroup) {
-  const baseName = (group.packageName || group.groupName || group.packageId || group.groupId)
+function groupBaseName(group: ProcedureGroup) {
+  return (group.packageName || group.groupName || group.packageId || group.groupId)
     .replace(/[\\/:*?"<>|]+/g, ' ')
     .replace(/\s+/g, ' ')
     .trim() || 'procedure';
-  return `${baseName}.geojson`;
+}
+
+function geojsonFileName(group: ProcedureGroup) {
+  return `${groupBaseName(group)}.geojson`;
 }
 
 function asciiFileName(fileName: string) {
