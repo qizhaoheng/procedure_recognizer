@@ -98,8 +98,8 @@ export function getLlmRuntimeConfig(modelOverride?: string): LlmRuntimeConfig {
     imageMode: normalizeImageMode(process.env.LLM_IMAGE_MODE),
     structuredOutputMode: normalizeStructuredOutputMode(process.env.LLM_STRUCTURED_OUTPUT_MODE),
     enableThinking: process.env.LLM_ENABLE_THINKING === 'true',
-    timeoutMs: Number(process.env.LLM_TIMEOUT_MS || 180000),
-    maxRetries: Math.max(0, Number(process.env.LLM_MAX_RETRIES || 1)),
+    timeoutMs: positiveIntegerEnv(process.env.LLM_TIMEOUT_MS, 180000),
+    maxRetries: nonNegativeIntegerEnv(process.env.LLM_MAX_RETRIES, 1),
   };
 }
 
@@ -130,4 +130,14 @@ function defaultModel(provider: LlmProviderName) {
   if (provider === 'qwen') return 'qwen3-vl-plus';
   if (provider === 'doubao') return 'doubao-seed-1-6-vision';
   return 'gpt-5.5';
+}
+
+function positiveIntegerEnv(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
+function nonNegativeIntegerEnv(value: string | undefined, fallback: number) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
 }
