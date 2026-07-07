@@ -8,8 +8,8 @@ export async function readPromptTemplate(templatePath: string) {
   return fs.readFile(path.join(promptDir, 'templates', templatePath), 'utf-8');
 }
 
-export async function readBaseSystemPrompt() {
-  return readPromptTemplate('base.system.prompt.md');
+export async function readPromptSection(sectionPath: string) {
+  return fs.readFile(path.join(promptDir, 'templates', 'sections', sectionPath), 'utf-8');
 }
 
 export async function readPromptExample(examplePath: string) {

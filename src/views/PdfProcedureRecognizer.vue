@@ -194,21 +194,89 @@ const classificationWarning = computed(() => {
 
 const effectiveNavigationType = computed(() => String(recognitionClassification.value?.navigationType || selectedGroup.value?.navigationType || '').toUpperCase());
 
-const keyTextChecks = computed(() => {
-  if (!effectiveNavigationType.value.includes('DME')) return [];
+// ---------- 关键项检查（Prompt 打磨反馈） ----------
+
+interface KeyCheckItem {
+  label: string;
+  ok: boolean;
+}
+
+const isDmeArcPackage = computed(() => effectiveNavigationType.value.includes('DME'));
+
+const isWmkjDmeArcStar = computed(() => {
+  if (!isDmeArcPackage.value) return false;
+  const signature = [
+    selectedGroup.value?.packageName,
+    selectedGroup.value?.chartTitle,
+    recognitionClassification.value?.chartPurpose,
+    ...(selectedGroup.value?.procedureNames ?? []),
+    ...(recognitionClassification.value?.procedureNames ?? []),
+  ].filter(Boolean).join(' ').toUpperCase();
+  return /WMKJ|EMTUV|OMKOM|PIMOK|ADLOV|11\s*DME\s*ARC/.test(signature);
+});
+
+function hasChartText(pattern: RegExp) {
+  return recognitionChartTexts.value.some((item) => pattern.test(item.text || '') || pattern.test(item.normalizedText || ''));
+}
+
+function nearDeg(value: number | null | undefined, expected: number) {
+  return value !== null && value !== undefined && Math.abs(Number(value) - expected) <= 1;
+}
+
+const keyItemChecks = computed<KeyCheckItem[]>(() => {
+  if (llmRunStatus.value !== 'COMPLETED' || !isDmeArcPackage.value) return [];
+  const geometry = recognitionGeometry.value;
+  const navOk = String(recognitionClassification.value?.navigationType || '').toUpperCase() === 'DME_ARC';
+  if (isWmkjDmeArcStar.value) {
+    return [
+      { label: 'procedureClassification.navigationType = DME_ARC', ok: navOk },
+      { label: 'chartTexts 包含 11 DME ARC', ok: hasChartText(/11\s*DME\s*ARC/i) },
+      { label: 'chartTexts 包含 VJB', ok: hasChartText(/\bVJB\b/i) },
+      { label: 'chartTexts 包含 RDL340 / 160', ok: hasChartText(/RDL\s*340/i) },
+      { label: 'chartTexts 包含 L-R332', ok: hasChartText(/L-?R\s*332/i) },
+      { label: 'chartTexts 包含 L-R348', ok: hasChartText(/L-?R\s*348/i) },
+      {
+        label: 'geometrySemantics 包含 DME_ARC center=VJB radius=11',
+        ok: geometry.some((item) => item.type === 'DME_ARC' && String(item.centerNavaid || '').toUpperCase() === 'VJB' && nearDeg(item.radiusNm, 11)),
+      },
+      {
+        label: 'geometrySemantics 包含 RADIAL radialDeg=340 inboundTrackDeg=160',
+        ok: geometry.some((item) => item.type === 'RADIAL' && nearDeg(item.radialDeg, 340) && nearDeg(item.inboundTrackDeg, 160)),
+      },
+      {
+        label: 'geometrySemantics 包含 LEAD_RADIAL radialDeg=332',
+        ok: geometry.some((item) => item.type === 'LEAD_RADIAL' && nearDeg(item.radialDeg, 332)),
+      },
+      {
+        label: 'geometrySemantics 包含 LEAD_RADIAL radialDeg=348',
+        ok: geometry.some((item) => item.type === 'LEAD_RADIAL' && nearDeg(item.radialDeg, 348)),
+      },
+    ];
+  }
   return [
-    { label: 'DME ARC（如 11 DME ARC）', pattern: /\d+\s*DME\s*ARC/i },
-    { label: 'DME 距离（如 13 DME）', pattern: /\d+\s*DME\b/i },
-    { label: '径向线 RDL（如 RDL340 / 160）', pattern: /RDL\s*\d{2,3}/i },
-    { label: '提前转弯径向 L-R（如 L-R332 / L-R348）', pattern: /L-?R\s*\d{2,3}/i },
+    { label: 'procedureClassification.navigationType = DME_ARC', ok: navOk },
+    { label: 'chartTexts 包含 DME ARC 标签', ok: hasChartText(/\d+\s*DME\s*ARC/i) },
+    { label: 'chartTexts 包含 RDL 径向标签', ok: hasChartText(/RDL\s*\d{2,3}/i) },
+    { label: 'chartTexts 包含 L-R 提前转弯径向', ok: hasChartText(/L-?R\s*\d{2,3}/i) },
+    { label: 'geometrySemantics 包含 DME_ARC（含 center 与 radius）', ok: geometry.some((item) => item.type === 'DME_ARC' && Boolean(item.centerNavaid) && item.radiusNm != null) },
+    { label: 'geometrySemantics 包含 RADIAL', ok: geometry.some((item) => item.type === 'RADIAL' && item.radialDeg != null) },
+    { label: 'geometrySemantics 包含 LEAD_RADIAL', ok: geometry.some((item) => item.type === 'LEAD_RADIAL') },
   ];
 });
 
-const missingKeyTexts = computed(() => {
-  if (llmRunStatus.value !== 'COMPLETED') return [];
-  return keyTextChecks.value
-    .filter((check) => !recognitionChartTexts.value.some((item) => check.pattern.test(item.text || '') || check.pattern.test(item.normalizedText || '')))
-    .map((check) => check.label);
+const failedKeyChecks = computed(() => keyItemChecks.value.filter((item) => !item.ok));
+
+const keyErrorChecks = computed(() => {
+  if (llmRunStatus.value !== 'COMPLETED' || !isWmkjDmeArcStar.value) return [];
+  const errors: string[] = [];
+  const usedIdents = new Set(
+    recognitionSupportObjects.value
+      .filter((item) => item.usedInProcedure === true)
+      .map((item) => item.ident.toUpperCase()),
+  );
+  if (usedIdents.has('JR')) errors.push('supportObjects 中 JR usedInProcedure=true：辅助 NDB 被误加入当前程序。');
+  if (usedIdents.has('IJB')) errors.push('supportObjects 中 IJB usedInProcedure=true：ILS/LOC 对象被误加入 DME ARC STAR。');
+  return errors;
 });
 
 const geometryMissing = computed(() => llmRunStatus.value === 'COMPLETED' && !recognitionGeometry.value.length);
@@ -225,7 +293,8 @@ const recognitionSummary = computed<PackageWorkflowState['recognitionSummary']>(
     warningCount:
       (understanding.warnings?.length || 0)
       + (classificationWarning.value ? 1 : 0)
-      + missingKeyTexts.value.length
+      + failedKeyChecks.value.length
+      + keyErrorChecks.value.length
       + (geometryMissing.value ? 1 : 0)
       + (supportLeakObjects.value.length ? 1 : 0),
   };
@@ -725,6 +794,44 @@ async function sendRecognition() {
   } finally {
     recognitionBusy.value = false;
   }
+}
+
+// 识别问题标记：保存到任务记录，用于后续 Prompt 打磨
+const ISSUE_TAGS = [
+  '程序类型错误',
+  '图面文本漏识别',
+  '表格腿段漏识别',
+  '几何语义漏识别',
+  '辅助对象误加入',
+  '输出格式错误',
+];
+const issueTagBusy = ref(false);
+
+async function toggleIssueTag(tag: string) {
+  if (!task.value || !selectedGroup.value) return;
+  issueTagBusy.value = true;
+  try {
+    const groups = cloneGroups();
+    const group = groups.find((item) => item.groupId === selectedGroup.value?.groupId);
+    if (!group) return;
+    const tags = new Set(group.recognitionIssueTags ?? []);
+    if (tags.has(tag)) tags.delete(tag);
+    else tags.add(tag);
+    group.recognitionIssueTags = [...tags];
+    await saveGroups(groups);
+    message.value = '识别问题标记已保存到任务记录';
+  } catch (tagError) {
+    error.value = toErrorMessage(tagError);
+  } finally {
+    issueTagBusy.value = false;
+  }
+}
+
+async function retestPrompt() {
+  promptPreview.value = undefined;
+  await loadPromptPreview();
+  if (!promptPreview.value) return;
+  await sendRecognition();
 }
 
 async function evaluateRecognition() {
@@ -1390,6 +1497,12 @@ function toErrorMessage(value: unknown) {
                 <button type="button" @click="openPromptModal('request')">
                   <FileJson :size="15" /> 查看完整请求 JSON
                 </button>
+                <button type="button" @click="copyPrompt">
+                  <Clipboard :size="15" /> 复制 Prompt
+                </button>
+                <button type="button" :disabled="recognitionBusy" @click="retestPrompt">
+                  <RefreshCw :size="15" /> 使用当前程序包重新测试 Prompt
+                </button>
               </div>
             </section>
           </template>
@@ -1409,22 +1522,33 @@ function toErrorMessage(value: unknown) {
         <template v-else>
           <div class="run-status" :class="llmRunStatus.toLowerCase()">
             <strong>运行状态：{{ llmRunStatus }}</strong>
+            <span v-if="visionRunRecord">
+              Prompt：{{ visionRunRecord.promptTemplateId }} v{{ visionRunRecord.promptVersion }}
+              · Schema：{{ visionRunRecord.schemaName }} {{ visionRunRecord.schemaVersion }}
+            </span>
             <span v-if="llmRunStatus === 'RUNNING'">AI 识别中，完成后自动刷新结果...</span>
             <span v-else-if="llmRunStatus === 'ERROR'">{{ visionRunRecord?.errorMessage || selectedGroup.aiResponse?.errors?.[0] || 'AI 调用失败' }}</span>
             <span v-else-if="llmRunStatus === 'NOT_STARTED'">尚未发送 AI 识别，请返回 Step 2 点击「发送 AI 识别」。</span>
           </div>
 
           <div v-if="classificationWarning" class="alert error">{{ classificationWarning }}</div>
-          <div v-if="missingKeyTexts.length" class="alert warn">
-            <b>关键文本缺失：</b>
-            <ul>
-              <li v-for="text in missingKeyTexts" :key="text">{{ text }}</li>
-            </ul>
-          </div>
           <div v-if="geometryMissing" class="alert error">AI 没有识别出图面几何语义，无法生成完整程序图形。</div>
           <div v-if="supportLeakObjects.length" class="alert warn">
             疑似把辅助页对象错误加入当前程序：{{ supportLeakObjects.map((item) => item.ident).join(' / ') }}
           </div>
+
+          <section v-if="keyItemChecks.length" class="block">
+            <h2>关键项检查（{{ keyItemChecks.length - failedKeyChecks.length }} / {{ keyItemChecks.length }} 通过）</h2>
+            <div v-if="failedKeyChecks.length || keyErrorChecks.length" class="alert error">
+              AI 未识别出关键程序语义，请优先打磨 Prompt 或检查输入图片质量，不建议继续生成 GeoJSON。
+            </div>
+            <ul class="check-list">
+              <li v-for="check in keyItemChecks" :key="check.label" :class="check.ok ? 'ok' : 'fail'">
+                <span class="check-mark">{{ check.ok ? '✓' : '✗' }}</span>{{ check.label }}
+              </li>
+            </ul>
+            <div v-for="issue in keyErrorChecks" :key="issue" class="alert error">{{ issue }}</div>
+          </section>
 
           <template v-if="llmRunStatus === 'COMPLETED'">
             <section class="block">
@@ -1580,6 +1704,28 @@ function toErrorMessage(value: unknown) {
               <pre class="raw-json">{{ understandingJson }}</pre>
             </details>
           </template>
+
+          <details v-if="visionRunRecord?.rawResponse" class="block">
+            <summary>查看模型原始输出（rawResponse）</summary>
+            <pre class="raw-json">{{ visionRunRecord.rawResponse }}</pre>
+          </details>
+
+          <section v-if="llmRunStatus === 'COMPLETED' || llmRunStatus === 'ERROR'" class="block">
+            <h2>标记识别问题（用于 Prompt 打磨）</h2>
+            <p class="hint">点击切换标记，保存到任务记录，供后续优化 Prompt 使用。</p>
+            <div class="button-row compact">
+              <button
+                v-for="tag in ISSUE_TAGS"
+                :key="tag"
+                type="button"
+                :disabled="issueTagBusy"
+                :class="{ 'issue-active': selectedGroup.recognitionIssueTags?.includes(tag) }"
+                @click="toggleIssueTag(tag)"
+              >
+                {{ tag }}
+              </button>
+            </div>
+          </section>
 
           <div class="step-footer">
             <button type="button" @click="goToStep('request')">返回 AI 请求预览</button>
@@ -2183,6 +2329,47 @@ button.ghost {
 .alert ul {
   margin: 0;
   padding-left: 18px;
+}
+
+.check-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.check-list li {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.check-list .check-mark {
+  flex: none;
+  width: 16px;
+  text-align: center;
+  font-weight: 700;
+}
+
+.check-list li.ok .check-mark {
+  color: #16a34a;
+}
+
+.check-list li.fail {
+  color: #b91c1c;
+}
+
+.check-list li.fail .check-mark {
+  color: #b91c1c;
+}
+
+button.issue-active {
+  border-color: #b91c1c;
+  background: #fef2f2;
+  color: #b91c1c;
 }
 
 /* ---------- Step 4 ---------- */
