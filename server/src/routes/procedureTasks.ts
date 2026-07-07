@@ -15,6 +15,7 @@ import { evaluateProcedureUnderstanding } from '../services/evaluation/procedure
 import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
 import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
+import { buildGeoJsonFromProcedureUnderstanding } from '../services/procedureUnderstandingGeojson';
 import { normalizeProcedureUnderstandingResult } from '../services/procedureUnderstandingNormalizer';
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
@@ -308,27 +309,38 @@ router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, ne
     const task = await readTask(req.params.taskId);
     const group = findGroup(task.groups, req.params.packageId);
     const model = req.body?.model || process.env.LLM_MODEL || 'mock-procedure-recognizer';
-    const preview = buildAiRequestPreview(group, task.pages, model);
-    group.aiRequest = {
-      model,
-      prompt: preview.prompt,
-      schemaName: 'ProcedureGeoJsonFeatureCollection',
-      inputPageNos: Array.from(new Set([
-        ...preview.aiInputPackage.includedImages.map((page) => page.pageNo),
-        ...preview.aiInputPackage.includedSummaries.flatMap((item) => item.pageNos),
-      ])).sort((a, b) => a - b),
-      createdAt: new Date().toISOString(),
-    };
-    group.aiResponse = await runProcedureRecognition(group, preview);
-    group.geojson = group.aiResponse.geojson;
-    group.geojsonStatus = group.geojson ? 'GENERATED' : 'ERROR';
-    group.geojsonGeneratedAt = group.geojson ? new Date().toISOString() : undefined;
-    group.geojsonError = group.geojson ? undefined : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
+    if (group.procedureUnderstanding) {
+      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group);
+      const validation = validateProcedureGeoJson(group.geojson, group);
+      group.geojsonStatus = validation.valid ? 'GENERATED' : 'ERROR';
+      group.geojsonGeneratedAt = validation.valid ? new Date().toISOString() : undefined;
+      group.geojsonError = validation.valid ? undefined : validation.errors.join('; ');
+    } else {
+      const preview = buildAiRequestPreview(group, task.pages, model);
+      group.aiRequest = {
+        model,
+        prompt: preview.prompt,
+        schemaName: 'ProcedureGeoJsonFeatureCollection',
+        inputPageNos: Array.from(new Set([
+          ...preview.aiInputPackage.includedImages.map((page) => page.pageNo),
+          ...preview.aiInputPackage.includedSummaries.flatMap((item) => item.pageNos),
+        ])).sort((a, b) => a - b),
+        createdAt: new Date().toISOString(),
+      };
+      group.aiResponse = await runProcedureRecognition(group, preview);
+      group.geojson = group.aiResponse.geojson;
+      const validation = group.geojson ? validateProcedureGeoJson(group.geojson, group) : undefined;
+      group.geojsonStatus = group.geojson && validation?.valid ? 'GENERATED' : 'ERROR';
+      group.geojsonGeneratedAt = group.geojson && validation?.valid ? new Date().toISOString() : undefined;
+      group.geojsonError = group.geojson
+        ? validation?.errors.join('; ') || group.aiResponse.errors?.join('; ')
+        : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
+    }
     group.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
     task.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
     await saveTask(task);
 
-    if (!group.geojson) {
+    if (!group.geojson || group.geojsonStatus === 'ERROR') {
       return res.status(500).json({
         ok: false,
         taskId: task.taskId,
