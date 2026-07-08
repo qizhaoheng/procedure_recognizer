@@ -145,30 +145,23 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
       asString(feature.properties.label_text),
   );
 
-  if (embeddedLabels.length) {
-    return {
-      type: 'FeatureCollection',
-      features: embeddedLabels.map((feature) => ({
-        type: 'Feature',
-        geometry: feature.geometry as Geometry,
-        properties: {
-          label_text: asString(feature.properties.label_text),
-          label_type: asString(feature.properties.label_type || 'LabelPoint'),
-          priority: asNumber(feature.properties.priority) || 50,
-          source_feature_id: asString(feature.properties.parent_feature_id || feature.properties.feature_id),
-          object_type: asString(feature.properties.parent_object_type || feature.properties.object_type),
-          review_required: feature.properties.review_required === true,
-          text_anchor: asString(feature.properties.text_anchor || 'top'),
-          text_offset: [
-            Number(feature.properties.text_offset_x ?? 0),
-            Number(feature.properties.text_offset_y ?? 0.8),
-          ],
-        },
-      })),
-    };
-  }
-
-  const labels: Feature<Geometry, LabelFeatureProperties>[] = [];
+  const labels: Feature<Geometry, LabelFeatureProperties>[] = embeddedLabels.map((feature) => ({
+    type: 'Feature',
+    geometry: feature.geometry as Geometry,
+    properties: {
+      label_text: asString(feature.properties.label_text),
+      label_type: asString(feature.properties.label_type || 'LabelPoint'),
+      priority: asNumber(feature.properties.priority) || 50,
+      source_feature_id: asString(feature.properties.parent_feature_id || feature.properties.feature_id),
+      object_type: asString(feature.properties.parent_object_type || feature.properties.object_type),
+      review_required: feature.properties.review_required === true,
+      text_anchor: asString(feature.properties.text_anchor || 'top'),
+      text_offset: [
+        Number(feature.properties.text_offset_x ?? 0),
+        Number(feature.properties.text_offset_y ?? 0.8),
+      ],
+    },
+  }));
   const hasChartArcLabel = spatialFeatures.some(
     (feature) => feature.properties.object_type === 'ChartLabel' && asString(feature.properties.name).includes('DME ARC'),
   );
@@ -206,8 +199,17 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
     const point = pointForGeometry(feature.geometry);
 
     if (objectType === 'ProcedureFix') {
+      const role = props.chart_fix_role ? ` (${props.chart_fix_role})` : '';
       const altitude = props.chart_altitude_ft ? `\n${props.chart_altitude_ft}` : '';
-      pushLabel(feature, point, `${props.ident || props.name}${altitude}`, 'ProcedureFix', 90);
+      const finalTrack = props.final_track_mag ? `\n${padCourse(props.final_track_mag)}°` : '';
+      pushLabel(feature, point, `${props.ident || props.name}${role}${altitude}${finalTrack}`, 'ProcedureFix', 90);
+    }
+
+    if (objectType === 'ProcedureTrack') {
+      pushLabel(feature, linePointAt(feature.geometry, 0.28), asString(props.procedure), 'ProcedureName', 88, {
+        text_anchor: 'center',
+        text_offset: [0, -0.8],
+      });
     }
 
     if (objectType === 'DerivedFix') {
@@ -262,6 +264,13 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
 
     if (objectType === 'ProcedureLeg') {
       const legType = asString(props.leg_type);
+      const courseDistanceLabel = rnavCourseDistanceLabel(props);
+      if (courseDistanceLabel) {
+        pushLabel(feature, linePointAt(feature.geometry, 0.5), courseDistanceLabel, 'ProcedureCourse', 76, {
+          text_anchor: 'center',
+          text_offset: [0, 0],
+        });
+      }
       if (legType === 'TRACK_TO_DME_FIX') {
         pushLabel(feature, linePointAt(feature.geometry, 0.5), `${props.procedure}\n${padCourse(props.course_deg_mag)}°`, 'ProcedureCourse', 75);
       }
@@ -461,6 +470,22 @@ function padCourse(value: unknown): string {
   return String(Math.round(course)).padStart(3, '0');
 }
 
+function rnavCourseDistanceLabel(props: Record<string, unknown>): string {
+  const legType = asString(props.leg_type || props.path_terminator).toUpperCase();
+  if (!['TF', 'IF'].includes(legType)) return '';
+  const course = Number(props.course_deg_mag);
+  const distance = Number(props.distance_nm);
+  if (!Number.isFinite(course) && !Number.isFinite(distance)) return '';
+  const courseText = Number.isFinite(course) ? `${padCourse(course)}°` : '';
+  const distanceText = Number.isFinite(distance) && distance > 0 ? formatNm(distance) : '';
+  return [courseText, distanceText].filter(Boolean).join(' ');
+}
+
+function formatNm(value: number): string {
+  const rounded = Math.round(value * 10) / 10;
+  return Number.isInteger(rounded) ? rounded.toFixed(1) : `${rounded}`;
+}
+
 export function hasReviewSignal(feature?: ProcedureFeature): boolean {
   if (!feature) return false;
   const properties = feature.properties ?? {};
@@ -569,7 +594,8 @@ function buildDisplayLabel(properties: Record<string, unknown>): string {
   if (type === 'ProcedureTrack') return asString(properties.procedure);
   if (type === 'ProcedureFix') {
     const altitude = properties.chart_altitude_ft ? ` ${properties.chart_altitude_ft}` : '';
-    return `${asString(properties.ident || properties.name)}${altitude}`;
+    const role = properties.chart_fix_role ? ` (${properties.chart_fix_role})` : '';
+    return `${asString(properties.ident || properties.name)}${role}${altitude}`;
   }
   if (type === 'Navaid') {
     const frequency = properties.frequency_mhz ? ` ${properties.frequency_mhz}` : '';

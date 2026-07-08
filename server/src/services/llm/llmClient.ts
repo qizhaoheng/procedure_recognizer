@@ -24,6 +24,7 @@ export interface VisionRecognitionRequest {
   responseSchema?: unknown;
   schemaName?: string;
   structuredOutputMode?: StructuredOutputMode;
+  abortSignal?: AbortSignal;
 }
 
 export interface VisionRecognitionResponse {

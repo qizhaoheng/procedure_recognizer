@@ -82,6 +82,7 @@ export async function runProcedureRecognition(group: ProcedureGroup, preview: Ai
 export async function runProcedureUnderstandingRecognition(
   builtPrompt: BuiltPrompt,
   model: string,
+  abortSignal?: AbortSignal,
 ): Promise<AiResponseRecord> {
   const now = new Date().toISOString();
   const images = await buildVisionImagePayloads(builtPrompt.inputImages);
@@ -92,6 +93,7 @@ export async function runProcedureUnderstandingRecognition(
     userPrompt: builtPrompt.userPrompt,
     responseSchema: builtPrompt.responseSchema,
     schemaName: builtPrompt.outputSchemaName,
+    abortSignal,
     images: images.map((image) => ({
       pageNo: image.page.pageNo,
       aipPageNo: image.page.aipPageNo,

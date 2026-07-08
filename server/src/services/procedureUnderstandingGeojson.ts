@@ -30,6 +30,7 @@ type LegRecord = {
   courseDegMag?: number | null;
   distanceNm?: number | null;
   turnDirection?: string | null;
+  remarks?: string | null;
   altitudeConstraint?: {
     type?: string | null;
     altitudeFt?: number | null;
@@ -39,6 +40,13 @@ type LegRecord = {
   } | null;
   confidence?: number;
   reviewRequired?: boolean;
+};
+
+type ChartTextRecord = {
+  text?: string | null;
+  normalizedText?: string | null;
+  role?: string | null;
+  usedInProcedure?: boolean;
 };
 
 type GeometrySemanticRecord = {
@@ -71,6 +79,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   const fixes = (understanding.fixes ?? []) as FixRecord[];
   const procedures = (understanding.procedures ?? []) as ProcedureRecord[];
   const geometrySemantics = (understanding.geometrySemantics ?? []) as GeometrySemanticRecord[];
+  const chartTexts = (understanding.chartTexts ?? []) as ChartTextRecord[];
   const fixMap = new Map(
     fixes
       .filter((fix) => fix.identifier && isCoordinate(fix.longitude, fix.latitude))
@@ -78,6 +87,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   );
   const navaidMap = buildNavaidMap(understanding, group);
   const arcContext = resolveArcContext(geometrySemantics, navaidMap);
+  const fixMetadata = buildFixMetadata(procedures, chartTexts, understanding, group);
   const syntheticFixes = new Map<string, FixRecord>();
   const legChainFeatures = procedures.flatMap(
     (procedure) => procedureFeatures(procedure, fixMap, arcContext, syntheticFixes, understanding, group),
@@ -86,7 +96,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   const features: ProcedureFeature[] = [
     procedureChartFeature(understanding, group),
     ...navaidFeatures(navaidMap),
-    ...fixes.flatMap((fix) => fixFeature(fix)),
+    ...fixes.flatMap((fix) => fixFeature(fix, fixMetadata)),
     ...syntheticFixFeatures(syntheticFixes),
     ...legChainFeatures,
     ...geometrySemanticFeatures(geometrySemantics, procedures, fixMap, navaidMap, understanding, group),
@@ -119,8 +129,15 @@ function procedureChartFeature(understanding: ProcedureUnderstandingResult, grou
   };
 }
 
-function fixFeature(fix: FixRecord): ProcedureFeature[] {
+interface FixMetadata {
+  altitudeFt?: number;
+  role?: string;
+  finalTrackMag?: number;
+}
+
+function fixFeature(fix: FixRecord, fixMetadata: Map<string, FixMetadata>): ProcedureFeature[] {
   if (!fix.identifier || !isCoordinate(fix.longitude, fix.latitude)) return [];
+  const metadata = fixMetadata.get(String(fix.identifier).toUpperCase());
   return [{
     type: 'Feature',
     geometry: point(fix.longitude, fix.latitude),
@@ -135,6 +152,9 @@ function fixFeature(fix: FixRecord): ProcedureFeature[] {
       review_required: fix.reviewRequired === true,
       confidence: fix.confidence ?? 0.5,
       raw_coordinate: fix.rawCoordinate ?? null,
+      chart_altitude_ft: metadata?.altitudeFt ?? null,
+      chart_fix_role: metadata?.role ?? null,
+      final_track_mag: metadata?.finalTrackMag ?? null,
     }),
   }];
 }
@@ -480,12 +500,69 @@ function legFeature(procedureName: string, leg: LegRecord, coordinates: number[]
       lower_ft: leg.altitudeConstraint?.lowerFt ?? null,
       upper_ft: leg.altitudeConstraint?.upperFt ?? null,
       source_page: null,
-      source_text: `${procedureName} ${leg.pathTerminator ?? ''} ${leg.fromFix ?? ''} -> ${leg.fixIdentifier ?? ''}`.trim(),
+      source_text: [procedureName, leg.pathTerminator ?? '', leg.fromFix ?? '', '->', leg.fixIdentifier ?? '', leg.remarks ?? ''].filter(Boolean).join(' ').trim(),
       coordinate_quality: quality,
       review_required: leg.reviewRequired === true || quality !== 'derived_from_fix_coordinates',
       confidence: leg.confidence ?? 0.5,
     }),
   };
+}
+
+function buildFixMetadata(
+  procedures: ProcedureRecord[],
+  chartTexts: ChartTextRecord[],
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+) {
+  const metadata = new Map<string, FixMetadata>();
+  const ensure = (ident: unknown) => {
+    const key = String(ident ?? '').trim().toUpperCase();
+    if (!key) return undefined;
+    const item = metadata.get(key) ?? {};
+    metadata.set(key, item);
+    return item;
+  };
+
+  for (const procedure of procedures) {
+    const procedureName = String(procedure.procedureName ?? '').trim();
+    const orderedLegs = [...(procedure.legs ?? [])].sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0));
+    const finalLeg = orderedLegs[orderedLegs.length - 1];
+    for (const leg of orderedLegs) {
+      const ident = String(leg.fixIdentifier ?? '').toUpperCase();
+      const item = ensure(ident);
+      if (!item) continue;
+      const altitudeFt = leg.altitudeConstraint?.altitudeFt ?? leg.altitudeConstraint?.lowerFt ?? leg.altitudeConstraint?.upperFt;
+      if (Number.isFinite(Number(altitudeFt))) item.altitudeFt ??= Number(altitudeFt);
+      const isEntryProcedureFix = procedureName && firstToken(procedureName) === ident;
+      if (String(leg.pathTerminator ?? '').toUpperCase() === 'IF' && !isEntryProcedureFix) item.role ??= 'IF';
+      if (finalLeg === leg) item.finalTrackMag ??= runwayCourse(understanding, group);
+    }
+  }
+
+  for (const chartText of chartTexts) {
+    const text = String(chartText.normalizedText ?? chartText.text ?? '').toUpperCase();
+    const match = text.match(/\b([A-Z][A-Z0-9]{2,4})\s*(?:\((IAF|IF)\))?\s*(\d{4,5})?\b/);
+    if (!match) continue;
+    const item = ensure(match[1]);
+    if (!item) continue;
+    if (match[2]) item.role = match[2];
+    if (match[3] && Number.isFinite(Number(match[3]))) item.altitudeFt ??= Number(match[3]);
+  }
+
+  return metadata;
+}
+
+function firstToken(value: string) {
+  return value.trim().split(/\s+/)[0]?.toUpperCase() ?? '';
+}
+
+function runwayCourse(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {
+  const runwayRecord = (understanding.runways ?? []).find((runway) => String((runway as Record<string, unknown>).identifier ?? '').toUpperCase().includes(String(understanding.runway ?? group.runway ?? '').replace(/^RWY?/i, 'RW')));
+  const runwayBearing = runwayRecord ? Number((runwayRecord as Record<string, unknown>).magneticBearing) : NaN;
+  if (Number.isFinite(runwayBearing)) return runwayBearing;
+  const runway = String(understanding.runway ?? group.runway ?? '').toUpperCase();
+  const match = runway.match(/(?:RWY?|RUNWAY)?\s*(\d{2})/);
+  return match ? Number(match[1]) * 10 : undefined;
 }
 
 function baseProps(properties: Record<string, unknown>) {

@@ -86,7 +86,7 @@ async function callQwenChatCompletions(
         },
       ],
     }),
-  }, config.timeoutMs);
+  }, config.timeoutMs, request.abortSignal);
 
   if (!response.ok) throw await readErrorResponse(response);
 

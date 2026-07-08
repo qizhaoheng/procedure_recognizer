@@ -29,6 +29,7 @@ import type { BuiltPrompt, PromptRunRecord } from '../services/prompt/promptType
 
 const router = express.Router();
 const routeDir = path.dirname(fileURLToPath(import.meta.url));
+const activeRecognitionRuns = new Map<string, AbortController>();
 const upload = multer({
   storage: multer.diskStorage({
     destination: async (_req, _file, callback) => {
@@ -376,11 +377,34 @@ router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, ne
   }
 });
 
+router.post('/:taskId/packages/:packageId/cancel-recognition', async (req, res, next) => {
+  try {
+    const key = recognitionRunKey(req.params.taskId, req.params.packageId);
+    const controller = activeRecognitionRuns.get(key);
+    controller?.abort(new Error('User cancelled recognition.'));
+    const task = await markRecognitionCancelled(req.params.taskId, req.params.packageId);
+    const group = findGroup(task.groups, req.params.packageId);
+    res.json({
+      ok: true,
+      taskId: task.taskId,
+      packageId: group.packageId || group.groupId,
+      cancelled: Boolean(controller),
+      status: group.status,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, res, next) => {
   const startedAt = new Date().toISOString();
   let model = String(req.body?.model || getLlmRuntimeConfig().model);
   let builtPrompt: BuiltPrompt | undefined;
   let promptRun: PromptRunRecord | undefined;
+  const runKey = recognitionRunKey(req.params.taskId, req.params.packageId);
+  activeRecognitionRuns.get(runKey)?.abort(new Error('Superseded by a new recognition run.'));
+  const abortController = new AbortController();
+  activeRecognitionRuns.set(runKey, abortController);
   try {
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
@@ -426,7 +450,7 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       ])).sort((a, b) => a - b),
       createdAt: new Date().toISOString(),
     };
-    group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model);
+    group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model, abortController.signal);
     group.aiResponse.parsedJson = normalizeProcedureUnderstandingResult(group.aiResponse.parsedJson, group, aiInputPackage);
     const completedAt = new Date().toISOString();
     const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson, builtPrompt.responseSchema);
@@ -478,8 +502,19 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       rawText: group.aiResponse.rawText,
     });
   } catch (error) {
-    await markRecognitionError(req.params.taskId, req.params.packageId, error, { startedAt, model, builtPrompt, promptRun });
     const normalized = normalizeRecognitionError(error);
+    if (normalized.errorType === 'CANCELLED') {
+      await markRecognitionCancelled(req.params.taskId, req.params.packageId);
+      return res.status(499).json({
+        ok: false,
+        taskId: req.params.taskId,
+        packageId: req.params.packageId,
+        errorType: normalized.errorType,
+        error: 'AI 识别已停止。',
+        rawError: normalized.rawError,
+      });
+    }
+    await markRecognitionError(req.params.taskId, req.params.packageId, error, { startedAt, model, builtPrompt, promptRun });
     res.status(500).json({
       ok: false,
       taskId: req.params.taskId,
@@ -488,6 +523,8 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       error: normalized.message,
       rawError: normalized.rawError,
     });
+  } finally {
+    if (activeRecognitionRuns.get(runKey) === abortController) activeRecognitionRuns.delete(runKey);
   }
 });
 
@@ -652,6 +689,26 @@ function findGroup(groups: ProcedureGroup[], groupId: string) {
   const group = groups.find((item) => item.groupId === groupId || item.packageId === groupId);
   if (!group) throw new Error('分组不存在。');
   return group;
+}
+
+function recognitionRunKey(taskId: string, packageId: string) {
+  return `${taskId}::${packageId}`;
+}
+
+async function markRecognitionCancelled(taskId: string, packageId: string) {
+  return updateTask(taskId, (draft) => {
+    const group = findGroup(draft.groups, packageId);
+    const now = new Date().toISOString();
+    group.status = 'AI_CANCELLED';
+    group.aiResponse = {
+      rawText: 'AI recognition was cancelled by the user.',
+      errors: ['AI 识别已停止。'],
+      createdAt: now,
+    };
+    group.visionRunRecord = undefined;
+    if (draft.status === 'AI_RUNNING' || draft.status === 'ERROR') draft.status = 'AI_CANCELLED';
+    draft.error = 'AI 识别已停止。';
+  });
 }
 
 function filterSimpleLegs<T extends { procedureName: string; runway: string }>(legs: T[], procedureFilter: string[], runway: string) {

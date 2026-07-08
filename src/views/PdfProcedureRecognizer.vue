@@ -12,6 +12,7 @@ import {
   FileText,
   Plus,
   RefreshCw,
+  Square,
   Trash2,
   Upload,
   Wand2,
@@ -67,6 +68,7 @@ const statusLabels: Record<string, string> = {
 };
 
 const packageTypes: PackageType[] = ['STAR', 'SID', 'APPROACH', 'OTHER'];
+statusLabels.AI_CANCELLED = 'AI识别已停止';
 const groupCategories: ProcedureGroup['procedureCategory'][] = ['ARRIVAL', 'DEPARTURE', 'APPROACH', 'UNKNOWN'];
 const sourceLabels: Record<string, string> = {
   AD_2_24_CHART_INDEX: 'AD 2.24 图件目录',
@@ -89,6 +91,7 @@ const currentStep = ref<StepKey>('grouping');
 const aiInputPackage = ref<AiInputPackage>();
 const aiInputBusy = ref(false);
 const recognitionBusy = ref(false);
+const stopRecognitionBusy = ref(false);
 const geojsonBusy = ref(false);
 const evaluationBusy = ref(false);
 const promptPreview = ref<BuiltPromptPreview>();
@@ -167,10 +170,12 @@ const visionRunRecord = computed(() => selectedGroup.value?.visionRunRecord);
 const recognitionEvaluation = computed(() => selectedGroup.value?.recognitionEvaluation);
 const llmRunStatus = computed<PackageWorkflowState['recognitionStatus']>(() => {
   if (recognitionBusy.value || selectedGroup.value?.status === 'AI_RUNNING') return 'RUNNING';
+  if (selectedGroup.value?.status === 'AI_CANCELLED') return 'CANCELLED';
   if (visionRunRecord.value?.errorType || selectedGroup.value?.status === 'ERROR') return 'ERROR';
   if (procedureUnderstanding.value || selectedGroup.value?.status === 'AI_COMPLETED') return 'COMPLETED';
   return 'NOT_STARTED';
 });
+const canStopRecognition = computed(() => Boolean(task.value && selectedGroup.value && llmRunStatus.value === 'RUNNING'));
 const recognitionClassification = computed(() => procedureUnderstanding.value?.procedureClassification);
 const recognitionChartTexts = computed(() => procedureUnderstanding.value?.chartTexts ?? []);
 const recognitionTableLegs = computed(() => procedureUnderstanding.value?.tableLegs ?? []);
@@ -853,6 +858,25 @@ async function sendRecognition() {
 }
 
 // 识别问题标记：保存到任务记录，用于后续 Prompt 打磨
+async function stopRecognition() {
+  if (!task.value || !selectedGroup.value) return;
+  stopRecognitionBusy.value = true;
+  error.value = '';
+  try {
+    await requestJson<{ status: string }>(
+      `/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/cancel-recognition`,
+      { method: 'POST' },
+    );
+    recognitionBusy.value = false;
+    await refreshTask(false);
+    message.value = 'AI 识别已停止';
+  } catch (stopError) {
+    error.value = toErrorMessage(stopError);
+  } finally {
+    stopRecognitionBusy.value = false;
+  }
+}
+
 const ISSUE_TAGS = [
   '程序类型错误',
   '图面文本漏识别',
@@ -1470,7 +1494,10 @@ async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
-    throw new Error(payload.error || `${response.status} ${response.statusText}`);
+    const requestError = new Error(payload.error || `${response.status} ${response.statusText}`) as Error & { errorType?: string; status?: number };
+    requestError.errorType = payload.errorType;
+    requestError.status = response.status;
+    throw requestError;
   }
   return response.json() as Promise<T>;
 }
@@ -1486,7 +1513,12 @@ function downloadJson(data: unknown, fileName: string) {
 }
 
 function toErrorMessage(value: unknown) {
+  if (isCancelledError(value)) return 'AI 识别已停止';
   return value instanceof Error ? value.message : String(value);
+}
+
+function isCancelledError(value: unknown) {
+  return Boolean(value && typeof value === 'object' && (value as { errorType?: unknown }).errorType === 'CANCELLED');
 }
 </script>
 
@@ -1729,6 +1761,9 @@ function toErrorMessage(value: unknown) {
 
           <div class="step-footer">
             <button type="button" @click="goToStep('grouping')">返回 PDF 分组</button>
+            <button v-if="canStopRecognition" type="button" class="danger" :disabled="stopRecognitionBusy" @click="stopRecognition">
+              <Square :size="15" /> 停止识别
+            </button>
             <button type="button" class="primary" :disabled="!aiInputPackage || recognitionBusy" @click="sendRecognition">
               <Bot :size="15" /> 发送 AI 识别
             </button>
@@ -1742,6 +1777,10 @@ function toErrorMessage(value: unknown) {
         <template v-else>
           <div class="run-status" :class="llmRunStatus.toLowerCase()">
             <strong>运行状态：{{ llmRunStatus }}</strong>
+            <button v-if="canStopRecognition" type="button" class="danger inline-action" :disabled="stopRecognitionBusy" @click="stopRecognition">
+              <Square :size="15" /> 停止识别
+            </button>
+            <span v-if="llmRunStatus === 'CANCELLED'">AI 识别已停止，可重新发送识别。</span>
             <span v-if="visionRunRecord">
               Prompt：{{ visionRunRecord.promptTemplateId }} v{{ visionRunRecord.promptVersion }}
               · Schema：{{ visionRunRecord.schemaName }} {{ visionRunRecord.schemaVersion }}
@@ -2428,7 +2467,15 @@ button.primary {
 }
 
 button.danger {
+  border-color: #dc2626;
+  background: #fff;
   color: #b91c1c;
+}
+
+button.danger.inline-action {
+  align-self: flex-start;
+  background: #dc2626;
+  color: #fff;
 }
 
 button.ghost {
@@ -2697,6 +2744,12 @@ button.ghost {
   border-color: #fecaca;
   background: #fef2f2;
   color: #b91c1c;
+}
+
+.run-status.cancelled {
+  border-color: #fed7aa;
+  background: #fff7ed;
+  color: #c2410c;
 }
 
 .alert {
