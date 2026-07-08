@@ -12,6 +12,7 @@ const PROMPT_SECTIONS = [
   'table-semantic-recognition.prompt.md',
   'support-filtering.prompt.md',
   'geometry-semantic-recognition.prompt.md',
+  'label-planning.prompt.md',
   'output-schema-rules.prompt.md',
   'hallucination-guard.prompt.md',
 ];
@@ -66,7 +67,8 @@ export async function buildPrompt(input: BuildPromptInput): Promise<BuiltPrompt>
     '',
     '## Output Reminder',
     '- Return exactly one JSON object matching the provided ProcedureUnderstanding schema. No markdown fences, no prose.',
-    '- Follow the staged reading workflow and fill ALL of: procedureClassification, chartTexts, tableLegs, geometrySemantics, supportObjects, procedures/fixes/navaids, warnings, confidence, reviewRequired.',
+    '- Follow the staged reading workflow and fill ALL of: procedureClassification, chartTexts, tableLegs, geometrySemantics, labelPlan, supportObjects, procedures/fixes/navaids, warnings, confidence, reviewRequired.',
+    '- labelPlan: one entry per chart-visible label, anchored to its fix/navaid (node labels) or leg/track/arc/radial (line labels) with placement side; never leave it empty when the chart shows text.',
     '- Apply the support-filtering rules: support-only idents must not enter navaids, fixes, or legs.',
     '- Do NOT return final map coordinates or GeoJSON; return procedure semantics only.',
     '',

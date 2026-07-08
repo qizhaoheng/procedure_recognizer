@@ -116,6 +116,8 @@ export interface LabelFeatureProperties {
   review_required?: boolean;
   text_anchor?: string;
   text_offset?: [number, number];
+  /** true = 识别阶段规划的标签（LabelPoint），优先于前端启发式标签 */
+  planned?: boolean;
 }
 
 export interface ArrowFeatureProperties {
@@ -160,8 +162,13 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
         Number(feature.properties.text_offset_x ?? 0),
         Number(feature.properties.text_offset_y ?? 0.8),
       ],
+      planned: true,
     },
   }));
+  // 已被识别阶段标签规划覆盖的要素不再叠加启发式标签，避免同一对象双重标注
+  const coveredByPlan = new Set(
+    labels.map((label) => label.properties.source_feature_id).filter(Boolean) as string[],
+  );
   const hasChartArcLabel = spatialFeatures.some(
     (feature) => feature.properties.object_type === 'ChartLabel' && asString(feature.properties.name).includes('DME ARC'),
   );
@@ -196,6 +203,8 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
   for (const feature of spatialFeatures) {
     const props = feature.properties;
     const objectType = asString(props.object_type);
+    if (objectType === 'LabelPoint') continue;
+    if (coveredByPlan.has(asString(props.feature_id))) continue;
     const point = pointForGeometry(feature.geometry);
 
     if (objectType === 'ProcedureFix') {

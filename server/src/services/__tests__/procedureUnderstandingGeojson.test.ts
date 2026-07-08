@@ -45,6 +45,13 @@ const understanding: ProcedureUnderstandingResult = {
       ],
     },
   ],
+  labelPlan: [
+    { text: 'ADLOV\n6000', labelKind: 'FIX_NAME', anchorType: 'FIX', anchorIdent: 'ADLOV', anchorDirection: 'AUTO', priority: 90, sourcePageNo: 55 },
+    { text: 'ADLOV\n6000', labelKind: 'FIX_NAME', anchorType: 'FIX', anchorIdent: 'ADLOV', anchorDirection: 'AUTO', priority: 90, sourcePageNo: 55 },
+    { text: '196°', labelKind: 'COURSE_DISTANCE', anchorType: 'LEG', procedureName: 'ADLOV 1G', legSequence: 30, placementAlongLine: 'MIDDLE', sideOfLine: 'RIGHT', sourcePageNo: 55 },
+    { text: '11 DME ARC\nVJB', labelKind: 'DME_ARC', anchorType: 'DME_ARC', procedureName: 'ADLOV 1G', placementAlongLine: 'MIDDLE', sideOfLine: 'LEFT', sourcePageNo: 55 },
+    { text: 'VJB 112.7', labelKind: 'NAVAID_INFO', anchorType: 'NAVAID', anchorIdent: 'VJB', anchorDirection: 'SW', sourcePageNo: 54 },
+  ],
 };
 
 describe('procedure understanding GeoJSON — DME ARC legs', () => {
@@ -97,6 +104,49 @@ describe('procedure understanding GeoJSON — DME ARC legs', () => {
     assert.ok(track, 'track feature missing');
     assert.equal(track?.properties?.coordinate_quality, 'derived_from_leg_chain');
     assert.ok((track?.geometry as GeoJSON.LineString).coordinates.length > 10);
+  });
+});
+
+describe('procedure understanding GeoJSON — label plan', () => {
+  const geojson = buildGeoJsonFromProcedureUnderstanding(understanding, group);
+  const labels = geojson.features.filter((f) => f.properties?.object_type === 'LabelPoint');
+
+  it('emits LabelPoint features and drops duplicate plan entries', () => {
+    assert.equal(labels.length, 4, `expected 4 planned labels, got ${labels.length}: ${labels.map((f) => f.properties?.label_text).join(' | ')}`);
+  });
+
+  it('anchors the fix label at the fix on a clear side away from the track', () => {
+    const fixLabel = labels.find((f) => f.properties?.label_text === 'ADLOV\n6000');
+    assert.ok(fixLabel, 'fix label missing');
+    assert.equal(fixLabel?.properties?.parent_feature_id, 'fix_ADLOV');
+    assert.equal(fixLabel?.properties?.label_type, 'ProcedureFix');
+    const [lon, lat] = (fixLabel?.geometry as GeoJSON.Point).coordinates;
+    assertClose([lon, lat], destination(VJB, 16, 25), 0.001);
+    // ADLOV 只有向南（约196°方向）的出航腿，标签应放在北侧半平面
+    assert.ok(['bottom', 'bottom-left', 'bottom-right'].includes(String(fixLabel?.properties?.text_anchor)), `unexpected anchor ${fixLabel?.properties?.text_anchor}`);
+  });
+
+  it('places the course label at the leg midpoint with a perpendicular offset', () => {
+    const courseLabel = labels.find((f) => f.properties?.label_text === '196°');
+    assert.ok(courseLabel, 'course label missing');
+    assert.equal(courseLabel?.properties?.parent_object_type, 'ProcedureLeg');
+    assert.equal(courseLabel?.properties?.text_anchor, 'center');
+    const offset = Math.hypot(Number(courseLabel?.properties?.text_offset_x), Number(courseLabel?.properties?.text_offset_y));
+    assert.ok(Math.abs(offset - 1.2) < 0.05, `offset should be ~1.2em, got ${offset}`);
+  });
+
+  it('rides the DME ARC label on the AF leg geometry', () => {
+    const arcLabel = labels.find((f) => f.properties?.label_text?.toString().includes('DME ARC'));
+    assert.ok(arcLabel, 'arc label missing');
+    assert.equal(arcLabel?.properties?.parent_object_type, 'ProcedureLeg');
+    const [lon, lat] = (arcLabel?.geometry as GeoJSON.Point).coordinates;
+    assert.ok(Math.abs(distanceNm(VJB, [lon, lat]) - 11) < 0.5, 'arc label should sit near the 11 DME arc');
+  });
+
+  it('honors the explicit navaid label direction', () => {
+    const navaidLabel = labels.find((f) => f.properties?.label_text === 'VJB 112.7');
+    assert.equal(navaidLabel?.properties?.text_anchor, 'top-right');
+    assert.equal(navaidLabel?.properties?.source_page, 54);
   });
 });
 

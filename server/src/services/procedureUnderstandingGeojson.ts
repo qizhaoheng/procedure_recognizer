@@ -62,6 +62,22 @@ type GeometrySemanticRecord = {
   reviewRequired?: boolean;
 };
 
+type LabelPlanRecord = {
+  text?: string | null;
+  labelKind?: string | null;
+  anchorType?: string | null;
+  anchorIdent?: string | null;
+  procedureName?: string | null;
+  legSequence?: number | null;
+  placementAlongLine?: string | null;
+  sideOfLine?: string | null;
+  anchorDirection?: string | null;
+  priority?: number | null;
+  sourcePageNo?: number | null;
+  confidence?: number;
+  reviewRequired?: boolean;
+};
+
 type SupportNavaidSummary = {
   pageNo?: number | null;
   navaids?: string[];
@@ -101,6 +117,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
     ...legChainFeatures,
     ...geometrySemanticFeatures(geometrySemantics, procedures, fixMap, navaidMap, understanding, group),
   ];
+  features.push(...labelPlanFeatures(understanding, group, features));
 
   return withBbox({
     type: 'FeatureCollection',
@@ -506,6 +523,274 @@ function legFeature(procedureName: string, leg: LegRecord, coordinates: number[]
       confidence: leg.confidence ?? 0.5,
     }),
   };
+}
+
+// labelPlan → LabelPoint：把识别阶段的标签规划落成带 text_anchor/text_offset 的点要素。
+// 节点标签自动避开进出航段方向；航段/弧线/径向线标签沿线取位并向规划侧偏置。
+const LABEL_KIND_TO_TYPE: Record<string, string> = {
+  FIX_NAME: 'ProcedureFix',
+  PROCEDURE_NAME: 'ProcedureName',
+  COURSE_DISTANCE: 'ProcedureCourse',
+  NAVAID_INFO: 'Navaid',
+  DME_ARC: 'DMEArc',
+  RADIAL: 'Radial',
+  LEAD_RADIAL: 'LeadRadial',
+  RUNWAY: 'Runway',
+  HOLDING: 'ChartLabel',
+  MSA: 'MSA',
+  NOTE: 'ChartLabel',
+};
+
+const LABEL_KIND_PRIORITY: Record<string, number> = {
+  NAVAID_INFO: 100,
+  FIX_NAME: 90,
+  PROCEDURE_NAME: 88,
+  LEAD_RADIAL: 85,
+  RUNWAY: 82,
+  DME_ARC: 80,
+  COURSE_DISTANCE: 76,
+  RADIAL: 70,
+  HOLDING: 65,
+  NOTE: 55,
+  MSA: 40,
+};
+
+// 罗盘方位 → MapLibre text-anchor（anchor 指文字块贴向锚点的边）与 em 偏移
+const DIRECTION_PLACEMENT: Record<string, { anchor: string; offset: [number, number] }> = {
+  N: { anchor: 'bottom', offset: [0, -0.9] },
+  NE: { anchor: 'bottom-left', offset: [0.7, -0.7] },
+  E: { anchor: 'left', offset: [0.9, 0] },
+  SE: { anchor: 'top-left', offset: [0.7, 0.7] },
+  S: { anchor: 'top', offset: [0, 0.9] },
+  SW: { anchor: 'top-right', offset: [-0.7, 0.7] },
+  W: { anchor: 'right', offset: [-0.9, 0] },
+  NW: { anchor: 'bottom-right', offset: [-0.7, -0.7] },
+};
+
+const POINT_ANCHOR_TYPES: Record<string, string[]> = {
+  FIX: ['ProcedureFix'],
+  NAVAID: ['Navaid'],
+  RUNWAY: ['RunwayThreshold', 'RunwayEnd'],
+};
+
+interface ResolvedLabelAnchor {
+  coordinate: [number, number];
+  textAnchor: string;
+  offset: [number, number];
+  parentFeatureId: string;
+  parentObjectType: string;
+}
+
+function labelPlanFeatures(
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+  features: ProcedureFeature[],
+): ProcedureFeature[] {
+  const plan = (understanding.labelPlan ?? []) as LabelPlanRecord[];
+  if (!plan.length) return [];
+
+  const result: ProcedureFeature[] = [];
+  const seen = new Set<string>();
+
+  plan.forEach((label, index) => {
+    const text = String(label.text ?? '').trim();
+    if (!text) return;
+    const anchor = resolveLabelAnchor(label, features);
+    if (!anchor) return;
+    const kind = String(label.labelKind ?? 'NOTE').toUpperCase();
+    const dedupeKey = `${anchor.parentFeatureId}|${kind}|${text}`;
+    if (seen.has(dedupeKey)) return;
+    seen.add(dedupeKey);
+
+    result.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: anchor.coordinate },
+      properties: baseProps({
+        object_type: 'LabelPoint',
+        feature_id: `label_${index + 1}_${slug(text.split('\n')[0])}`,
+        label_text: text,
+        label_type: LABEL_KIND_TO_TYPE[kind] ?? 'ChartLabel',
+        label_kind: kind,
+        priority: Number.isFinite(Number(label.priority)) && label.priority !== null
+          ? Number(label.priority)
+          : LABEL_KIND_PRIORITY[kind] ?? 50,
+        parent_feature_id: anchor.parentFeatureId,
+        parent_object_type: anchor.parentObjectType,
+        text_anchor: anchor.textAnchor,
+        text_offset_x: anchor.offset[0],
+        text_offset_y: anchor.offset[1],
+        source_page: label.sourcePageNo ?? group.chartPageNo ?? group.chartPages?.[0] ?? null,
+        source_text: text,
+        coordinate_quality: 'derived_from_label_plan',
+        review_required: label.reviewRequired === true,
+        confidence: label.confidence ?? 0.6,
+      }),
+    });
+  });
+
+  return result;
+}
+
+function resolveLabelAnchor(label: LabelPlanRecord, features: ProcedureFeature[]): ResolvedLabelAnchor | undefined {
+  const anchorType = String(label.anchorType ?? 'FIX').toUpperCase();
+  const pointTypes = POINT_ANCHOR_TYPES[anchorType];
+  if (pointTypes) return resolvePointAnchor(label, pointTypes, features);
+  return resolveLineAnchor(label, anchorType, features);
+}
+
+function resolvePointAnchor(
+  label: LabelPlanRecord,
+  objectTypes: string[],
+  features: ProcedureFeature[],
+): ResolvedLabelAnchor | undefined {
+  const ident = String(label.anchorIdent ?? '').trim().toUpperCase();
+  if (!ident) return undefined;
+  const target = features.find(
+    (feature) => feature.geometry?.type === 'Point'
+      && objectTypes.includes(String(feature.properties?.object_type))
+      && String(feature.properties?.ident ?? feature.properties?.name ?? '').toUpperCase() === ident,
+  );
+  if (!target || target.geometry?.type !== 'Point') return undefined;
+  const coordinate = target.geometry.coordinates as [number, number];
+
+  const requested = String(label.anchorDirection ?? 'AUTO').toUpperCase();
+  const direction = DIRECTION_PLACEMENT[requested]
+    ? requested
+    : clearDirectionAt(coordinate, features);
+  const placement = DIRECTION_PLACEMENT[direction] ?? DIRECTION_PLACEMENT.E;
+  return {
+    coordinate,
+    textAnchor: placement.anchor,
+    offset: placement.offset,
+    parentFeatureId: String(target.properties?.feature_id ?? ''),
+    parentObjectType: String(target.properties?.object_type ?? ''),
+  };
+}
+
+// 专业制图规则：节点文字放在没有航线经过的一侧。
+// 汇总所有经过该点的线段的进出方向向量，取合向量的反方向作为标签方位。
+function clearDirectionAt(coordinate: [number, number], features: ProcedureFeature[]): string {
+  const epsilon = 1e-4;
+  let sumX = 0;
+  let sumY = 0;
+  for (const feature of features) {
+    if (feature.geometry?.type !== 'LineString') continue;
+    const coords = feature.geometry.coordinates;
+    coords.forEach((vertex, index) => {
+      if (Math.abs(vertex[0] - coordinate[0]) > epsilon || Math.abs(vertex[1] - coordinate[1]) > epsilon) return;
+      for (const neighbor of [coords[index - 1], coords[index + 1]]) {
+        if (!neighbor) continue;
+        const dx = neighbor[0] - coordinate[0];
+        const dy = coordinate[1] - neighbor[1]; // 屏幕坐标 y 向下
+        const length = Math.hypot(dx, dy);
+        if (!length) continue;
+        sumX += dx / length;
+        sumY += dy / length;
+      }
+    });
+  }
+  if (!sumX && !sumY) return 'E';
+  // 反方向 = 远离所有航线的一侧
+  const angle = (Math.atan2(-sumX, sumY) * 180) / Math.PI; // 0=N, 顺时针
+  const sectors = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+  return sectors[Math.round(((angle + 360) % 360) / 45) % 8];
+}
+
+function resolveLineAnchor(
+  label: LabelPlanRecord,
+  anchorType: string,
+  features: ProcedureFeature[],
+): ResolvedLabelAnchor | undefined {
+  const target = findLineFeature(label, anchorType, features);
+  if (!target || target.geometry?.type !== 'LineString') return undefined;
+
+  const placement = String(label.placementAlongLine ?? 'MIDDLE').toUpperCase();
+  const fraction = placement === 'START' ? 0.18 : placement === 'END' ? 0.82 : 0.5;
+  const located = lineLabelPosition(target.geometry.coordinates, fraction);
+  if (!located) return undefined;
+
+  const side = String(label.sideOfLine ?? 'RIGHT').toUpperCase() === 'LEFT' ? -1 : 1;
+  const bearingRad = (located.bearingDeg * Math.PI) / 180;
+  // 行进方向右侧的屏幕偏移向量 = (cos b, sin b)，b 为自北顺时针方位角
+  const offset: [number, number] = [
+    Math.cos(bearingRad) * 1.2 * side,
+    Math.sin(bearingRad) * 1.2 * side,
+  ];
+  return {
+    coordinate: located.coordinate,
+    textAnchor: 'center',
+    offset: [round2(offset[0]), round2(offset[1])],
+    parentFeatureId: String(target.properties?.feature_id ?? ''),
+    parentObjectType: String(target.properties?.object_type ?? ''),
+  };
+}
+
+function findLineFeature(label: LabelPlanRecord, anchorType: string, features: ProcedureFeature[]) {
+  const procedureName = String(label.procedureName ?? '').trim().toUpperCase();
+  const ident = String(label.anchorIdent ?? '').trim().toUpperCase();
+  const lines = features.filter((feature) => feature.geometry?.type === 'LineString');
+  const matchesProcedure = (feature: ProcedureFeature) =>
+    !procedureName || String(feature.properties?.procedure ?? '').toUpperCase() === procedureName;
+
+  if (anchorType === 'LEG') {
+    return lines.find((feature) =>
+      String(feature.properties?.object_type) === 'ProcedureLeg'
+      && matchesProcedure(feature)
+      && (label.legSequence == null || Number(feature.properties?.leg_seq) === Number(label.legSequence))
+      && (!ident
+        || String(feature.properties?.to_fix ?? '').toUpperCase() === ident
+        || String(feature.properties?.from_fix ?? '').toUpperCase() === ident),
+    );
+  }
+  if (anchorType === 'PROCEDURE_TRACK') {
+    return lines.find((feature) => String(feature.properties?.object_type) === 'ProcedureTrack' && matchesProcedure(feature));
+  }
+  if (anchorType === 'DME_ARC') {
+    // 优先锚在弧形航段上（真实飞行轨迹），弧参考圆兜底
+    return lines.find((feature) =>
+      String(feature.properties?.object_type) === 'ProcedureLeg'
+      && matchesProcedure(feature)
+      && ['AF', 'DME_ARC'].includes(String(feature.properties?.path_terminator ?? feature.properties?.leg_type ?? '').toUpperCase()),
+    ) ?? lines.find((feature) => String(feature.properties?.object_type) === 'DMEReferenceCircle');
+  }
+  if (anchorType === 'RADIAL') {
+    return lines.find((feature) =>
+      ['RadialReference', 'LeadRadial'].includes(String(feature.properties?.object_type))
+      && (!ident || String(feature.properties?.ident ?? feature.properties?.name ?? '').toUpperCase().includes(ident)),
+    );
+  }
+  return undefined;
+}
+
+function lineLabelPosition(coordinates: number[][], fraction: number) {
+  if (coordinates.length < 2) return undefined;
+  const lengths = coordinates.slice(0, -1).map((vertex, index) => Math.hypot(
+    coordinates[index + 1][0] - vertex[0],
+    coordinates[index + 1][1] - vertex[1],
+  ));
+  const total = lengths.reduce((sum, value) => sum + value, 0);
+  if (!total) return undefined;
+
+  let traversed = 0;
+  let segment = 0;
+  const targetLength = total * Math.max(0, Math.min(1, fraction));
+  for (; segment < lengths.length - 1; segment += 1) {
+    if (traversed + lengths[segment] >= targetLength) break;
+    traversed += lengths[segment];
+  }
+  const from = coordinates[segment];
+  const to = coordinates[segment + 1];
+  const segmentFraction = lengths[segment] ? Math.max(0, Math.min(1, (targetLength - traversed) / lengths[segment])) : 0;
+  const coordinate: [number, number] = [
+    from[0] + (to[0] - from[0]) * segmentFraction,
+    from[1] + (to[1] - from[1]) * segmentFraction,
+  ];
+  const bearingDeg = ((Math.atan2(to[0] - from[0], to[1] - from[1]) * 180) / Math.PI + 360) % 360;
+  return { coordinate, bearingDeg };
+}
+
+function round2(value: number) {
+  return Math.round(value * 100) / 100;
 }
 
 function buildFixMetadata(
