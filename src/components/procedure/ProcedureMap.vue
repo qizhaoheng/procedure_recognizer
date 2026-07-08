@@ -39,7 +39,7 @@ const layerMap: Record<keyof LayerVisibility, string[]> = {
   msaSector: ['msa-fill', 'msa-outline'],
   directionArrows: ['direction-arrow-layer'],
   tangentMarks: ['tangent-mark-layer'],
-  labels: ['text-label-layer'],
+  labels: ['planned-label-layer', 'text-label-layer'],
   reviewOnly: [],
 };
 
@@ -340,112 +340,136 @@ function addSourcesAndLayers() {
       'circle-opacity': 0.5,
     },
   });
+  const labelTextSize = [
+    'match',
+    ['get', 'label_type'],
+    'Navaid',
+    13,
+    'NavaidLabel',
+    13,
+    'ProcedureFix',
+    12,
+    'ProcedureFixLabel',
+    12,
+    'ProcedureCourse',
+    12,
+    'ProcedureCourseLabel',
+    12,
+    'ProcedureName',
+    12,
+    'LeadRadial',
+    12,
+    'LeadRadialLabel',
+    12,
+    'LeadRadialPointLabel',
+    11,
+    'DMEArc',
+    12,
+    'ChartLabel',
+    12,
+    'Radial',
+    11,
+    'RadialLabel',
+    11,
+    'DerivedFix',
+    11,
+    'DerivedFixLabel',
+    11,
+    'EntryTurnLabel',
+    11,
+    'ExitTurnLabel',
+    11,
+    'RunwayPointLabel',
+    11,
+    11,
+  ];
+  const labelTextPaint = {
+    'text-color': [
+      'match',
+      ['get', 'label_type'],
+      'Navaid',
+      '#1e40af',
+      'NavaidLabel',
+      '#1e40af',
+      'ProcedureFix',
+      '#1d4ed8',
+      'ProcedureFixLabel',
+      '#1d4ed8',
+      'ProcedureCourse',
+      '#b91c1c',
+      'ProcedureCourseLabel',
+      '#b91c1c',
+      'ProcedureName',
+      '#9333ea',
+      'LeadRadial',
+      '#c2410c',
+      'LeadRadialLabel',
+      '#c2410c',
+      'LeadRadialPointLabel',
+      '#c2410c',
+      'DMEArc',
+      '#166534',
+      'ChartLabel',
+      '#166534',
+      'Radial',
+      '#475569',
+      'RadialLabel',
+      '#475569',
+      'DerivedFix',
+      '#92400e',
+      'DerivedFixLabel',
+      '#92400e',
+      'EntryTurnLabel',
+      '#7e22ce',
+      'ExitTurnLabel',
+      '#c2410c',
+      'RunwayPointLabel',
+      '#111827',
+      '#1f2937',
+    ],
+    'text-halo-color': '#ffffff',
+    'text-halo-width': 1.5,
+    'text-halo-blur': 0.5,
+  };
+
+  // 识别阶段规划的标签：定位/偏移由服务端按制图规则给定，位置权威；
+  // 高优先级先占位，冲突的低优先级标签在低缩放级别自动让位。
+  addLayer({
+    id: 'planned-label-layer',
+    type: 'symbol',
+    source: labelSourceId,
+    filter: plannedLabelFilter(true),
+    layout: {
+      'text-field': ['get', 'label_text'],
+      'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+      'text-size': labelTextSize,
+      'text-anchor': ['coalesce', ['get', 'text_anchor'], 'center'],
+      'text-offset': ['coalesce', ['get', 'text_offset'], ['literal', [0, 0]]],
+      'text-allow-overlap': false,
+      'text-ignore-placement': false,
+      'symbol-sort-key': ['-', 100, ['get', 'priority']],
+    },
+    paint: labelTextPaint,
+  });
+  // 启发式兜底标签：仅覆盖没有规划标签的要素，开启碰撞检测并允许换锚位避让
   addLayer({
     id: 'text-label-layer',
     type: 'symbol',
     source: labelSourceId,
+    filter: plannedLabelFilter(false),
     layout: {
       'text-field': ['get', 'label_text'],
       'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
-      'text-size': [
-        'match',
-        ['get', 'label_type'],
-        'Navaid',
-        13,
-        'NavaidLabel',
-        13,
-        'ProcedureFix',
-        12,
-        'ProcedureFixLabel',
-        12,
-        'ProcedureCourse',
-        12,
-        'ProcedureCourseLabel',
-        12,
-        'ProcedureName',
-        12,
-        'LeadRadial',
-        12,
-        'LeadRadialLabel',
-        12,
-        'LeadRadialPointLabel',
-        11,
-        'DMEArc',
-        12,
-        'ChartLabel',
-        12,
-        'Radial',
-        11,
-        'RadialLabel',
-        11,
-        'DerivedFix',
-        11,
-        'DerivedFixLabel',
-        11,
-        'EntryTurnLabel',
-        11,
-        'ExitTurnLabel',
-        11,
-        'RunwayPointLabel',
-        11,
-        11,
-      ],
+      'text-size': labelTextSize,
       'text-anchor': ['coalesce', ['get', 'text_anchor'], 'top'],
       'text-offset': ['coalesce', ['get', 'text_offset'], ['literal', [0, 0.8]]],
       'text-variable-anchor': ['top', 'bottom', 'left', 'right'],
       'text-radial-offset': 0.6,
-      'text-allow-overlap': true,
-      'text-ignore-placement': true,
-      'symbol-sort-key': ['get', 'priority'],
+      'text-allow-overlap': false,
+      'text-ignore-placement': false,
+      'symbol-sort-key': ['-', 100, ['get', 'priority']],
     },
-    paint: {
-      'text-color': [
-        'match',
-        ['get', 'label_type'],
-        'Navaid',
-        '#1e40af',
-        'NavaidLabel',
-        '#1e40af',
-        'ProcedureFix',
-        '#1d4ed8',
-        'ProcedureFixLabel',
-        '#1d4ed8',
-        'ProcedureCourse',
-        '#b91c1c',
-        'ProcedureCourseLabel',
-        '#b91c1c',
-        'ProcedureName',
-        '#9333ea',
-        'LeadRadial',
-        '#c2410c',
-        'LeadRadialLabel',
-        '#c2410c',
-        'LeadRadialPointLabel',
-        '#c2410c',
-        'DMEArc',
-        '#166534',
-        'ChartLabel',
-        '#166534',
-        'Radial',
-        '#475569',
-        'RadialLabel',
-        '#475569',
-        'DerivedFix',
-        '#92400e',
-        'DerivedFixLabel',
-        '#92400e',
-        'EntryTurnLabel',
-        '#7e22ce',
-        'ExitTurnLabel',
-        '#c2410c',
-        'RunwayPointLabel',
-        '#111827',
-        '#1f2937',
-      ],
-      'text-halo-color': '#ffffff',
-      'text-halo-width': 1.5,
-      'text-halo-blur': 0.5,
-    },
+    paint: labelTextPaint,
   });
 
   updateLayerVisibility();
@@ -503,8 +527,21 @@ function updateReviewFilters() {
     map.setFilter(layer, withReviewFilter(filter, reviewOnly) as never);
   });
 
+  if (map.getLayer('planned-label-layer')) {
+    map.setFilter(
+      'planned-label-layer',
+      (reviewOnly
+        ? ['all', plannedLabelFilter(true), ['==', ['get', 'review_required'], true]]
+        : plannedLabelFilter(true)) as never,
+    );
+  }
   if (map.getLayer('text-label-layer')) {
-    map.setFilter('text-label-layer', reviewOnly ? (['==', ['get', 'review_required'], true] as never) : null);
+    map.setFilter(
+      'text-label-layer',
+      (reviewOnly
+        ? ['all', plannedLabelFilter(false), ['==', ['get', 'review_required'], true]]
+        : plannedLabelFilter(false)) as never,
+    );
   }
   if (map.getLayer('direction-arrow-layer')) {
     map.setFilter(
@@ -666,6 +703,10 @@ function emptyCollection() {
 
 function typedFilter(type: string) {
   return ['==', ['get', 'object_type'], type];
+}
+
+function plannedLabelFilter(planned: boolean) {
+  return planned ? ['==', ['get', 'planned'], true] : ['!=', ['get', 'planned'], true];
 }
 
 function inTypeFilter(types: string[]) {

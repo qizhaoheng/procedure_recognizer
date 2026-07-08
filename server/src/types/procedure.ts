@@ -484,6 +484,8 @@ export interface ProcedureUnderstandingResult {
   procedureClassification?: ProcedureClassificationResult | null;
   chartTexts?: ChartTextItem[];
   geometrySemantics?: GeometrySemanticItem[];
+  /** 识别阶段规划的图面标签：文字、类型、锚定节点/航段、放置方位 */
+  labelPlan?: Array<Record<string, unknown>>;
   supportObjects?: SupportObjectItem[];
   tableLegs?: TableLegItem[];
   procedures?: ProcedureUnderstandingProcedure[];

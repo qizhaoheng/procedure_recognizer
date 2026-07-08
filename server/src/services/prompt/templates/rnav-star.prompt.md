@@ -43,6 +43,18 @@ RNAV chart labels:
   course is printed on the chart, include it in `chartTexts` and mention it in the relevant
   final-leg `remarks`.
 
+Label plan mapping (RNAV STAR):
+- Fix labels (`UDOSU (IAF) 3000`) → one `labelPlan` entry per fix: labelKind=FIX_NAME,
+  anchorType=FIX, text with `\n` between name/role line and altitude line.
+- Course/distance (`072° 13.4`) → labelKind=COURSE_DISTANCE, anchorType=LEG with
+  procedureName + legSequence, placementAlongLine=MIDDLE, sideOfLine matching the chart.
+- Procedure names (`EMTUV 1E`) → labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK,
+  placementAlongLine=START.
+- Airway labels (`W534`, `A224`) → labelKind=NOTE, anchorType=PROCEDURE_TRACK,
+  placementAlongLine=START (they describe the route before the entry fix).
+- Final inbound labels (`OSRUP (IF) 2000 / 160°`) → split: the fix part anchors to the fix,
+  the course part (`160°`) anchors to the final leg as COURSE_DISTANCE.
+
 Holding patterns:
 - Racetrack patterns drawn at fixes (typically the entry fixes) are part of the procedure.
   Report each one in `holdings` (fixIdentifier, inboundCourseDegMag, turnDirection).

@@ -50,6 +50,7 @@ export function normalizeProcedureUnderstandingResult(
     procedureClassification: normalizeClassification(classification, group),
     chartTexts,
     geometrySemantics,
+    labelPlan: array(input.labelPlan).map((item) => normalizeLabelPlanItem(record(item) ?? {})),
     supportObjects: array(input.supportObjects).map((item) => normalizeSupportObject(record(item) ?? {})),
     tableLegs,
     procedures,
@@ -100,6 +101,25 @@ function normalizeGeometrySemantic(input: JsonRecord) {
     inboundTrackDeg: numberOrNull(input.inboundTrackDeg),
     direction: enumString(input.direction, ['CLOCKWISE', 'COUNTERCLOCKWISE', 'UNKNOWN'], 'UNKNOWN'),
     relatedProcedures: array(input.relatedProcedures).map(String),
+    sourcePageNo: integerOrNull(input.sourcePageNo),
+    confidence: numberOr(input.confidence, 0.5),
+    reviewRequired: booleanOr(input.reviewRequired, false),
+  };
+}
+
+function normalizeLabelPlanItem(input: JsonRecord) {
+  return {
+    // 模型偶发输出字面量 "\n"，统一转成真实换行供地图分行渲染
+    text: String(input.text ?? '').replace(/\\n/g, '\n'),
+    labelKind: enumString(input.labelKind, ['FIX_NAME', 'PROCEDURE_NAME', 'COURSE_DISTANCE', 'NAVAID_INFO', 'DME_ARC', 'RADIAL', 'LEAD_RADIAL', 'RUNWAY', 'HOLDING', 'MSA', 'NOTE'], 'NOTE'),
+    anchorType: enumString(input.anchorType, ['FIX', 'NAVAID', 'LEG', 'PROCEDURE_TRACK', 'DME_ARC', 'RADIAL', 'RUNWAY'], 'FIX'),
+    anchorIdent: stringOrNull(input.anchorIdent),
+    procedureName: stringOrNull(input.procedureName),
+    legSequence: integerOrNull(input.legSequence),
+    placementAlongLine: enumString(input.placementAlongLine, ['START', 'MIDDLE', 'END'], null),
+    sideOfLine: enumString(input.sideOfLine, ['LEFT', 'RIGHT', 'AUTO'], null),
+    anchorDirection: enumString(input.anchorDirection, ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW', 'AUTO'], null),
+    priority: numberOrNull(input.priority),
     sourcePageNo: integerOrNull(input.sourcePageNo),
     confidence: numberOr(input.confidence, 0.5),
     reviewRequired: booleanOr(input.reviewRequired, false),

@@ -122,6 +122,23 @@ If a single leg's path terminator cannot be determined, output that leg with pat
 and reviewRequired=true — but never return an empty `legs` array when the tabular description
 page is present.
 
+## Label Plan Mapping (DME ARC STAR)
+
+Every chartTexts label that is drawn on the main chart also gets ONE `labelPlan` entry:
+- Entry fix labels with altitude (e.g. `ADLOV\n6000`) → labelKind=FIX_NAME, anchorType=FIX,
+  anchorDirection = the side of the fix with no track lines (or AUTO).
+- VOR/DME info box (ident/frequency) → labelKind=NAVAID_INFO, anchorType=NAVAID.
+- `11 DME ARC` → labelKind=DME_ARC, anchorType=DME_ARC (rides along the arc), one entry total,
+  NOT one per procedure.
+- `RDL-xxx` labels → labelKind=RADIAL, anchorType=RADIAL, anchorIdent=`RDLxxx`,
+  placementAlongLine=END (radial labels sit at the outer end). The final radial pair
+  (`RDL340 / 160°`) stays one entry with `\n` between the two lines.
+- Lead radials `L-R332` / `L-R348` → labelKind=LEAD_RADIAL, anchorType=RADIAL.
+- Outer DME turn-point tags (`13D VJB`) → labelKind=FIX_NAME, anchorType=FIX with the D-fix
+  ident (e.g. `D016M`).
+- Procedure names (`ADLOV 1G`) → labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK,
+  placementAlongLine=START, sideOfLine matching the chart.
+
 ## Fixes and Coordinates — REQUIRED
 
 - Output every named waypoint used by the legs into `fixes`: each entry fix and the common
