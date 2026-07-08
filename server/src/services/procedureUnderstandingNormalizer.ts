@@ -14,30 +14,55 @@ export function normalizeProcedureUnderstandingResult(
   const evidence = normalizeSourceEvidence(array(input.sourceEvidence));
   const evidenceIds = evidence.map((item) => String(item.id));
   const tableLegs = array(input.tableLegs).map((item) => normalizeTableLeg(record(item) ?? {}));
+  const chartTexts = array(input.chartTexts).map((item) => normalizeChartText(record(item) ?? {}));
+  const geometrySemantics = array(input.geometrySemantics).map((item) => normalizeGeometrySemantic(record(item) ?? {}));
+  const fixes = array(input.fixes).map((item) => normalizeFix(record(item) ?? {}, evidenceIds));
+  const navigationType = stringOrNull(input.navigationType) ?? stringOrNull(classification.navigationType) ?? group.navigationType ?? null;
+  const procedures = applyDmeArcLegFallback(
+    normalizeProcedures(array(input.procedures), tableLegs, group, evidenceIds),
+    geometrySemantics,
+    chartTexts,
+    fixes,
+    navigationType,
+    evidenceIds,
+  );
+  const warnings = array(input.warnings).map((item) => normalizeWarning(record(item) ?? {}));
+  const usedLegFallback = procedures.some(
+    (procedure) => procedure.legs.some((leg) => leg.derivationMethod === SYNTHESIZED_LEG_DERIVATION),
+  );
+  if (usedLegFallback) {
+    // 兜底必须显式亮牌：它只保证产物可用，不代表模型识别达标
+    warnings.push({
+      message: '模型未输出 tableLegs：procedures[].legs 为 DME ARC 几何合成兜底（缺高度约束），模型识别仍不完整，请继续打磨 Prompt。',
+      pageNos: [],
+      fieldName: 'tableLegs',
+      reviewRequired: true,
+    });
+  }
 
   return {
     airportIcao: stringOrNull(input.airportIcao) ?? airportMetadata(aiInputPackage).airportIcao ?? null,
     airportName: stringOrNull(input.airportName) ?? airportMetadata(aiInputPackage).airportName ?? null,
     packageType: stringOrNull(input.packageType) ?? stringOrNull(classification.packageType) ?? group.packageType ?? null,
     procedureCategory: stringOrNull(input.procedureCategory) ?? stringOrNull(classification.procedureCategory) ?? group.procedureCategory ?? null,
-    navigationType: stringOrNull(input.navigationType) ?? stringOrNull(classification.navigationType) ?? group.navigationType ?? null,
+    navigationType,
     runway: stringOrNull(input.runway) ?? stringOrNull(classification.runway) ?? group.runway ?? null,
     procedureClassification: normalizeClassification(classification, group),
-    chartTexts: array(input.chartTexts).map((item) => normalizeChartText(record(item) ?? {})),
-    geometrySemantics: array(input.geometrySemantics).map((item) => normalizeGeometrySemantic(record(item) ?? {})),
+    chartTexts,
+    geometrySemantics,
     supportObjects: array(input.supportObjects).map((item) => normalizeSupportObject(record(item) ?? {})),
     tableLegs,
-    procedures: normalizeProcedures(array(input.procedures), tableLegs, group, evidenceIds),
-    fixes: array(input.fixes).map((item) => normalizeFix(record(item) ?? {}, evidenceIds)),
+    procedures,
+    fixes,
     navaids: array(input.navaids).map((item) => normalizeNavaid(record(item) ?? {}, evidenceIds)),
     runways: array(input.runways).map((item) => normalizeRunway(record(item) ?? {}, evidenceIds)),
     communications: array(input.communications).map((item) => normalizeCommunication(record(item) ?? {}, evidenceIds)),
     holdings: array(input.holdings).map((item) => normalizeHolding(record(item) ?? {}, evidenceIds)),
     msa: array(input.msa).map((item) => normalizeMsaSector(record(item) ?? {}, evidenceIds)),
     sourceEvidence: evidence,
-    warnings: array(input.warnings).map((item) => normalizeWarning(record(item) ?? {})),
+    warnings,
     confidence: numberOr(input.confidence, 0.5),
-    reviewRequired: booleanOr(input.reviewRequired, false),
+    reviewRequired: booleanOr(input.reviewRequired, false) || usedLegFallback,
   };
 }
 
@@ -141,6 +166,160 @@ function normalizeProcedures(rawProcedures: unknown[], tableLegs: ReturnType<typ
   });
 }
 
+type NormalizedGeometrySemantic = ReturnType<typeof normalizeGeometrySemantic>;
+type NormalizedLeg = ReturnType<typeof normalizeLeg>;
+type NormalizedProcedure = ReturnType<typeof normalizeProcedures>[number];
+
+// 模型偶发把输出预算花在穷举标签上而漏掉 tableLegs。DME ARC 的腿链结构是确定的：
+// IF 入航点 → TF 外圈 D-Fix → CI 截获 → AF 弧段（遇约束径向线拆分）→ TF 共用入航点。
+// 当 tableLegs 缺失但语义要素（弧、径向线、relatedProcedures）齐全时，按几何合成腿段，
+// AF 弧长 = 半径 × 弧角，全部标记 reviewRequired=true。高度约束无法合成，留 null。
+function applyDmeArcLegFallback(
+  procedures: NormalizedProcedure[],
+  geometrySemantics: NormalizedGeometrySemantic[],
+  chartTexts: Array<{ text: string; role: string | null }>,
+  fixes: Array<{ identifier: string | null }>,
+  navigationType: string | null,
+  evidenceIds: string[],
+): NormalizedProcedure[] {
+  if (!/DME/i.test(String(navigationType ?? ''))) return procedures;
+  if (!procedures.length || procedures.some((procedure) => procedure.legs.length > 0)) return procedures;
+
+  const arc = geometrySemantics.find((item) => item.type === 'DME_ARC' && (item.radiusNm ?? 0) > 0);
+  const radials = geometrySemantics.filter((item) => item.type === 'RADIAL' && item.radialDeg !== null);
+  if (!arc || radials.length < 2) return procedures;
+
+  const finalRadial = [...radials].sort(
+    (a, b) => (b.relatedProcedures.length - a.relatedProcedures.length)
+      || ((b.inboundTrackDeg !== null ? 1 : 0) - (a.inboundTrackDeg !== null ? 1 : 0)),
+  )[0];
+  const finalDeg = Number(finalRadial.radialDeg);
+  const radiusNm = Number(arc.radiusNm);
+  const outerNm = outerDmeDistance(chartTexts, radiusNm);
+  const entryFixIdents = new Set(procedures.map((procedure) => firstWord(procedure.procedureName)));
+  const commonFix = fixes
+    .map((fix) => String(fix.identifier ?? '').toUpperCase())
+    .find((ident) => ident && !entryFixIdents.has(ident) && !/^D\d{3}[A-Z]$/.test(ident)) ?? null;
+
+  return procedures.map((procedure) => {
+    const name = String(procedure.procedureName ?? '');
+    const related = radials.filter(
+      (radial) => radial !== finalRadial
+        && radial.relatedProcedures.some((item) => item.toUpperCase() === name.toUpperCase()),
+    );
+    if (!related.length) return procedure;
+
+    const entry = [...related].sort(
+      (a, b) => angularDistanceDeg(Number(b.radialDeg), finalDeg) - angularDistanceDeg(Number(a.radialDeg), finalDeg),
+    )[0];
+    const entryDeg = Number(entry.radialDeg);
+    const signedDelta = ((finalDeg - entryDeg + 540) % 360) - 180;
+    const turn: 'L' | 'R' = signedDelta >= 0 ? 'R' : 'L';
+    const crossings = related
+      .filter((radial) => radial !== entry)
+      .map((radial) => Number(radial.radialDeg))
+      .filter((deg) => forwardOffsetDeg(entryDeg, deg, turn) < forwardOffsetDeg(entryDeg, finalDeg, turn))
+      .sort((a, b) => forwardOffsetDeg(entryDeg, a, turn) - forwardOffsetDeg(entryDeg, b, turn));
+
+    const entryFix = firstWord(procedure.procedureName);
+    const outerFix = dFixName(entryDeg, outerNm);
+    const legs: NormalizedLeg[] = [
+      synthesizedLeg(10, 'IF', null, entryFix, null, null, null, evidenceIds),
+      synthesizedLeg(20, 'TF', entryFix, outerFix, null, null, null, evidenceIds),
+      synthesizedLeg(30, 'CI', outerFix, null, (entryDeg + 180) % 360, round1(outerNm - radiusNm), null, evidenceIds),
+    ];
+    let sequence = 30;
+    let previousDeg = entryDeg;
+    let previousFix: string | null = null;
+    for (const crossingDeg of [...crossings, finalDeg]) {
+      sequence += 10;
+      const fixName = dFixName(crossingDeg, radiusNm);
+      legs.push(synthesizedLeg(
+        sequence,
+        'AF',
+        previousFix,
+        fixName,
+        null,
+        arcLengthNm(radiusNm, forwardOffsetDeg(previousDeg, crossingDeg, turn)),
+        turn,
+        evidenceIds,
+      ));
+      previousDeg = crossingDeg;
+      previousFix = fixName;
+    }
+    if (commonFix) {
+      sequence += 10;
+      legs.push(synthesizedLeg(sequence, 'TF', previousFix, commonFix, finalRadial.inboundTrackDeg, null, null, evidenceIds));
+    }
+    return { ...procedure, legs, reviewRequired: true };
+  });
+}
+
+export const SYNTHESIZED_LEG_DERIVATION = 'synthesized from DME ARC geometry semantics (tableLegs missing)';
+
+function synthesizedLeg(
+  sequence: number,
+  pathTerminator: string,
+  fromFix: string | null,
+  fixIdentifier: string | null,
+  courseDegMag: number | null,
+  distanceNm: number | null,
+  turnDirection: 'L' | 'R' | null,
+  evidenceIds: string[],
+): NormalizedLeg {
+  return {
+    sequence,
+    pathTerminator,
+    fromFix,
+    fixIdentifier,
+    courseDegMag,
+    distanceNm,
+    turnDirection,
+    altitudeConstraint: null,
+    speedLimitKias: null,
+    navigationSpec: null,
+    derivationMethod: SYNTHESIZED_LEG_DERIVATION,
+    sourceEvidenceIds: evidenceIds,
+    confidence: 0.55,
+    reviewRequired: true,
+  };
+}
+
+// 外圈 DME 距离取自图上 "13D" 之类的 DME 标签（比弧半径大的最小值），缺省半径+2。
+function outerDmeDistance(chartTexts: Array<{ text: string; role: string | null }>, radiusNm: number) {
+  const candidates = chartTexts
+    .filter((item) => item.role === 'DME_LABEL')
+    .flatMap((item) => [...String(item.text).matchAll(/(\d+(?:\.\d+)?)\s*D(?:ME)?\b/gi)].map((match) => Number(match[1])))
+    .filter((value) => Number.isFinite(value) && value > radiusNm);
+  return candidates.length ? Math.min(...candidates) : radiusNm + 2;
+}
+
+function dFixName(radialDeg: number, distanceNm: number) {
+  const letter = String.fromCharCode(64 + Math.max(1, Math.min(26, Math.round(distanceNm))));
+  return `D${String(Math.round(radialDeg)).padStart(3, '0')}${letter}`;
+}
+
+function forwardOffsetDeg(fromDeg: number, toDeg: number, turn: 'L' | 'R') {
+  return turn === 'R' ? (toDeg - fromDeg + 360) % 360 : (fromDeg - toDeg + 360) % 360;
+}
+
+function arcLengthNm(radiusNm: number, deltaDeg: number) {
+  return round1(radiusNm * (deltaDeg * Math.PI) / 180);
+}
+
+function angularDistanceDeg(a: number, b: number) {
+  const diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+function firstWord(value: string | null) {
+  return String(value ?? '').trim().split(/\s+/)[0]?.toUpperCase() ?? '';
+}
+
+function round1(value: number) {
+  return Math.round(value * 10) / 10;
+}
+
 function normalizeLeg(input: ReturnType<typeof normalizeTableLeg>, evidenceIds: string[]) {
   return {
     sequence: input.sequence ?? 1,
@@ -164,10 +343,14 @@ function normalizeFix(input: JsonRecord, evidenceIds: string[]) {
   const coordinates = record(input.coordinates) ?? {};
   const latRaw = stringOrNull(coordinates.lat) ?? stringOrNull(input.latitudeText) ?? stringOrNull(input.latText);
   const lonRaw = stringOrNull(coordinates.lon) ?? stringOrNull(input.longitudeText) ?? stringOrNull(input.lonText);
+  const latitude = numberOrNull(input.latitude) ?? parseDmsCoordinate(latRaw);
+  const longitude = numberOrNull(input.longitude) ?? parseDmsCoordinate(lonRaw);
+  // 模型常用 (0,0) 表示"未知坐标"，按缺失处理，避免轨迹被拉到零点。
+  const zeroed = latitude === 0 && longitude === 0;
   return {
     identifier: stringOrNull(input.identifier) ?? stringOrNull(input.ident),
-    latitude: numberOrNull(input.latitude) ?? parseDmsCoordinate(latRaw),
-    longitude: numberOrNull(input.longitude) ?? parseDmsCoordinate(lonRaw),
+    latitude: zeroed ? null : latitude,
+    longitude: zeroed ? null : longitude,
     rawCoordinate: stringOrNull(input.rawCoordinate) ?? ([latRaw, lonRaw].filter(Boolean).join(' ') || null),
     sourceEvidenceIds: evidenceIds,
     confidence: numberOr(input.confidence, 0.5),
