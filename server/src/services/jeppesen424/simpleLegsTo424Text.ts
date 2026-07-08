@@ -40,9 +40,9 @@ export function simpleLegsTo424Text(legs: SimpleProcedureLeg[], options: Jeppese
         airport,
         region,
         routeCode: resolveRouteCode(leg.procedureName),
-        fixSection: index === 0 ? 'EA' : 'PC',
-        isLastLeg: index === procedureLegs.length - 1,
-        hasHolding: holdingFixes.has(leg.fix),
+        fixSection: leg.fixSection ?? (index === 0 ? 'EA' : 'PC'),
+        isLastLeg: leg.endOfProcedure ?? (index === procedureLegs.length - 1),
+        hasHolding: leg.holdingAtFix === true || holdingFixes.has(leg.fix),
       };
       lines.push(primaryRecord(leg, context));
       lines.push(continuationRecord(leg, context));
@@ -68,10 +68,18 @@ function primaryRecord(leg: SimpleProcedureLeg, context: LegContext) {
   if (context.hasHolding) put(chars, 42, 'H');
   if (leg.turnDirection === 'L' || leg.turnDirection === 'R') put(chars, 43, leg.turnDirection);
   if (leg.pathTerminator) put(chars, 47, leg.pathTerminator);
+  // 磁航向（71-74 列，×10）：与 Jeppesen 一致，只在 CI/AF 腿上编码
+  const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
+  if ((pathTerminator === 'AF' || pathTerminator === 'CI') && leg.courseDegMag !== undefined) {
+    put(chars, 70, String(Math.round(leg.courseDegMag * 10)).padStart(4, '0'));
+  }
   if (leg.altitudeValue !== undefined) {
-    const sign = leg.altitudeRaw?.startsWith('+') ? '+' : leg.altitudeRaw?.startsWith('-') ? '-' : '';
+    const sign = leg.altitudeSign ?? (leg.altitudeRaw?.startsWith('+') ? '+' : leg.altitudeRaw?.startsWith('-') ? '-' : '');
     if (sign) put(chars, 82, sign);
     put(chars, 84, String(Math.round(leg.altitudeValue)).padStart(5, '0'));
+  }
+  if (leg.altitudeUpperFt !== undefined) {
+    put(chars, 94, String(Math.round(leg.altitudeUpperFt)).padStart(5, '0'));
   }
   return chars.join('');
 }

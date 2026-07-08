@@ -9,6 +9,7 @@ import type { ProcedureUnderstandingResult } from '../../types/procedure';
 const understanding: ProcedureUnderstandingResult = {
   airportIcao: 'WMKJ',
   runway: 'RW16',
+  holdings: [{ fixIdentifier: 'ADLOV' }],
   procedures: [
     {
       procedureName: 'ADLOV 1E',

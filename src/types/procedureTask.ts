@@ -463,6 +463,12 @@ export interface SimpleProcedureLeg {
   distanceNm?: number;
   altitudeRaw?: string;
   altitudeValue?: number;
+  altitudeSign?: '+' | '-' | '';
+  altitudeUpperFt?: number;
+  courseDegMag?: number;
+  holdingAtFix?: boolean;
+  endOfProcedure?: boolean;
+  fixSection?: string;
   source: 'AI' | 'JEPPESEN_424';
   rawRecord?: string;
 }
