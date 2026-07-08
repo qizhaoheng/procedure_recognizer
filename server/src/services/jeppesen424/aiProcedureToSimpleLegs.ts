@@ -36,6 +36,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
       const pathTerminator = normalizedText(record.pathTerminator ?? '');
       const recommendedNavaid = normalizedText(record.recommendedNavaid ?? '')
         || (pathTerminator === 'AF' || pathTerminator === 'IF' ? arcCenter : undefined);
+      const courseDegMag = optionalCourse(record.courseDegMag ?? record.courseDeg);
       return {
         procedureName,
         runway,
@@ -44,12 +45,12 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         fix,
         pathTerminator,
         turnDirection: normalizeTurn(record.turnDirection),
-        distanceNm: numberOrUndefined(record.distanceNm),
+        distanceNm: optionalDistance(record.distanceNm),
         altitudeRaw: altitude.raw,
         altitudeValue: altitude.value,
         altitudeSign: altitude.sign,
         altitudeUpperFt: altitude.upper,
-        courseDegMag: numberOrUndefined(record.courseDegMag ?? record.courseDeg),
+        courseDegMag,
         holdingAtFix: holdingFixes.has(fix),
         endOfProcedure: Number.isFinite(sequenceValue) && sequenceValue === lastSequence,
         // 与导出器一致的启发式：首腿为航路入航点（EA），其余为终端点（PC）
@@ -92,6 +93,18 @@ function numberOrUndefined(value: unknown) {
   return Number.isFinite(numberValue) ? numberValue : undefined;
 }
 
+function optionalDistance(value: unknown) {
+  const numberValue = numberOrUndefined(value);
+  if (numberValue === undefined || numberValue === 0) return undefined;
+  return numberValue;
+}
+
+function optionalCourse(value: unknown) {
+  const numberValue = numberOrUndefined(value);
+  if (numberValue === undefined || numberValue === 0) return undefined;
+  return numberValue;
+}
+
 interface AltitudeParts {
   raw?: string;
   value?: number;
@@ -105,7 +118,7 @@ function altitudeParts(value: unknown): AltitudeParts {
   if (typeof value !== 'object') return {};
 
   const record = value as Record<string, unknown>;
-  const upperFt = numberOrUndefined(record.upperFt);
+  const upperFt = nonZeroNumberOrUndefined(record.upperFt);
   const rawText = String(record.rawText ?? '').trim();
   if (rawText) {
     const parsed = altitudeFromRaw(rawText);
@@ -134,4 +147,10 @@ function altitudeFromRaw(rawInput: string): AltitudeParts {
     value: Number(match[2]),
     sign: (match[1] as '+' | '-' | '') || '',
   };
+}
+
+function nonZeroNumberOrUndefined(value: unknown) {
+  const numberValue = numberOrUndefined(value);
+  if (numberValue === undefined || numberValue === 0) return undefined;
+  return numberValue;
 }

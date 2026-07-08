@@ -146,4 +146,21 @@ describe('procedure understanding normalizer — DME ARC leg fallback', () => {
     assert.ok(!(withTable.warnings ?? []).some((warning) => /几何合成兜底/.test(String((warning as Record<string, unknown>).message ?? ''))));
     assert.equal(withTable.reviewRequired, false);
   });
+
+  it('parses dual-altitude table constraints without concatenating numbers', () => {
+    const withDualAltitude = normalizeProcedureUnderstandingResult(
+      {
+        ...modelOutput,
+        tableLegs: [
+          { procedureName: 'ADLOV 1G', sequence: 10, pathTerminator: 'IF', toFix: 'ADLOV', altitudeConstraint: '-06000 13000' },
+        ],
+      },
+      group,
+      aiInputPackage,
+    ) as ProcedureUnderstandingResult;
+    const leg = (withDualAltitude.procedures ?? []).find((p) => p.procedureName === 'ADLOV 1G')?.legs?.[0] as Record<string, any>;
+    assert.equal(leg.altitudeConstraint.altitudeFt, 6000);
+    assert.equal(leg.altitudeConstraint.upperFt, 13000);
+    assert.equal(leg.altitudeConstraint.rawText, '-06000 13000');
+  });
 });

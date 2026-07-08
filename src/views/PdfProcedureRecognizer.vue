@@ -486,7 +486,7 @@ const jeppesenProcedureFilter = computed(() => {
 const jeppesenSummaryText = computed(() => {
   const summary = jeppesenCompareResult.value?.summary;
   if (!summary) return '';
-  return `overall ${compareScoreText(summary.overallScore)}, ${summary.matchedLegs}/${summary.totalLegs} legs matched`;
+  return `overall ${compareScoreText(summary.overallScore)}, match ${summary.matchedLegs}, partial ${summary.partialLegs}, total ${summary.totalLegs}`;
 });
 
 const stepSummaries = computed(() => [
@@ -965,7 +965,7 @@ const jeppesenAnalysisText = computed(() => {
     `- Prompt: ${visionRunRecord.value?.promptTemplateId ?? '-'} v${visionRunRecord.value?.promptVersion ?? '-'} | 模型: ${visionRunRecord.value?.model ?? '-'}`,
     `- 腿段来源: ${legFallbackActive.value ? '几何合成兜底（模型未输出 tableLegs，高度缺失为预期）' : '模型 tableLegs'}`,
     `- 报告时间: ${new Date().toISOString()}`,
-    `- 总体匹配率 ${s.overallScore}% | 程序 ${s.matchedProcedures}/${s.totalProcedures} | 腿段 ${s.matchedLegs}/${s.totalLegs} | AI缺失 ${s.missingAiLegs} | AI多出 ${s.missingJeppesenLegs} | 字段差异 ${s.fieldMismatchCount}`,
+    `- 总体匹配率 ${s.overallScore}% | 程序 ${s.matchedProcedures}/${s.totalProcedures} | 完全匹配腿段 ${s.matchedLegs}/${s.totalLegs} | 部分匹配 ${s.partialLegs} | 不匹配 ${s.mismatchedLegs} | AI缺失 ${s.missingAiLegs} | AI多出 ${s.missingJeppesenLegs} | 字段差异 ${s.fieldMismatchCount}`,
     '',
     `## AI 缺失的腿段（424 有、AI 无）: ${missingAi.length}`,
     ...(missingAi.length ? missingAi : ['  - 无']),
@@ -981,7 +981,7 @@ const jeppesenAnalysisText = computed(() => {
   }
   lines.push('', '## 每程序得分');
   for (const procedure of result.procedureResults) {
-    lines.push(`- ${procedure.procedureName} (${procedure.runway}): ${procedure.score}%（匹配 ${procedure.matchedLegs}/${procedure.totalLegs} 腿）`);
+    lines.push(`- ${procedure.procedureName} (${procedure.runway}): ${procedure.score}%（完全匹配 ${procedure.matchedLegs}/${procedure.totalLegs}，部分匹配 ${procedure.partialLegs}，不匹配 ${procedure.mismatchedLegs}）`);
   }
   return lines.join('\n');
 });
@@ -2090,6 +2090,8 @@ function toErrorMessage(value: unknown) {
             <section class="block">
               <h2>对比摘要</h2>
               <div class="summary-cards">
+                <div class="metric-card"><span>部分匹配腿段</span><strong>{{ jeppesenCompareResult.summary.partialLegs }}</strong></div>
+                <div class="metric-card"><span>不匹配腿段</span><strong>{{ jeppesenCompareResult.summary.mismatchedLegs }}</strong></div>
                 <div class="metric-card"><span>总体匹配率</span><strong>{{ compareScoreText(jeppesenCompareResult.summary.overallScore) }}</strong></div>
                 <div class="metric-card"><span>程序数</span><strong>{{ jeppesenCompareResult.summary.totalProcedures }}</strong></div>
                 <div class="metric-card"><span>腿段数</span><strong>{{ jeppesenCompareResult.summary.totalLegs }}</strong></div>
@@ -2110,7 +2112,9 @@ function toErrorMessage(value: unknown) {
               <summary>
                 {{ procedure.procedureName }} / {{ procedure.runway }} -
                 {{ compareScoreText(procedure.score) }} -
-                {{ procedure.matchedLegs }}/{{ procedure.totalLegs }} legs matched
+                {{ procedure.matchedLegs }}/{{ procedure.totalLegs }} legs matched,
+                {{ procedure.partialLegs }} partial,
+                {{ procedure.mismatchedLegs }} mismatch
               </summary>
               <div class="table-wrap">
                 <table class="compare-table">

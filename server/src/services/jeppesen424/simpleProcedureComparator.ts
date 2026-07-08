@@ -31,11 +31,15 @@ export function compareSimpleProcedureLegs(aiLegs: SimpleProcedureLeg[], jeppese
     const sequences = [...new Set([...aiBySequence.keys(), ...jeppesenBySequence.keys()])].sort((a, b) => Number(a) - Number(b));
     const legResults = sequences.map((sequence) => compareLeg(sequence, aiBySequence.get(sequence), jeppesenBySequence.get(sequence)));
     const matchedLegs = legResults.filter((result) => result.status === 'MATCH').length;
+    const partialLegs = legResults.filter((result) => result.status === 'PARTIAL').length;
+    const mismatchedLegs = legResults.filter((result) => result.status === 'MISMATCH').length;
     return {
       procedureName,
       runway,
       totalLegs: legResults.length,
       matchedLegs,
+      partialLegs,
+      mismatchedLegs,
       score: roundScore(average(legResults.map((result) => result.score))),
       legResults,
     };

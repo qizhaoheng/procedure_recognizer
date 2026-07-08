@@ -60,6 +60,13 @@ completeness of chartTexts NEVER excuses dropping tableLegs: both are required i
 response. Each tableLeg row carries procedureName, sequence, pathTerminator, fromFix/toFix,
 courseDeg, distanceNm, altitudeConstraint, turnDirection.
 
+Zero/null discipline:
+- Never use 0 as a placeholder for an unknown optional field. If a distance, course, or
+  altitude is not printed, output null.
+- `distanceNm=0`, `courseDeg=0`, or an altitude value of 0 is almost always wrong for this
+  procedure family unless the source explicitly prints 0.
+- IF legs normally have distanceNm=null. Do not output 0 just because the leg starts at the fix.
+
 A DME ARC STAR transition normally codes as the following leg chain. Use it as a checklist to
 locate each value in the table and chart — every number must come from the source, never from
 this template:
@@ -69,12 +76,16 @@ this template:
 2. `TF` to the DME fix where the entry radial crosses the outer DME distance label (e.g. "13 DME").
    Terminal DME fixes are named `D` + radial (3 digits) + distance letter (A=1NM … K=11NM,
    L=12NM, M=13NM): radial 016 at 13 DME -> `D016M`.
+   The row distance is NOT the DME distance encoded in the fix name. Read distanceNm from the
+   tabular row's distance column. Do not compute it from K/M or from geometry.
 3. `CI` (course to intercept the arc): fixIdentifier=null, courseDegMag = inbound course of the
    entry radial (radial + 180, e.g. RDL016 -> 196), distanceNm = outer DME − arc DME.
 4. One or more `AF` legs following the DME arc around the center VOR/DME:
    fixIdentifier = the D-fix on the exit/lead radial at the ARC radius (e.g. `D340K` for RDL340
    at 11 DME), turnDirection = the arc direction on the chart (L = counterclockwise around the
    center, R = clockwise).
+   The AF row distance must also come from the table row. Do not estimate an arc length from the
+   chart unless the table explicitly omits the value and you mark reviewRequired=true.
 5. MANDATORY ARC SPLIT CHECK: scan the arc on the chart AND the table rows for any intermediate
    radial that carries its own altitude/speed constraint (e.g. an altitude label like "+3400"
    printed where a radial crosses the arc). Each such radial splits the arc: code one AF leg
@@ -88,6 +99,17 @@ Altitude constraints — per transition, no reuse:
   values — transitions frequently have different values (or none at all) on the same leg position.
 - If a leg has no printed constraint, output altitudeConstraint=null — an invented or copied
   value is worse than null.
+- Preserve dual-altitude text exactly when printed. For example, if the row shows
+  `- 06000     13000`, output altitudeConstraint as `-06000 13000` (or the closest exact raw text
+  available), not just `-06000` and not a copied single value.
+- Keep the sign. `-05000`, `+05000`, and `05000` are different constraints.
+- Do not propagate ADLOV's `+3200` to EMTUV/OMKOM/PIMOK. Re-read every transition row.
+
+Course/radial coding:
+- CI legs require courseDeg equal to the inbound course for the entry radial.
+- AF legs require courseDeg only when the table/424-style coding gives a boundary radial/course
+  for that arc leg. If you cannot read it, output null, never 0.
+- TF/IF legs should normally have courseDeg=null unless the table explicitly codes a course.
 
 turnDirection rules:
 - AF legs: REQUIRED — the arc direction.
