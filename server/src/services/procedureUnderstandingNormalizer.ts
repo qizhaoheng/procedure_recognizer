@@ -440,13 +440,19 @@ function normalizeWarning(input: JsonRecord) {
 
 function parseAltitudeConstraint(raw: string | null) {
   if (!raw) return null;
-  const altitudeFt = Number(raw.replace(/[^\d.]/g, ''));
-  const isNumber = Number.isFinite(altitudeFt);
+  const trimmed = raw.trim();
+  const first = trimmed.match(/([+-]?)\s*(\d{3,5})/);
+  const rest = first ? trimmed.slice((first.index ?? 0) + first[0].length) : '';
+  const second = rest.match(/\b(\d{3,5})\b/);
+  const altitudeFt = first ? Number(first[2]) : null;
+  const secondAltitudeFt = second ? Number(second[1]) : null;
+  const isNumber = altitudeFt !== null && Number.isFinite(altitudeFt);
+  const sign = first?.[1] ?? '';
   return {
-    type: raw.startsWith('+') ? 'AT_OR_ABOVE' : raw.startsWith('-') ? 'AT_OR_BELOW' : null,
+    type: sign === '+' ? 'AT_OR_ABOVE' : sign === '-' ? 'AT_OR_BELOW' : null,
     altitudeFt: isNumber ? altitudeFt : null,
-    lowerFt: raw.startsWith('+') && isNumber ? altitudeFt : null,
-    upperFt: raw.startsWith('-') && isNumber ? altitudeFt : null,
+    lowerFt: sign === '+' && isNumber ? altitudeFt : null,
+    upperFt: secondAltitudeFt ?? (sign === '-' && isNumber ? altitudeFt : null),
     rawText: raw,
   };
 }

@@ -527,6 +527,8 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
 
     const totalLegs = procedureResults.reduce((sum, result) => sum + result.totalLegs, 0);
     const matchedLegs = procedureResults.reduce((sum, result) => sum + result.matchedLegs, 0);
+    const partialLegs = procedureResults.reduce((sum, result) => sum + result.partialLegs, 0);
+    const mismatchedLegs = procedureResults.reduce((sum, result) => sum + result.mismatchedLegs, 0);
     const missingAiLegs = procedureResults.reduce((sum, result) => sum + result.legResults.filter((leg) => leg.status === 'MISSING_AI').length, 0);
     const missingJeppesenLegs = procedureResults.reduce((sum, result) => sum + result.legResults.filter((leg) => leg.status === 'MISSING_JEPPESEN').length, 0);
     const fieldMismatchCount = procedureResults.reduce(
@@ -545,6 +547,8 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
         matchedProcedures: procedureResults.filter((result) => result.score >= 99.999).length,
         totalLegs,
         matchedLegs,
+        partialLegs,
+        mismatchedLegs,
         missingAiLegs,
         missingJeppesenLegs,
         fieldMismatchCount,

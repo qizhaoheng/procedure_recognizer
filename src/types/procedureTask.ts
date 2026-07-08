@@ -497,6 +497,8 @@ export interface ProcedureCompareResult {
   runway: string;
   totalLegs: number;
   matchedLegs: number;
+  partialLegs: number;
+  mismatchedLegs: number;
   score: number;
   legResults: LegCompareResult[];
 }
@@ -508,6 +510,8 @@ export interface Jeppesen424CompareResponse {
     matchedProcedures: number;
     totalLegs: number;
     matchedLegs: number;
+    partialLegs: number;
+    mismatchedLegs: number;
     missingAiLegs: number;
     missingJeppesenLegs: number;
     fieldMismatchCount: number;
