@@ -945,11 +945,9 @@ const jeppesenAnalysisText = computed(() => {
   for (const procedure of result.procedureResults) {
     for (const leg of procedure.legResults) {
       if (leg.status === 'MISSING_AI') {
-        const j = leg.jeppesen;
-        missingAi.push(`  - ${procedure.procedureName} seq${leg.sequence}: fix=${analysisValue(j?.fix) === '(空)' ? '(无Fix，可能为CI腿)' : j?.fix} PT=${analysisValue(j?.pathTerminator)} dist=${analysisValue(j?.distanceNm)} alt=${analysisValue(j?.altitudeRaw)}`);
+        missingAi.push(`  - ${procedure.procedureName} seq${leg.sequence}: ${analysisLegSummary(leg.jeppesen)}`);
       } else if (leg.status === 'MISSING_JEPPESEN') {
-        const a = leg.ai;
-        missingJeppesen.push(`  - ${procedure.procedureName} seq${leg.sequence}: fix=${analysisValue(a?.fix)} PT=${analysisValue(a?.pathTerminator)} dist=${analysisValue(a?.distanceNm)} alt=${analysisValue(a?.altitudeRaw)}`);
+        missingJeppesen.push(`  - ${procedure.procedureName} seq${leg.sequence}: ${analysisLegSummary(leg.ai)}`);
       } else {
         for (const field of leg.fieldResults.filter((item) => !item.matched)) {
           const list = fieldDiffs.get(field.field) ?? [];
@@ -991,6 +989,24 @@ const jeppesenAnalysisText = computed(() => {
 function analysisValue(value: unknown) {
   if (value === undefined || value === null || value === '') return '(空)';
   return String(value);
+}
+
+// 缺失腿段的完整字段快照（覆盖全部对比字段），供报告读者判断缺的是什么类型的腿
+function analysisLegSummary(leg?: SimpleProcedureLeg) {
+  if (!leg) return '(无数据)';
+  const fix = leg.fix ? leg.fix : '(无Fix，可能为CI腿)';
+  const parts = [
+    `fix=${fix}`,
+    `PT=${analysisValue(leg.pathTerminator)}`,
+    `turn=${analysisValue(leg.turnDirection)}`,
+    `dist=${analysisValue(leg.distanceNm)}`,
+    `crs=${analysisValue(leg.courseDegMag)}`,
+    `alt=${analysisValue(leg.altitudeRaw)}`,
+    `alt2=${analysisValue(leg.altitudeUpperFt)}`,
+    `nav=${analysisValue(leg.recommendedNavaid)}`,
+    `标记=${legMarkers(leg)}`,
+  ];
+  return parts.join(' ');
 }
 
 async function copyJeppesenAnalysis() {
