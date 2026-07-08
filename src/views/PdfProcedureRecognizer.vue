@@ -2113,6 +2113,8 @@ function toErrorMessage(value: unknown) {
                       <th>424 Alt2</th>
                       <th>AI Crs</th>
                       <th>424 Crs</th>
+                      <th>AI Nav</th>
+                      <th>424 Nav</th>
                       <th>AI 标记</th>
                       <th>424 标记</th>
                       <th>Score</th>
@@ -2135,6 +2137,8 @@ function toErrorMessage(value: unknown) {
                       <td>{{ valueText(leg.jeppesen?.altitudeUpperFt) }}</td>
                       <td>{{ valueText(leg.ai?.courseDegMag) }}</td>
                       <td>{{ valueText(leg.jeppesen?.courseDegMag) }}</td>
+                      <td>{{ leg.ai?.recommendedNavaid || '-' }}</td>
+                      <td>{{ leg.jeppesen?.recommendedNavaid || '-' }}</td>
                       <td>{{ legMarkers(leg.ai) }}</td>
                       <td>{{ legMarkers(leg.jeppesen) }}</td>
                       <td>{{ compareScoreText(leg.score) }}</td>

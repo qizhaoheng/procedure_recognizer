@@ -73,6 +73,16 @@ function primaryRecord(leg: SimpleProcedureLeg, context: LegContext) {
   if ((pathTerminator === 'AF' || pathTerminator === 'CI') && leg.courseDegMag !== undefined) {
     put(chars, 70, String(Math.round(leg.courseDegMag * 10)).padStart(4, '0'));
   }
+  // 推荐导航台：AF/CI 在 51-56 列（导航台+区域），IF 在 107-110/113-115 列（导航台+区域+D）
+  if (leg.recommendedNavaid) {
+    if (pathTerminator === 'AF' || pathTerminator === 'CI') {
+      put(chars, 50, leg.recommendedNavaid.slice(0, 4));
+      put(chars, 54, context.region);
+    } else if (pathTerminator === 'IF') {
+      put(chars, 106, leg.recommendedNavaid.slice(0, 4));
+      put(chars, 112, `${context.region}D`);
+    }
+  }
   if (leg.altitudeValue !== undefined) {
     const sign = leg.altitudeSign ?? (leg.altitudeRaw?.startsWith('+') ? '+' : leg.altitudeRaw?.startsWith('-') ? '-' : '');
     if (sign) put(chars, 82, sign);

@@ -469,6 +469,7 @@ export interface SimpleProcedureLeg {
   holdingAtFix?: boolean;
   endOfProcedure?: boolean;
   fixSection?: string;
+  recommendedNavaid?: string;
   source: 'AI' | 'JEPPESEN_424';
   rawRecord?: string;
 }

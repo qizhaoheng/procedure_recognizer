@@ -55,12 +55,14 @@ describe('Jeppesen 424 text compare MVP', () => {
     assert.equal(entry?.holdingAtFix, true);
     assert.equal(entry?.fixSection, 'EA');
     assert.equal(entry?.courseDegMag, undefined);
+    assert.equal(entry?.recommendedNavaid, 'VJB');
 
     const arc = byKey.get('ADLOV 1G|040');
     assert.equal(arc?.pathTerminator, 'AF');
     assert.equal(arc?.turnDirection, 'L');
     assert.equal(arc?.courseDegMag, 16);
     assert.equal(arc?.fixSection, 'PC');
+    assert.equal(arc?.recommendedNavaid, 'VJB');
 
     const final = byKey.get('ADLOV 1G|050');
     assert.equal(final?.endOfProcedure, true);
