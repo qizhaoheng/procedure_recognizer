@@ -34,6 +34,7 @@ import type {
   ProcedureTask,
   SendMode,
   SendPolicy,
+  SimpleProcedureLeg,
   SupportingInfoRef,
 } from '../types/procedureTask';
 
@@ -931,8 +932,82 @@ async function compareJeppesen424() {
   }
 }
 
+// ---------- 对比分析结果（供 AI 完善提示词的结构化报告） ----------
+
+const jeppesenAnalysisText = computed(() => {
+  const result = jeppesenCompareResult.value;
+  const group = selectedGroup.value;
+  if (!result || !group) return '';
+
+  const missingAi: string[] = [];
+  const missingJeppesen: string[] = [];
+  const fieldDiffs = new Map<string, string[]>();
+  for (const procedure of result.procedureResults) {
+    for (const leg of procedure.legResults) {
+      if (leg.status === 'MISSING_AI') {
+        const j = leg.jeppesen;
+        missingAi.push(`  - ${procedure.procedureName} seq${leg.sequence}: fix=${analysisValue(j?.fix) === '(空)' ? '(无Fix，可能为CI腿)' : j?.fix} PT=${analysisValue(j?.pathTerminator)} dist=${analysisValue(j?.distanceNm)} alt=${analysisValue(j?.altitudeRaw)}`);
+      } else if (leg.status === 'MISSING_JEPPESEN') {
+        const a = leg.ai;
+        missingJeppesen.push(`  - ${procedure.procedureName} seq${leg.sequence}: fix=${analysisValue(a?.fix)} PT=${analysisValue(a?.pathTerminator)} dist=${analysisValue(a?.distanceNm)} alt=${analysisValue(a?.altitudeRaw)}`);
+      } else {
+        for (const field of leg.fieldResults.filter((item) => !item.matched)) {
+          const list = fieldDiffs.get(field.field) ?? [];
+          list.push(`  - ${procedure.procedureName} seq${leg.sequence} ${leg.ai?.fix || leg.jeppesen?.fix || ''}: AI=${analysisValue(field.aiValue)} / 424=${analysisValue(field.jeppesenValue)}`);
+          fieldDiffs.set(field.field, list);
+        }
+      }
+    }
+  }
+
+  const s = result.summary;
+  const lines: string[] = [
+    '# Jeppesen 424 对比分析报告',
+    `- 程序包: ${group.packageName || group.groupName}`,
+    `- Prompt: ${visionRunRecord.value?.promptTemplateId ?? '-'} v${visionRunRecord.value?.promptVersion ?? '-'} | 模型: ${visionRunRecord.value?.model ?? '-'}`,
+    `- 腿段来源: ${legFallbackActive.value ? '几何合成兜底（模型未输出 tableLegs，高度缺失为预期）' : '模型 tableLegs'}`,
+    `- 报告时间: ${new Date().toISOString()}`,
+    `- 总体匹配率 ${s.overallScore}% | 程序 ${s.matchedProcedures}/${s.totalProcedures} | 腿段 ${s.matchedLegs}/${s.totalLegs} | AI缺失 ${s.missingAiLegs} | AI多出 ${s.missingJeppesenLegs} | 字段差异 ${s.fieldMismatchCount}`,
+    '',
+    `## AI 缺失的腿段（424 有、AI 无）: ${missingAi.length}`,
+    ...(missingAi.length ? missingAi : ['  - 无']),
+    '',
+    `## AI 多出的腿段（AI 有、424 无）: ${missingJeppesen.length}`,
+    ...(missingJeppesen.length ? missingJeppesen : ['  - 无']),
+    '',
+    '## 字段差异（按字段归类）',
+  ];
+  if (!fieldDiffs.size) lines.push('  - 无');
+  for (const [field, items] of fieldDiffs) {
+    lines.push(`- ${field}: ${items.length} 处`, ...items);
+  }
+  lines.push('', '## 每程序得分');
+  for (const procedure of result.procedureResults) {
+    lines.push(`- ${procedure.procedureName} (${procedure.runway}): ${procedure.score}%（匹配 ${procedure.matchedLegs}/${procedure.totalLegs} 腿）`);
+  }
+  return lines.join('\n');
+});
+
+function analysisValue(value: unknown) {
+  if (value === undefined || value === null || value === '') return '(空)';
+  return String(value);
+}
+
+async function copyJeppesenAnalysis() {
+  if (!jeppesenAnalysisText.value) return;
+  await navigator.clipboard.writeText(jeppesenAnalysisText.value);
+  message.value = '对比分析结果已复制';
+}
+
 function statusClass(status: string) {
   return status.toLowerCase().replace(/_/g, '-');
+}
+
+// 汇总 424 扩展标记：Fix section（EA/PC）、等待（H）、末段腿（EE）
+function legMarkers(leg?: SimpleProcedureLeg) {
+  if (!leg) return '-';
+  const markers = [leg.fixSection, leg.holdingAtFix ? 'H' : '', leg.endOfProcedure ? 'EE' : ''].filter(Boolean);
+  return markers.join(' ') || '-';
 }
 
 function legDiffTitle(leg: LegCompareResult) {
@@ -2034,6 +2109,12 @@ function toErrorMessage(value: unknown) {
                       <th>424 Dist</th>
                       <th>AI Alt</th>
                       <th>424 Alt</th>
+                      <th>AI Alt2</th>
+                      <th>424 Alt2</th>
+                      <th>AI Crs</th>
+                      <th>424 Crs</th>
+                      <th>AI 标记</th>
+                      <th>424 标记</th>
                       <th>Score</th>
                       <th>Status</th>
                       <th>差异字段</th>
@@ -2050,6 +2131,12 @@ function toErrorMessage(value: unknown) {
                       <td>{{ valueText(leg.jeppesen?.distanceNm) }}</td>
                       <td>{{ leg.ai?.altitudeRaw || valueText(leg.ai?.altitudeValue) }}</td>
                       <td>{{ leg.jeppesen?.altitudeRaw || valueText(leg.jeppesen?.altitudeValue) }}</td>
+                      <td>{{ valueText(leg.ai?.altitudeUpperFt) }}</td>
+                      <td>{{ valueText(leg.jeppesen?.altitudeUpperFt) }}</td>
+                      <td>{{ valueText(leg.ai?.courseDegMag) }}</td>
+                      <td>{{ valueText(leg.jeppesen?.courseDegMag) }}</td>
+                      <td>{{ legMarkers(leg.ai) }}</td>
+                      <td>{{ legMarkers(leg.jeppesen) }}</td>
                       <td>{{ compareScoreText(leg.score) }}</td>
                       <td><span class="status-pill" :class="statusClass(leg.status)">{{ leg.status }}</span></td>
                       <td>{{ legDiffTitle(leg) }}</td>
@@ -2063,6 +2150,19 @@ function toErrorMessage(value: unknown) {
                 <pre>{{ procedure.legResults.map((leg) => leg.jeppesen?.rawRecord).filter(Boolean).join('\n\n') || '-' }}</pre>
               </details>
             </details>
+
+            <section class="block">
+              <div class="panel-head">
+                <div>
+                  <h2>对比分析结果</h2>
+                  <p class="hint">按差异类型归类的结构化报告，复制后发给 AI（Claude）用于完善识别提示词。</p>
+                </div>
+                <button type="button" @click="copyJeppesenAnalysis">
+                  <Clipboard :size="15" /> 复制分析结果
+                </button>
+              </div>
+              <pre>{{ jeppesenAnalysisText }}</pre>
+            </section>
           </template>
 
           <details class="raw-evidence" @toggle="onJeppesen424ExportToggle">

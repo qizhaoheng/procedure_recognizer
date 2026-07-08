@@ -1,13 +1,21 @@
 import type { FieldCompareResult, LegCompareResult, ProcedureCompareResult, SimpleProcedureLeg } from './types';
 
 const DISTANCE_TOLERANCE_NM = 0.1;
+const COURSE_TOLERANCE_DEG = 1;
 
 const FIELD_WEIGHTS = {
-  fix: 35,
-  pathTerminator: 25,
-  distanceNm: 20,
-  altitudeValue: 15,
+  fix: 24,
+  pathTerminator: 19,
+  distanceNm: 14,
+  altitudeValue: 10,
+  courseDegMag: 10,
+  altitudeSign: 5,
+  altitudeUpperFt: 5,
   turnDirection: 5,
+  recommendedNavaid: 3,
+  fixSection: 2,
+  holdingAtFix: 2,
+  endOfProcedure: 1,
 };
 
 export function compareSimpleProcedureLegs(aiLegs: SimpleProcedureLeg[], jeppesenLegs: SimpleProcedureLeg[]): ProcedureCompareResult[] {
@@ -49,6 +57,15 @@ function compareLeg(sequence: string, ai: SimpleProcedureLeg | undefined, jeppes
     compareField('turnDirection', ai.turnDirection || '', jeppesen.turnDirection || '', sameOptionalText(ai.turnDirection, jeppesen.turnDirection), 'WARNING'),
     compareField('distanceNm', ai.distanceNm, jeppesen.distanceNm, sameOptionalDistance(ai.distanceNm, jeppesen.distanceNm), 'WARNING'),
     compareField('altitudeValue', ai.altitudeValue, jeppesen.altitudeValue, sameOptionalNumber(ai.altitudeValue, jeppesen.altitudeValue), 'ERROR'),
+    compareField('altitudeSign', ai.altitudeSign || '', jeppesen.altitudeSign || '', sameOptionalText(ai.altitudeSign, jeppesen.altitudeSign), 'ERROR'),
+    compareField('altitudeUpperFt', ai.altitudeUpperFt, jeppesen.altitudeUpperFt, sameOptionalNumber(ai.altitudeUpperFt, jeppesen.altitudeUpperFt), 'WARNING'),
+    // Jeppesen 只在 CI/AF 腿编码磁航向；TF/IF 腿上 AI 有航向而 424 留空不算差异
+    compareField('courseDegMag', ai.courseDegMag, jeppesen.courseDegMag, courseMatches(ai, jeppesen), 'WARNING'),
+    // 推荐导航台只在 IF/AF 腿上要求（本例为弧心 VJB）
+    compareField('recommendedNavaid', ai.recommendedNavaid ?? '', jeppesen.recommendedNavaid ?? '', navaidMatches(ai, jeppesen), 'WARNING'),
+    compareField('fixSection', ai.fixSection ?? '', jeppesen.fixSection ?? '', sameOptionalText(ai.fixSection, jeppesen.fixSection), 'WARNING'),
+    compareField('holdingAtFix', ai.holdingAtFix ?? false, jeppesen.holdingAtFix ?? false, (ai.holdingAtFix ?? false) === (jeppesen.holdingAtFix ?? false), 'WARNING'),
+    compareField('endOfProcedure', ai.endOfProcedure ?? false, jeppesen.endOfProcedure ?? false, (ai.endOfProcedure ?? false) === (jeppesen.endOfProcedure ?? false), 'WARNING'),
   ];
   const score = scoreFields(fieldResults);
   return {
@@ -109,6 +126,27 @@ function sameOptionalNumber(a: number | undefined, b: number | undefined) {
   if (a === undefined && b === undefined) return true;
   if (a === undefined || b === undefined) return false;
   return a === b;
+}
+
+function navaidMatches(ai: SimpleProcedureLeg, jeppesen: SimpleProcedureLeg) {
+  const pathTerminator = String(jeppesen.pathTerminator ?? ai.pathTerminator ?? '').toUpperCase();
+  const navaidCoded = pathTerminator === 'IF' || pathTerminator === 'AF' || jeppesen.recommendedNavaid !== undefined;
+  if (!navaidCoded) return true;
+  return sameOptionalText(ai.recommendedNavaid, jeppesen.recommendedNavaid);
+}
+
+function courseMatches(ai: SimpleProcedureLeg, jeppesen: SimpleProcedureLeg) {
+  const pathTerminator = String(jeppesen.pathTerminator ?? ai.pathTerminator ?? '').toUpperCase();
+  const courseCoded = pathTerminator === 'CI' || pathTerminator === 'AF' || jeppesen.courseDegMag !== undefined;
+  if (!courseCoded) return true;
+  return sameOptionalCourse(ai.courseDegMag, jeppesen.courseDegMag);
+}
+
+function sameOptionalCourse(a: number | undefined, b: number | undefined) {
+  if (a === undefined && b === undefined) return true;
+  if (a === undefined || b === undefined) return false;
+  const diff = Math.abs(a - b) % 360;
+  return Math.min(diff, 360 - diff) <= COURSE_TOLERANCE_DEG;
 }
 
 function average(values: number[]) {

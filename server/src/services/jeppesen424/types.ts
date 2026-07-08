@@ -13,6 +13,20 @@ export interface SimpleProcedureLeg {
   distanceNm?: number;
   altitudeRaw?: string;
   altitudeValue?: number;
+  /** 高度限制符号（424 第 83 列）：+ = AT_OR_ABOVE，- = AT_OR_BELOW，'' = AT/未标 */
+  altitudeSign?: '+' | '-' | '';
+  /** 第二高度（424 第 95-99 列，如入航段的 13000） */
+  altitudeUpperFt?: number;
+  /** 磁航向（424 第 71-74 列 ×10，CI 的截获航向 / AF 的边界径向） */
+  courseDegMag?: number;
+  /** 航路点描述含 H（第 43 列）：该 Fix 有等待航线 */
+  holdingAtFix?: boolean;
+  /** 航路点描述含第二个 E（1EE）：程序末段腿 */
+  endOfProcedure?: boolean;
+  /** Fix 的 section/subsection（第 37-38 列）：EA=航路点，PC=终端点 */
+  fixSection?: string;
+  /** 推荐导航台（AF/CI 在 51-54 列，IF 在 107-110 列，如弧心 VJB） */
+  recommendedNavaid?: string;
   source: SimpleLegSource;
   rawRecord?: string;
 }

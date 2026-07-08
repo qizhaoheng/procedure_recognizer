@@ -24,6 +24,13 @@ interface PartialLeg {
   distanceNm?: number;
   altitudeRaw?: string;
   altitudeValue?: number;
+  altitudeSign?: '+' | '-' | '';
+  altitudeUpperFt?: number;
+  courseDegMag?: number;
+  holdingAtFix?: boolean;
+  endOfProcedure?: boolean;
+  fixSection?: string;
+  recommendedNavaid?: string;
   rawRecords: string[];
 }
 
@@ -58,6 +65,16 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       const altitude = extractAltitude(line, leg.recordText);
       current.altitudeRaw = altitude?.raw ?? current.altitudeRaw;
       current.altitudeValue = altitude?.value ?? current.altitudeValue;
+      current.altitudeSign = altitude ? altitudeSignOf(altitude.raw) : current.altitudeSign;
+      // 列位读取仅对全宽（132 列）记录生效，短格式/变形粘贴不做定位提取
+      if (line.length >= 120) {
+        current.altitudeUpperFt = extractSecondAltitude(line) ?? current.altitudeUpperFt;
+        current.courseDegMag = extractCourse(line) ?? current.courseDegMag;
+        current.holdingAtFix = line[42] === 'H' || current.holdingAtFix;
+        current.recommendedNavaid = extractRecommendedNavaid(line) ?? current.recommendedNavaid;
+      }
+      current.endOfProcedure = leg.endOfProcedure || current.endOfProcedure;
+      current.fixSection = leg.fixSection ?? current.fixSection;
     }
 
     if (leg.recordPart === '2P') {
@@ -80,6 +97,13 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       distanceNm: item.distanceNm,
       altitudeRaw: item.altitudeRaw,
       altitudeValue: item.altitudeValue,
+      altitudeSign: item.altitudeSign,
+      altitudeUpperFt: item.altitudeUpperFt,
+      courseDegMag: item.courseDegMag,
+      holdingAtFix: item.holdingAtFix ?? false,
+      endOfProcedure: item.endOfProcedure ?? false,
+      fixSection: item.fixSection,
+      recommendedNavaid: item.recommendedNavaid,
       source: 'JEPPESEN_424',
       rawRecord: item.rawRecords.join('\n'),
     }));
@@ -103,12 +127,16 @@ function parseLegRecord(line: string, routeKey: string) {
   const afterRoute = line.slice(line.indexOf(routeKey) + routeKey.length);
   const candidates = [afterRoute, line];
   for (const candidate of candidates) {
-    const match = candidate.match(/(\d{3})([A-Z0-9]{5})[A-Z0-9]{4}(1E+|2P)(?:\b|$)/);
+    const match = candidate.match(/(\d{3})([A-Z0-9]{5})([A-Z0-9]{4})(1E+|2P)(?:\b|$)/);
     if (match) {
       return {
         sequence: match[1],
         fix: match[2],
-        recordPart: match[3].startsWith('1E') ? '1E' as const : '2P' as const,
+        // 4 字符 = ICAO 区域(2) + section/subsection(2)，如 WMEA / WMPC
+        fixSection: match[3].slice(2),
+        recordPart: match[4].startsWith('1E') ? '1E' as const : '2P' as const,
+        // 1EE = 航路点描述第二个 E，标记程序末段腿
+        endOfProcedure: match[4].startsWith('1EE'),
         recordText: match[0],
       };
     }
@@ -146,6 +174,41 @@ function extractAltitude(line: string, recordText: string) {
     .filter((value) => Number(value) >= 1000 && Number(value) <= 60000);
   const raw = candidates.at(-1);
   return raw ? { raw, value: Number(raw) } : undefined;
+}
+
+function altitudeSignOf(raw: string | undefined): '+' | '-' | '' {
+  if (raw?.startsWith('+')) return '+';
+  if (raw?.startsWith('-')) return '-';
+  return '';
+}
+
+// 以下两个字段按 132 列定宽的列位读取（短格式/粘贴变形的行读不到则为 undefined）。
+// 磁航向：第 71-74 列（0 基 70-73），×10 存储，如 CI 的 1960 = 196.0°。
+function extractCourse(line: string) {
+  const value = positionalDigits(line, 70, 4);
+  if (value === undefined) return undefined;
+  const course = value / 10;
+  return course <= 360 ? course : undefined;
+}
+
+// 第二高度：第 95-99 列（0 基 94-98），如入航段的 13000。
+function extractSecondAltitude(line: string) {
+  const value = positionalDigits(line, 94, 5);
+  return value !== undefined && value >= 1000 && value <= 60000 ? value : undefined;
+}
+
+// 推荐导航台：AF/CI 腿在第 51-54 列（0 基 50-53），IF 腿在第 107-110 列（0 基 106-109）。
+function extractRecommendedNavaid(line: string) {
+  const primary = line.slice(50, 54).trim();
+  if (/^[A-Z]{2,4}$/.test(primary)) return primary;
+  const centerFix = line.slice(106, 110).trim();
+  if (/^[A-Z]{2,4}$/.test(centerFix)) return centerFix;
+  return undefined;
+}
+
+function positionalDigits(line: string, start: number, length: number) {
+  const slice = line.slice(start, start + length);
+  return slice.length === length && /^\d+$/.test(slice) ? Number(slice) : undefined;
 }
 
 function extractDistance(line: string, recordText: string) {
