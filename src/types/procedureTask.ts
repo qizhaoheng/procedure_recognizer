@@ -1,7 +1,7 @@
 import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
 
-export type TaskStatus = 'UPLOADED' | 'PARSING' | 'PARSED' | 'GROUPED' | 'AI_RUNNING' | 'AI_COMPLETED' | 'ERROR';
-export type GroupStatus = 'GROUPED' | 'CANDIDATES_EXTRACTED' | 'AI_READY' | 'AI_RUNNING' | 'AI_COMPLETED' | 'ERROR';
+export type TaskStatus = 'UPLOADED' | 'PARSING' | 'PARSED' | 'GROUPED' | 'AI_RUNNING' | 'AI_COMPLETED' | 'AI_CANCELLED' | 'ERROR';
+export type GroupStatus = 'GROUPED' | 'CANDIDATES_EXTRACTED' | 'AI_READY' | 'AI_RUNNING' | 'AI_COMPLETED' | 'AI_CANCELLED' | 'ERROR';
 export type ChartRole = 'CHART' | 'TABULAR_DESCRIPTION' | 'WAYPOINT_COORDINATES' | 'MINIMA_TABLE' | 'CHART_INDEX' | 'BLANK' | 'SUPPORT' | 'OTHER' | 'UNKNOWN';
 export type ProcedureCategory = 'ARRIVAL' | 'DEPARTURE' | 'APPROACH' | 'AERODROME' | 'AIRSPACE' | 'UNKNOWN';
 export type NavigationType = 'RNAV' | 'RNP' | 'RNP_AR' | 'ILS' | 'ILS_LOC' | 'LOC' | 'VOR' | 'NDB' | 'DME_ARC' | 'RADAR' | 'CONVENTIONAL' | 'UNKNOWN';
@@ -133,7 +133,7 @@ export interface ProcedureGroup {
 export interface PackageWorkflowState {
   groupingReady: boolean;
   aiRequestReady: boolean;
-  recognitionStatus: 'NOT_STARTED' | 'RUNNING' | 'COMPLETED' | 'ERROR';
+  recognitionStatus: 'NOT_STARTED' | 'RUNNING' | 'COMPLETED' | 'CANCELLED' | 'ERROR';
   geojsonStatus: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'GENERATED_WITHOUT_GEOMETRY' | 'ERROR';
   recognitionSummary?: {
     procedureCount: number;

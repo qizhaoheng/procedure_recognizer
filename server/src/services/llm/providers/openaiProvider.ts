@@ -71,7 +71,7 @@ async function callOpenAiResponses(request: VisionRecognitionRequest, config: Ll
         },
       },
     }),
-  }, config.timeoutMs);
+  }, config.timeoutMs, request.abortSignal);
 
   if (!response.ok) throw await readErrorResponse(response);
 
@@ -122,7 +122,7 @@ async function callOpenAiChatCompletions(
         },
       ],
     }),
-  }, config.timeoutMs);
+  }, config.timeoutMs, request.abortSignal);
 
   if (!response.ok) throw await readErrorResponse(response);
 

@@ -5,15 +5,25 @@ export function endpointUrl(config: LlmRuntimeConfig, path: string) {
   return `${config.baseUrl.replace(/\/$/, '')}${path}`;
 }
 
-export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number) {
+export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs: number, externalSignal?: AbortSignal) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error(`LLM_TIMEOUT_MS elapsed after ${timeoutMs}ms.`)), timeoutMs);
+  const abortFromExternal = () => controller.abort(externalSignal?.reason ?? new Error('LLM request was cancelled.'));
+  if (externalSignal?.aborted) abortFromExternal();
+  else externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
     const message = summarizeError(error);
     const raw = describeError(error);
     const code = errorCode(error);
+    if (externalSignal?.aborted) {
+      throw new LlmApiError(
+        'CANCELLED',
+        `LLM request was cancelled. ${message}`,
+        raw,
+      );
+    }
     if ((error instanceof Error && error.name === 'AbortError') || controller.signal.aborted || isUndiciTimeout(code)) {
       throw new LlmApiError(
         'TIMEOUT',
@@ -24,6 +34,7 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
     throw new LlmApiError('NETWORK_ERROR', `LLM network request failed. ${message}`, raw);
   } finally {
     clearTimeout(timeout);
+    externalSignal?.removeEventListener('abort', abortFromExternal);
   }
 }
 

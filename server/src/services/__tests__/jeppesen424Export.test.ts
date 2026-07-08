@@ -63,6 +63,49 @@ describe('Jeppesen 424 export', () => {
     assert.equal(result.matchedLegs, aiLegs.length);
   });
 
+  it('preserves RNAV STAR entry coding and strips inferred TF turns', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'WMKJ',
+      runway: 'RW16',
+      packageType: 'STAR',
+      navigationType: 'RNAV',
+      procedures: [
+        {
+          procedureName: 'ADLOV 1E',
+          runway: 'RW16',
+          legs: [
+            {
+              sequence: 10,
+              fixIdentifier: 'ADLOV',
+              pathTerminator: 'IF',
+              altitudeConstraint: { rawText: '-06000 13000' },
+              holdingAtFix: true,
+              recommendedNavaid: 'VJB',
+            },
+            {
+              sequence: 20,
+              fixIdentifier: 'OSRUP',
+              pathTerminator: 'TF',
+              turnDirection: 'R',
+              distanceNm: 6,
+              altitudeConstraint: { rawText: '+02000' },
+            },
+          ],
+        },
+      ],
+    });
+
+    const exported = simpleLegsTo424Text(aiLegs, { airportIcao: 'WMKJ' });
+    const [entry, final] = parseJeppesen424Text(exported);
+
+    assert.equal(entry.holdingAtFix, true);
+    assert.equal(entry.altitudeSign, '-');
+    assert.equal(entry.altitudeValue, 6000);
+    assert.equal(entry.altitudeUpperFt, 13000);
+    assert.equal(entry.recommendedNavaid, 'VJB');
+    assert.equal(final.turnDirection, '');
+  });
+
   it('marks DME ARC (1G) procedures with the DG qualifier and turn direction', () => {
     const aiLegs = aiProcedureToSimpleLegs({
       airportIcao: 'WMKJ',

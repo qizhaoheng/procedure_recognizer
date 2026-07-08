@@ -132,6 +132,10 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
       airportIcao: 'WMKJ',
       runway: 'RWY16',
       navigationType: 'RNAV',
+      chartTexts: [
+        { text: 'ADLOV 6000', role: 'ALTITUDE', region: 'MAIN_CHART', usedInProcedure: true, confidence: 0.9 },
+        { text: 'GOVNU (IAF) 3500', role: 'FIX', region: 'MAIN_CHART', usedInProcedure: true, confidence: 0.9 },
+      ],
       fixes: [
         { identifier: 'ADLOV', latitude: 2.04, longitude: 103.79 },
         { identifier: 'GOVNU', latitude: 1.85, longitude: 103.71 },
@@ -141,8 +145,8 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
           procedureName: 'ADLOV 1E',
           runway: 'RWY16',
           legs: [
-            { sequence: 10, pathTerminator: 'IF', fixIdentifier: 'ADLOV' },
-            { sequence: 20, pathTerminator: 'TF', fixIdentifier: 'GOVNU', distanceNm: 14.5 },
+            { sequence: 10, pathTerminator: 'IF', fixIdentifier: 'ADLOV', altitudeConstraint: { rawText: '-6000', altitudeFt: 6000 } },
+            { sequence: 20, pathTerminator: 'TF', fixIdentifier: 'GOVNU', courseDegMag: 198, distanceNm: 14.5, altitudeConstraint: { rawText: '+3500', altitudeFt: 3500 }, remarks: 'airway A224' },
           ],
         },
       ],
@@ -152,6 +156,17 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assert.ok(leg, 'leg feature missing');
     assert.equal(leg?.properties?.coordinate_quality, 'derived_from_fix_coordinates');
     assert.equal(leg?.properties?.review_required, false);
+    assert.equal(leg?.properties?.course_deg_mag, 198);
+    assert.equal(leg?.properties?.distance_nm, 14.5);
+    assert.equal(leg?.properties?.airway_ref, undefined);
+    const entryFix = geojson.features.find((f) => f.properties?.object_type === 'ProcedureFix' && f.properties?.ident === 'ADLOV');
+    assert.equal(entryFix?.properties?.chart_altitude_ft, 6000);
+    assert.equal(entryFix?.properties?.chart_fix_role, null);
+    assert.equal(entryFix?.properties?.procedure_labels, undefined);
+    const commonFix = geojson.features.find((f) => f.properties?.object_type === 'ProcedureFix' && f.properties?.ident === 'GOVNU');
+    assert.equal(commonFix?.properties?.chart_fix_role, 'IAF');
+    assert.equal(commonFix?.properties?.chart_altitude_ft, 3500);
+    assert.equal(commonFix?.properties?.final_track_mag, 160);
     const track = geojson.features.find((f) => f.properties?.object_type === 'ProcedureTrack');
     assert.equal(track?.properties?.coordinate_quality, 'derived_from_fix_coordinates');
   });

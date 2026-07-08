@@ -1,6 +1,6 @@
 import type { FeatureCollection, Geometry, GeoJsonProperties } from 'geojson';
 
-export type TaskStatus = 'UPLOADED' | 'PARSING' | 'PARSED' | 'GROUPED' | 'AI_RUNNING' | 'AI_COMPLETED' | 'ERROR';
+export type TaskStatus = 'UPLOADED' | 'PARSING' | 'PARSED' | 'GROUPED' | 'AI_RUNNING' | 'AI_COMPLETED' | 'AI_CANCELLED' | 'ERROR';
 
 export type ChartRole =
   | 'CHART'
@@ -29,7 +29,7 @@ export type NavigationType =
   | 'CONVENTIONAL'
   | 'UNKNOWN';
 
-export type GroupStatus = 'GROUPED' | 'CANDIDATES_EXTRACTED' | 'AI_READY' | 'AI_RUNNING' | 'AI_COMPLETED' | 'ERROR';
+export type GroupStatus = 'GROUPED' | 'CANDIDATES_EXTRACTED' | 'AI_READY' | 'AI_RUNNING' | 'AI_COMPLETED' | 'AI_CANCELLED' | 'ERROR';
 export type PackageType = 'STAR' | 'SID' | 'APPROACH' | 'AERODROME' | 'AIRSPACE' | 'OTHER';
 export type PackageSource = 'AD_2_24_CHART_INDEX' | 'PAGE_HEADER_RULE' | 'TITLE_MATCH_RULE' | 'MANUAL';
 export type SupportType =

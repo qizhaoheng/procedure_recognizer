@@ -4,6 +4,8 @@ import type { SimpleProcedureLeg } from './types';
 export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderstandingResult | undefined): SimpleProcedureLeg[] {
   if (!procedureUnderstanding?.procedures?.length) return [];
 
+  const isRnavStar = normalizedText(procedureUnderstanding.packageType) === 'STAR'
+    && normalizedText(procedureUnderstanding.navigationType) === 'RNAV';
   const holdingFixes = new Set(
     (procedureUnderstanding.holdings ?? [])
       .map((holding) => normalizedText((holding as Record<string, unknown>).fixIdentifier ?? (holding as Record<string, unknown>).fix ?? ''))
@@ -37,6 +39,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
       const recommendedNavaid = normalizedText(record.recommendedNavaid ?? '')
         || (pathTerminator === 'AF' || pathTerminator === 'IF' ? arcCenter : undefined);
       const courseDegMag = optionalCourse(record.courseDegMag ?? record.courseDeg);
+      const holdingAtFix = Boolean(record.holdingAtFix) || holdingFixes.has(fix);
       return {
         procedureName,
         runway,
@@ -44,14 +47,14 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         sequence: normalizeSequence(record.sequence),
         fix,
         pathTerminator,
-        turnDirection: normalizeTurn(record.turnDirection),
+        turnDirection: cleanTurnDirection(record.turnDirection, pathTerminator, isRnavStar),
         distanceNm: optionalDistance(record.distanceNm),
         altitudeRaw: altitude.raw,
         altitudeValue: altitude.value,
         altitudeSign: altitude.sign,
         altitudeUpperFt: altitude.upper,
         courseDegMag,
-        holdingAtFix: holdingFixes.has(fix),
+        holdingAtFix,
         endOfProcedure: Number.isFinite(sequenceValue) && sequenceValue === lastSequence,
         // 与导出器一致的启发式：首腿为航路入航点（EA），其余为终端点（PC）
         fixSection: Number.isFinite(sequenceValue) && sequenceValue === firstSequence ? 'EA' : 'PC',
@@ -86,6 +89,12 @@ function normalizeTurn(value: unknown): 'L' | 'R' | '' {
   if (text === 'L' || text === 'LEFT') return 'L';
   if (text === 'R' || text === 'RIGHT') return 'R';
   return '';
+}
+
+function cleanTurnDirection(value: unknown, pathTerminator: string, isRnavStar: boolean): 'L' | 'R' | '' {
+  const turn = normalizeTurn(value);
+  if (isRnavStar && pathTerminator === 'TF') return '';
+  return turn;
 }
 
 function numberOrUndefined(value: unknown) {
@@ -140,12 +149,13 @@ function altitudeParts(value: unknown): AltitudeParts {
 
 function altitudeFromRaw(rawInput: string): AltitudeParts {
   const raw = rawInput.trim().toUpperCase();
-  const match = raw.match(/([+-]?)\s*(\d{3,5})/);
+  const match = raw.match(/([+-]?)\s*(\d{3,5})(?:\s+(\d{3,5}))?/);
   if (!match) return { raw };
   return {
     raw: `${match[1] || ''}${match[2]}`,
     value: Number(match[2]),
     sign: (match[1] as '+' | '-' | '') || '',
+    upper: match[3] && Number(match[3]) !== Number(match[2]) ? Number(match[3]) : undefined,
   };
 }
 

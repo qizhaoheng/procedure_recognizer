@@ -1,6 +1,6 @@
 import type { PromptTemplate } from './promptTypes';
 
-const VERSION = '1.3.5';
+const VERSION = '1.3.9';
 const DATE = '2026-07-07T00:00:00.000Z';
 
 export const PROMPT_TEMPLATES: PromptTemplate[] = [
