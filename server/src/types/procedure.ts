@@ -469,6 +469,7 @@ export interface TableLegItem {
   distanceNm?: number | null;
   altitudeConstraint?: string | null;
   turnDirection?: string | null;
+  recommendedNavaid?: string | null;
   remarks?: string | null;
   sourcePageNo?: number | null;
   confidence?: number;

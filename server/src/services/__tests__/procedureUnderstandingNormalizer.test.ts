@@ -112,6 +112,16 @@ describe('procedure understanding normalizer — DME ARC leg fallback', () => {
     ]);
   });
 
+  it('synthesized IF/AF legs reference the arc center navaid', () => {
+    const legs = byName.get('ADLOV 1G')!.legs!;
+    const ifLeg = legs.find((leg) => leg.pathTerminator === 'IF') as Record<string, unknown>;
+    const afLeg = legs.find((leg) => leg.pathTerminator === 'AF') as Record<string, unknown>;
+    const tfLeg = legs.find((leg) => leg.pathTerminator === 'TF') as Record<string, unknown>;
+    assert.equal(ifLeg.recommendedNavaid, 'VJB');
+    assert.equal(afLeg.recommendedNavaid, 'VJB');
+    assert.equal(tfLeg.recommendedNavaid, null);
+  });
+
   it('marks synthesized legs as reviewRequired and nulls (0,0) coordinates', () => {
     const legs = byName.get('ADLOV 1G')!.legs!;
     assert.ok(legs.every((leg) => leg.reviewRequired === true));
@@ -134,7 +144,7 @@ describe('procedure understanding normalizer — DME ARC leg fallback', () => {
       {
         ...modelOutput,
         tableLegs: [
-          { procedureName: 'ADLOV 1G', sequence: 10, pathTerminator: 'IF', toFix: 'ADLOV', altitudeConstraint: '-6000' },
+          { procedureName: 'ADLOV 1G', sequence: 10, pathTerminator: 'IF', toFix: 'ADLOV', altitudeConstraint: '-6000 13000', recommendedNavaid: 'VJB' },
         ],
       },
       group,
@@ -142,7 +152,13 @@ describe('procedure understanding normalizer — DME ARC leg fallback', () => {
     ) as ProcedureUnderstandingResult;
     const adlov = (withTable.procedures ?? []).find((p) => p.procedureName === 'ADLOV 1G');
     assert.equal(adlov?.legs?.length, 1);
-    assert.equal((adlov?.legs?.[0] as Record<string, unknown>).derivationMethod, 'tableLegs');
+    const leg = adlov?.legs?.[0] as Record<string, unknown>;
+    assert.equal(leg.derivationMethod, 'tableLegs');
+    // tableLegs 的推荐导航台与双高度必须透传到 legs
+    assert.equal(leg.recommendedNavaid, 'VJB');
+    const constraint = leg.altitudeConstraint as Record<string, unknown>;
+    assert.equal(constraint.altitudeFt, 6000);
+    assert.equal(constraint.upperFt, 13000);
     assert.ok(!(withTable.warnings ?? []).some((warning) => /几何合成兜底/.test(String((warning as Record<string, unknown>).message ?? ''))));
     assert.equal(withTable.reviewRequired, false);
   });

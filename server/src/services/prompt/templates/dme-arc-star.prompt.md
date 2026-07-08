@@ -111,6 +111,10 @@ Course/radial coding:
   for that arc leg. If you cannot read it, output null, never 0.
 - TF/IF legs should normally have courseDeg=null unless the table explicitly codes a course.
 
+recommendedNavaid (tableLegs field):
+- IF and AF legs reference the arc center VOR/DME (e.g. `VJB`) — fill `recommendedNavaid`
+  on those rows. TF/CI rows keep null unless the table explicitly prints a navaid.
+
 turnDirection rules:
 - AF legs: REQUIRED — the arc direction.
 - CI legs: normally null. The course intercept is not a coded turn; output L/R only if the
