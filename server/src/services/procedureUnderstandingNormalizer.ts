@@ -149,6 +149,7 @@ function normalizeTableLeg(input: JsonRecord) {
     distanceNm: numberOrNull(input.distanceNm),
     altitudeConstraint: stringOrNull(input.altitudeConstraint),
     turnDirection: enumString(input.turnDirection, ['L', 'R', 'NONE', 'UNKNOWN'], 'UNKNOWN'),
+    recommendedNavaid: stringOrNull(input.recommendedNavaid),
     remarks: stringOrNull(input.remarks),
     sourcePageNo: integerOrNull(input.sourcePageNo),
     confidence: numberOr(input.confidence, 0.5),
@@ -243,8 +244,10 @@ function applyDmeArcLegFallback(
 
     const entryFix = firstWord(procedure.procedureName);
     const outerFix = dFixName(entryDeg, outerNm);
+    // IF/AF 腿引用弧心导航台（424 的推荐导航台列）
+    const centerNavaid = arc.centerNavaid ? String(arc.centerNavaid).toUpperCase() : null;
     const legs: NormalizedLeg[] = [
-      synthesizedLeg(10, 'IF', null, entryFix, null, null, null, evidenceIds),
+      synthesizedLeg(10, 'IF', null, entryFix, null, null, null, evidenceIds, centerNavaid),
       synthesizedLeg(20, 'TF', entryFix, outerFix, null, null, null, evidenceIds),
       synthesizedLeg(30, 'CI', outerFix, null, (entryDeg + 180) % 360, round1(outerNm - radiusNm), null, evidenceIds),
     ];
@@ -263,6 +266,7 @@ function applyDmeArcLegFallback(
         arcLengthNm(radiusNm, forwardOffsetDeg(previousDeg, crossingDeg, turn)),
         turn,
         evidenceIds,
+        centerNavaid,
       ));
       previousDeg = crossingDeg;
       previousFix = fixName;
@@ -286,6 +290,7 @@ function synthesizedLeg(
   distanceNm: number | null,
   turnDirection: 'L' | 'R' | null,
   evidenceIds: string[],
+  recommendedNavaid: string | null = null,
 ): NormalizedLeg {
   return {
     sequence,
@@ -298,6 +303,7 @@ function synthesizedLeg(
     altitudeConstraint: null,
     speedLimitKias: null,
     navigationSpec: null,
+    recommendedNavaid,
     remarks: null,
     derivationMethod: SYNTHESIZED_LEG_DERIVATION,
     sourceEvidenceIds: evidenceIds,
@@ -353,6 +359,7 @@ function normalizeLeg(input: ReturnType<typeof normalizeTableLeg>, evidenceIds: 
     altitudeConstraint: parseAltitudeConstraint(input.altitudeConstraint),
     speedLimitKias: null,
     navigationSpec: inferNavigationSpec([input]),
+    recommendedNavaid: input.recommendedNavaid,
     remarks: input.remarks,
     derivationMethod: input.sourcePageNo ? `tabular page ${input.sourcePageNo}` : 'tableLegs',
     sourceEvidenceIds: evidenceIds,

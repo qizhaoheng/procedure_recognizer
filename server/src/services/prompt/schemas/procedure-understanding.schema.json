@@ -289,6 +289,7 @@
         "distanceNm": { "type": ["number", "null"], "minimum": 0 },
         "altitudeConstraint": { "type": ["string", "null"] },
         "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", "NONE", "UNKNOWN", null] },
+        "recommendedNavaid": { "type": ["string", "null"] },
         "remarks": { "type": ["string", "null"] },
         "sourcePageNo": { "type": ["integer", "null"], "minimum": 1 },
         "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
@@ -341,6 +342,7 @@
         "altitudeConstraint": { "$ref": "#/$defs/constraint" },
         "speedLimitKias": { "type": ["number", "null"], "minimum": 0 },
         "navigationSpec": { "type": ["string", "null"] },
+        "recommendedNavaid": { "type": ["string", "null"] },
         "remarks": { "type": ["string", "null"] },
         "derivationMethod": { "type": ["string", "null"] },
         "sourceEvidenceIds": { "type": "array", "items": { "type": "string" } },

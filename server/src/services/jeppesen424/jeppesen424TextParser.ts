@@ -162,6 +162,14 @@ function extractTurnDirection(line: string, recordText: string): 'L' | 'R' | '' 
 }
 
 function extractAltitude(line: string, recordText: string) {
+  // 全宽行按列位读取（符号 83 列、数值 85-89 列），避免把 95-99 列的第二高度误当 alt1
+  if (line.length >= 120) {
+    const digits = positionalDigits(line, 84, 5);
+    if (digits === undefined) return undefined;
+    const sign = line[82] === '+' || line[82] === '-' ? line[82] : '';
+    return { raw: `${sign}${String(digits).padStart(5, '0')}`, value: digits };
+  }
+
   const afterRecord = line.slice(line.indexOf(recordText) + recordText.length);
   const signed = [...afterRecord.matchAll(/[+-]\s*(\d{4,5})\b/g)].at(-1);
   if (signed) {

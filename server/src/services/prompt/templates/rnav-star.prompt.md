@@ -59,6 +59,11 @@ Holding patterns:
 - Racetrack patterns drawn at fixes (typically the entry fixes) are part of the procedure.
   Report each one in `holdings` (fixIdentifier, inboundCourseDegMag, turnDirection).
   Do not leave `holdings` empty when the chart draws a racetrack.
+- Count check — do this BEFORE writing `holdings`: scan EVERY entry fix on the chart one by
+  one and count the racetrack (oval holding) symbols. The `holdings` array must contain
+  exactly that many entries. A chart often draws holds at only some entry fixes (e.g. 2 of 4),
+  so check each fix individually; returning an empty `holdings` while any racetrack is drawn
+  is a FAILURE.
 - If a table row/entry fix is associated with a holding pattern, also mark that leg with
   `holdingAtFix=true` when the schema allows it. The 424 exporter uses this to code the
   `H` flag on the IF leg.
@@ -73,10 +78,13 @@ Altitude constraints:
   empty/null.
 
 Recommended navaids / coded references:
-- When a source table or 424-like coding provides a recommended navaid and region on an
-  entry IF leg, capture the navaid identifier in `recommendedNavaid` (for example `VJB`).
-- Do not invent a recommended navaid from nearby labels. Leave it null when it is not
-  printed or otherwise explicitly coded.
+- Each tableLegs row has a `recommendedNavaid` field. Fill it on entry IF legs when the
+  source explicitly references a VOR/DME for the procedure:
+  - a chart note such as "VJB VOR/DME REQUIRED" applies to the whole procedure — put that
+    navaid identifier (e.g. `VJB`) into `recommendedNavaid` of every entry IF leg;
+  - a table row or 424-like coding that prints a navaid on the leg also counts.
+- Do not invent a recommended navaid from unrelated nearby labels. Leave it null on legs
+  where nothing is referenced (typically all TF legs).
 
 Guardrails:
 - Do not treat DME Arrival Procedures as the main RNAV STAR rule set.

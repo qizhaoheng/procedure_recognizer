@@ -69,6 +69,15 @@ describe('Jeppesen 424 text compare MVP', () => {
     assert.equal(final?.altitudeSign, '+');
   });
 
+  it('does not misread the second altitude as alt1 when alt1 is blank (OMKOM-style entry)', () => {
+    const line = 'SSPAP WMKJWMEOMKO1E2RW16  010OMKOMWMEA1E       IF                                             13000       VJB   WMD    D   003662209';
+    const [leg] = parseJeppesen424Text(line);
+    assert.equal(leg.altitudeValue, undefined);
+    assert.equal(leg.altitudeRaw, undefined);
+    assert.equal(leg.altitudeUpperFt, 13000);
+    assert.equal(leg.recommendedNavaid, 'VJB');
+  });
+
   it('compares AI procedure legs against parsed Jeppesen legs', () => {
     const understanding: ProcedureUnderstandingResult = {
       runway: 'RW16',
