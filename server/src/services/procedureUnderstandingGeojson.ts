@@ -77,12 +77,18 @@ export function buildGeoJsonFromProcedureUnderstanding(
       .map((fix) => [String(fix.identifier).toUpperCase(), fix]),
   );
   const navaidMap = buildNavaidMap(understanding, group);
+  const arcContext = resolveArcContext(geometrySemantics, navaidMap);
+  const syntheticFixes = new Map<string, FixRecord>();
+  const legChainFeatures = procedures.flatMap(
+    (procedure) => procedureFeatures(procedure, fixMap, arcContext, syntheticFixes, understanding, group),
+  );
 
   const features: ProcedureFeature[] = [
     procedureChartFeature(understanding, group),
     ...navaidFeatures(navaidMap),
     ...fixes.flatMap((fix) => fixFeature(fix)),
-    ...procedures.flatMap((procedure) => procedureFeatures(procedure, fixMap, understanding, group)),
+    ...syntheticFixFeatures(syntheticFixes),
+    ...legChainFeatures,
     ...geometrySemanticFeatures(geometrySemantics, procedures, fixMap, navaidMap, understanding, group),
   ];
 
@@ -133,25 +139,77 @@ function fixFeature(fix: FixRecord): ProcedureFeature[] {
   }];
 }
 
+interface ArcContext {
+  center: FixRecord;
+  centerIdent: string;
+  radiusNm: number;
+}
+
+function resolveArcContext(semantics: GeometrySemanticRecord[], navaidMap: Map<string, FixRecord>): ArcContext | undefined {
+  const arc = semantics.find((item) => item.type === 'DME_ARC' && item.centerNavaid && item.radiusNm);
+  if (!arc?.centerNavaid) return undefined;
+  const center = navaidMap.get(arc.centerNavaid.toUpperCase());
+  if (!center || !isCoordinate(center.longitude, center.latitude)) return undefined;
+  return { center, centerIdent: arc.centerNavaid.toUpperCase(), radiusNm: Number(arc.radiusNm) };
+}
+
 function procedureFeatures(
   procedure: ProcedureRecord,
   fixMap: Map<string, FixRecord>,
+  arcContext: ArcContext | undefined,
+  syntheticFixes: Map<string, FixRecord>,
   understanding: ProcedureUnderstandingResult,
   group: ProcedureGroup,
 ): ProcedureFeature[] {
   const procedureName = procedure.procedureName || 'UNKNOWN';
   const orderedLegs = [...(procedure.legs ?? [])].sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0));
-  const legFeatures = orderedLegs.flatMap((leg) => legFeature(procedureName, leg, fixMap));
-  const trackCoordinates = orderedLegs
-    .map((leg) => fixMap.get(String(leg.fixIdentifier ?? '').toUpperCase()))
-    .filter((fix): fix is FixRecord => Boolean(fix && isCoordinate(fix.longitude, fix.latitude)))
-    .map((fix) => coord(fix.longitude, fix.latitude));
 
   const features: ProcedureFeature[] = [];
-  if (trackCoordinates.length >= 2) {
-    features.push({
+  const chain: number[][] = [];
+  let current: [number, number] | undefined;
+  let usedDerivedGeometry = false;
+
+  for (const leg of orderedLegs) {
+    const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
+    const resolved = resolveLegTarget(leg, fixMap, arcContext, syntheticFixes);
+    let target = resolved?.coordinate;
+    let geometry: number[][] | undefined;
+    let quality = 'derived_from_fix_coordinates';
+
+    if (pathTerminator === 'CI' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
+      // 航向截获腿：从当前位置沿磁航向推算终点（无命名 Fix）。
+      target = destinationPoint(pointRecord(current), Number(leg.courseDegMag), Number(leg.distanceNm ?? 2));
+      geometry = [current, target];
+      quality = 'derived_from_course_intercept';
+    } else if (pathTerminator === 'AF' && arcContext && current && target) {
+      // DME 弧腿：绕弧心按转弯方向采样圆弧（L=逆时针，R=顺时针）。
+      const radiusNm = resolved?.dmeDistanceNm ?? distanceNmFrom(arcContext.center, target);
+      const startDeg = bearingFrom(arcContext.center, current);
+      const endDeg = bearingFrom(arcContext.center, target);
+      const direction = leg.turnDirection === 'L' || leg.turnDirection === 'R' ? leg.turnDirection : undefined;
+      const arcPoints = arcCoordinates(arcContext.center, radiusNm, startDeg, endDeg, direction);
+      geometry = [current, ...arcPoints.slice(1, -1), target];
+      quality = 'derived_from_dme_arc_semantics';
+    } else if (current && target) {
+      geometry = [current, target];
+      quality = resolved?.synthetic ? 'derived_from_dme_fix_name' : 'derived_from_fix_coordinates';
+    }
+
+    if (geometry) {
+      if (quality !== 'derived_from_fix_coordinates') usedDerivedGeometry = true;
+      features.push(legFeature(procedureName, leg, geometry, quality));
+      if (!chain.length) chain.push(geometry[0]);
+      chain.push(...geometry.slice(1));
+    } else if (target && !chain.length) {
+      chain.push(target);
+    }
+    if (target) current = target;
+  }
+
+  if (chain.length >= 2) {
+    features.unshift({
       type: 'Feature',
-      geometry: line(trackCoordinates),
+      geometry: line(chain),
       properties: baseProps({
         object_type: 'ProcedureTrack',
         feature_id: `track_${slug(procedureName)}`,
@@ -159,16 +217,81 @@ function procedureFeatures(
         name: procedureName,
         source_page: group.chartPageNo ?? group.chartPages[0] ?? null,
         source_text: `${procedureName} ${understanding.navigationType ?? group.navigationType ?? ''} ${understanding.runway ?? group.runway ?? ''}`.trim(),
-        coordinate_quality: 'derived_from_fix_coordinates',
-        review_required: procedure.reviewRequired === true,
+        coordinate_quality: usedDerivedGeometry ? 'derived_from_leg_chain' : 'derived_from_fix_coordinates',
+        review_required: procedure.reviewRequired === true || usedDerivedGeometry,
         confidence: procedure.confidence ?? understanding.confidence ?? 0.5,
         runway: procedure.runway ?? understanding.runway ?? group.runway,
         navigation_spec: procedure.navigationSpec,
       }),
     });
   }
-  features.push(...legFeatures);
   return features;
+}
+
+function resolveLegTarget(
+  leg: LegRecord,
+  fixMap: Map<string, FixRecord>,
+  arcContext: ArcContext | undefined,
+  syntheticFixes: Map<string, FixRecord>,
+): { coordinate: [number, number]; synthetic: boolean; dmeDistanceNm?: number } | undefined {
+  const ident = String(leg.fixIdentifier ?? '').trim().toUpperCase();
+  if (!ident) return undefined;
+
+  const fix = fixMap.get(ident);
+  if (fix && isCoordinate(fix.longitude, fix.latitude)) {
+    return { coordinate: coord(fix.longitude, fix.latitude), synthetic: false };
+  }
+
+  if (!arcContext) return undefined;
+  const decoded = decodeDmeFix(ident, arcContext);
+  if (!decoded) return undefined;
+  if (!syntheticFixes.has(ident)) {
+    syntheticFixes.set(ident, {
+      identifier: ident,
+      longitude: decoded.coordinate[0],
+      latitude: decoded.coordinate[1],
+      rawCoordinate: null,
+      confidence: 0.6,
+      reviewRequired: true,
+    });
+  }
+  return { coordinate: decoded.coordinate, synthetic: true, dmeDistanceNm: decoded.distanceNm };
+}
+
+// 终端 DME Fix 命名：D + 径向线(3位) + 距离字母（A=1NM … K=11NM, M=13NM）。
+function decodeDmeFix(ident: string, arcContext: ArcContext) {
+  const match = ident.match(/^D(\d{3})([A-Z])$/);
+  if (!match) return undefined;
+  const radialDeg = Number(match[1]);
+  if (radialDeg > 360) return undefined;
+  const distanceNm = match[2].charCodeAt(0) - 64;
+  return {
+    radialDeg,
+    distanceNm,
+    coordinate: destinationPoint(arcContext.center, radialDeg, distanceNm),
+  };
+}
+
+function syntheticFixFeatures(syntheticFixes: Map<string, FixRecord>): ProcedureFeature[] {
+  return [...syntheticFixes.values()].map((fix) => ({
+    type: 'Feature' as const,
+    geometry: point(fix.longitude, fix.latitude),
+    properties: baseProps({
+      object_type: 'ProcedureFix',
+      feature_id: `fix_${slug(fix.identifier)}`,
+      ident: fix.identifier,
+      name: fix.identifier,
+      source_page: null,
+      source_text: `${fix.identifier} derived from D-fix naming (radial + DME distance)`,
+      coordinate_quality: 'derived_from_dme_fix_name',
+      review_required: true,
+      confidence: fix.confidence ?? 0.6,
+    }),
+  }));
+}
+
+function pointRecord(coordinate: [number, number]): FixRecord {
+  return { longitude: coordinate[0], latitude: coordinate[1] };
 }
 
 function geometrySemanticFeatures(
@@ -335,15 +458,10 @@ function dmeLegFeature(
   };
 }
 
-function legFeature(procedureName: string, leg: LegRecord, fixMap: Map<string, FixRecord>): ProcedureFeature[] {
-  const toFix = leg.fixIdentifier ? fixMap.get(String(leg.fixIdentifier).toUpperCase()) : undefined;
-  const fromFix = leg.fromFix ? fixMap.get(String(leg.fromFix).toUpperCase()) : undefined;
-  if (!toFix || !isCoordinate(toFix.longitude, toFix.latitude)) return [];
-  if (!fromFix || !isCoordinate(fromFix.longitude, fromFix.latitude)) return [];
-
-  return [{
+function legFeature(procedureName: string, leg: LegRecord, coordinates: number[][], quality: string): ProcedureFeature {
+  return {
     type: 'Feature',
-    geometry: line([coord(fromFix.longitude, fromFix.latitude), coord(toFix.longitude, toFix.latitude)]),
+    geometry: line(coordinates),
     properties: baseProps({
       object_type: 'ProcedureLeg',
       feature_id: `leg_${slug(procedureName)}_${leg.sequence ?? 'x'}_${slug(leg.fixIdentifier ?? '')}`,
@@ -363,11 +481,11 @@ function legFeature(procedureName: string, leg: LegRecord, fixMap: Map<string, F
       upper_ft: leg.altitudeConstraint?.upperFt ?? null,
       source_page: null,
       source_text: `${procedureName} ${leg.pathTerminator ?? ''} ${leg.fromFix ?? ''} -> ${leg.fixIdentifier ?? ''}`.trim(),
-      coordinate_quality: 'derived_from_fix_coordinates',
-      review_required: leg.reviewRequired === true,
+      coordinate_quality: quality,
+      review_required: leg.reviewRequired === true || quality !== 'derived_from_fix_coordinates',
       confidence: leg.confidence ?? 0.5,
     }),
-  }];
+  };
 }
 
 function baseProps(properties: Record<string, unknown>) {
@@ -392,8 +510,10 @@ function coord(lon: number | null | undefined, lat: number | null | undefined): 
 }
 
 function isCoordinate(lon: unknown, lat: unknown) {
-  return lon !== null && lon !== undefined && lat !== null && lat !== undefined
-    && Number.isFinite(Number(lon)) && Number.isFinite(Number(lat));
+  if (lon === null || lon === undefined || lat === null || lat === undefined) return false;
+  if (!Number.isFinite(Number(lon)) || !Number.isFinite(Number(lat))) return false;
+  // (0,0) 是模型对"未知坐标"的常见占位，不是合法程序点位
+  return Number(lon) !== 0 || Number(lat) !== 0;
 }
 
 function slug(value: unknown) {
@@ -478,19 +598,50 @@ function radialForProcedure(radials: GeometrySemanticRecord[], procedureName: st
     && (radial.relatedProcedures ?? []).some((name) => name.toUpperCase() === procedureName.toUpperCase()),
   );
   if (!candidates.length) return undefined;
-  return candidates.sort((a, b) => Math.abs(Number(a.radialDeg) - finalRadialDeg) - Math.abs(Number(b.radialDeg) - finalRadialDeg))[0];
+  // 入弧径向线是离出弧径向线角距最远的那条；较近的（如 RDL295）是弧上中途约束径向线。
+  return candidates.sort(
+    (a, b) => angularDistanceDeg(Number(b.radialDeg), finalRadialDeg) - angularDistanceDeg(Number(a.radialDeg), finalRadialDeg),
+  )[0];
+}
+
+function angularDistanceDeg(a: number, b: number) {
+  const diff = Math.abs(a - b) % 360;
+  return diff > 180 ? 360 - diff : diff;
 }
 
 function circleCoordinates(center: FixRecord, radiusNm: number, steps: number) {
   return Array.from({ length: steps + 1 }, (_, index) => destinationPoint(center, (index / steps) * 360, radiusNm));
 }
 
-function arcCoordinates(center: FixRecord, radiusNm: number, startDeg: number, endDeg: number) {
+function arcCoordinates(center: FixRecord, radiusNm: number, startDeg: number, endDeg: number, direction?: 'L' | 'R') {
   const deltaClockwise = (endDeg - startDeg + 360) % 360;
   const deltaCounter = deltaClockwise - 360;
-  const delta = Math.abs(deltaClockwise) <= Math.abs(deltaCounter) ? deltaClockwise : deltaCounter;
+  let delta: number;
+  if (deltaClockwise === 0) delta = 0;
+  else if (direction === 'R') delta = deltaClockwise;
+  else if (direction === 'L') delta = deltaCounter;
+  else delta = Math.abs(deltaClockwise) <= Math.abs(deltaCounter) ? deltaClockwise : deltaCounter;
   const steps = Math.max(8, Math.ceil(Math.abs(delta) / 5));
   return Array.from({ length: steps + 1 }, (_, index) => destinationPoint(center, startDeg + (delta * index) / steps, radiusNm));
+}
+
+function bearingFrom(center: FixRecord, target: number[]) {
+  const lat1 = toRad(Number(center.latitude));
+  const lon1 = toRad(Number(center.longitude));
+  const lat2 = toRad(Number(target[1]));
+  const lon2 = toRad(Number(target[0]));
+  const y = Math.sin(lon2 - lon1) * Math.cos(lat2);
+  const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(lon2 - lon1);
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+function distanceNmFrom(center: FixRecord, target: number[]) {
+  const lat1 = toRad(Number(center.latitude));
+  const lat2 = toRad(Number(target[1]));
+  const dLat = lat2 - lat1;
+  const dLon = toRad(Number(target[0])) - toRad(Number(center.longitude));
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLon / 2) ** 2;
+  return 2 * Math.asin(Math.sqrt(h)) * EARTH_RADIUS_NM;
 }
 
 function destinationPoint(center: FixRecord, bearingDeg: number, distanceNm: number): [number, number] {

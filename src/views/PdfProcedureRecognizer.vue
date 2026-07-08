@@ -246,7 +246,7 @@ const keyItemChecks = computed<KeyCheckItem[]>(() => {
       { label: 'procedureClassification.navigationType = DME_ARC', ok: navOk },
       { label: 'chartTexts 包含 11 DME ARC', ok: hasChartText(/11\s*DME\s*ARC/i) },
       { label: 'chartTexts 包含 VJB', ok: hasChartText(/\bVJB\b/i) },
-      { label: 'chartTexts 包含 RDL340 / 160', ok: hasChartText(/RDL\s*340/i) },
+      { label: 'chartTexts 包含 RDL340 / 160', ok: hasChartText(/RDL[-\s]*340/i) },
       { label: 'chartTexts 包含 L-R332', ok: hasChartText(/L-?R\s*332/i) },
       { label: 'chartTexts 包含 L-R348', ok: hasChartText(/L-?R\s*348/i) },
       {
@@ -265,12 +265,28 @@ const keyItemChecks = computed<KeyCheckItem[]>(() => {
         label: 'geometrySemantics 包含 LEAD_RADIAL radialDeg=348',
         ok: geometry.some((item) => item.type === 'LEAD_RADIAL' && nearDeg(item.radialDeg, 348)),
       },
+      {
+        label: 'chartTexts 包含各入弧径向线标签 RDL016/114/236/275/295',
+        ok: [16, 114, 236, 275, 295].every((deg) => hasChartText(new RegExp(`RDL[-\\s]*${String(deg).padStart(3, '0')}`, 'i'))),
+      },
+      {
+        label: 'geometrySemantics 包含入弧径向线 RADIAL 016/114/236/275/295',
+        ok: [16, 114, 236, 275, 295].every((deg) => geometry.some((item) => item.type === 'RADIAL' && nearDeg(item.radialDeg, deg))),
+      },
+      {
+        label: 'procedures 每个 1G 程序均有模型编码的腿段（tableLegs 来源，含 AF 弧腿）',
+        ok: (procedureUnderstanding.value?.procedures ?? []).length > 0
+          && (procedureUnderstanding.value?.procedures ?? []).every((procedure) => {
+            const legs = (procedure.legs ?? []).filter((leg) => !isSynthesizedLeg(leg as Record<string, unknown>));
+            return legs.length >= 4 && legs.some((leg) => String((leg as Record<string, unknown>).pathTerminator ?? '').toUpperCase() === 'AF');
+          }),
+      },
     ];
   }
   return [
     { label: 'procedureClassification.navigationType = DME_ARC', ok: navOk },
     { label: 'chartTexts 包含 DME ARC 标签', ok: hasChartText(/\d+\s*DME\s*ARC/i) },
-    { label: 'chartTexts 包含 RDL 径向标签', ok: hasChartText(/RDL\s*\d{2,3}/i) },
+    { label: 'chartTexts 包含 RDL 径向标签', ok: hasChartText(/RDL[-\s]*\d{2,3}/i) },
     { label: 'chartTexts 包含 L-R 提前转弯径向', ok: hasChartText(/L-?R\s*\d{2,3}/i) },
     { label: 'geometrySemantics 包含 DME_ARC（含 center 与 radius）', ok: geometry.some((item) => item.type === 'DME_ARC' && Boolean(item.centerNavaid) && item.radiusNm != null) },
     { label: 'geometrySemantics 包含 RADIAL', ok: geometry.some((item) => item.type === 'RADIAL' && item.radialDeg != null) },
@@ -279,6 +295,17 @@ const keyItemChecks = computed<KeyCheckItem[]>(() => {
 });
 
 const failedKeyChecks = computed(() => keyItemChecks.value.filter((item) => !item.ok));
+
+// 几何合成兜底只保证 GeoJSON/424 产物可用，不代表模型识别达标——必须显式亮牌
+function isSynthesizedLeg(leg: Record<string, unknown>) {
+  return String(leg.derivationMethod ?? '').startsWith('synthesized');
+}
+
+const legFallbackActive = computed(() =>
+  (procedureUnderstanding.value?.procedures ?? []).some(
+    (procedure) => (procedure.legs ?? []).some((leg) => isSynthesizedLeg(leg as Record<string, unknown>)),
+  ),
+);
 
 const keyErrorChecks = computed(() => {
   if (llmRunStatus.value !== 'COMPLETED' || !isWmkjDmeArcStar.value) return [];
@@ -1643,6 +1670,9 @@ function toErrorMessage(value: unknown) {
             <h2>关键项检查（{{ keyItemChecks.length - failedKeyChecks.length }} / {{ keyItemChecks.length }} 通过）</h2>
             <div v-if="failedKeyChecks.length || keyErrorChecks.length" class="alert error">
               AI 未识别出关键程序语义，请优先打磨 Prompt 或检查输入图片质量，不建议继续生成 GeoJSON。
+            </div>
+            <div v-if="legFallbackActive" class="alert warn">
+              ⚠ 已启用几何合成兜底：当前腿段由 DME ARC 语义推算（无高度约束），仅供 GeoJSON / 424 结构预览。模型未输出 tableLegs，Prompt 仍需完善。
             </div>
             <ul class="check-list">
               <li v-for="check in keyItemChecks" :key="check.label" :class="check.ok ? 'ok' : 'fail'">

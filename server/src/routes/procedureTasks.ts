@@ -389,6 +389,11 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       group.procedureUnderstanding = undefined;
       group.visionRunRecord = undefined;
       group.recognitionEvaluation = undefined;
+      // 旧识别结果对应的 GeoJSON 已失效，避免预览显示陈旧轨迹
+      group.geojson = undefined;
+      group.geojsonStatus = 'NOT_GENERATED';
+      group.geojsonGeneratedAt = undefined;
+      group.geojsonError = undefined;
       draft.status = 'AI_RUNNING';
       draft.error = undefined;
     });
