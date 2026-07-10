@@ -1,6 +1,34 @@
 import type { SimpleProcedureLeg } from './types';
 
 export const ROUTE_CODE_TO_PROCEDURE: Record<string, string> = {
+  ADLO1J: 'ADLOV 1J',
+  AROS1J: 'AROSO 1J',
+  PIMO1J: 'PIMOK 1J',
+  SABK1J: 'SABKA 1J',
+  ADLO1K: 'ADLOV 1K',
+  AROS1K: 'AROSO 1K',
+  OMKO1K: 'OMKOM 1K',
+  PIMO1K: 'PIMOK 1K',
+  SABK1K: 'SABKA 1K',
+  ADLO1L: 'ADLOV 1L',
+  AROS1L: 'AROSO 1L',
+  PIMO1L: 'PIMOK 1L',
+  SABK1L: 'SABKA 1L',
+  ADLO1M: 'ADLOV 1M',
+  AROS1M: 'AROSO 1M',
+  OMKO1M: 'OMKOM 1M',
+  PIMO1M: 'PIMOK 1M',
+  SABK1M: 'SABKA 1M',
+  ADLO2J: 'ADLOV 2J',
+  AROS2J: 'AROSO 2J',
+  OMKO2J: 'OMKOM 2J',
+  SABK2J: 'SABKA 2J',
+  ADLO2L: 'ADLOV 2L',
+  AROS2L: 'AROSO 2L',
+  OMKO2L: 'OMKOM 2L',
+  ADLO2M: 'ADLOV 2M',
+  AROS2M: 'AROSO 2M',
+  OMKO2M: 'OMKOM 2M',
   ADLO1E: 'ADLOV 1E',
   EMTU1E: 'EMTUV 1E',
   OMKO1E: 'OMKOM 1E',
@@ -11,7 +39,7 @@ export const ROUTE_CODE_TO_PROCEDURE: Record<string, string> = {
   PIMO1G: 'PIMOK 1G',
 };
 
-const PATH_TERMINATORS = ['IF', 'TF', 'CI', 'AF', 'CF', 'DF', 'RF', 'HM', 'HF', 'HA'];
+const PATH_TERMINATORS = ['IF', 'TF', 'CA', 'CI', 'CR', 'AF', 'CF', 'DF', 'RF', 'HM', 'HF', 'HA'];
 
 interface PartialLeg {
   procedureName: string;
@@ -110,11 +138,11 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
 }
 
 function parseRoute(line: string) {
-  const match = line.match(/\b(WMKJWME([A-Z0-9]{6})2(RW\d{2}[A-Z]?))/);
+  const match = line.match(/\b(WMKJWM[DE]([A-Z0-9]{6})2?(RW\d{2}[A-Z]?))/);
   if (!match) return undefined;
   const routeKey = match[1];
   const routeCode = match[2];
-  const procedureName = ROUTE_CODE_TO_PROCEDURE[routeCode] ?? routeCode.replace(/^([A-Z]{4})(\d[A-Z])$/, '$1 $2');
+  const procedureName = ROUTE_CODE_TO_PROCEDURE[routeCode] ?? procedureNameFromRouteCode(routeCode);
   return {
     routeKey,
     routeCode,
@@ -140,8 +168,38 @@ function parseLegRecord(line: string, routeKey: string) {
         recordText: match[0],
       };
     }
+
+    const noFixContinuationMatch = candidate.match(/(\d{3})\s+2P(?:\s|$)/);
+    if (noFixContinuationMatch) {
+      return {
+        sequence: noFixContinuationMatch[1],
+        fix: '',
+        fixSection: undefined,
+        recordPart: '2P' as const,
+        endOfProcedure: false,
+        recordText: noFixContinuationMatch[0],
+      };
+    }
+
+    const noFixMatch = candidate.match(/(\d{3})\s+([123][A-Z]?)\s+(?:(?:[LR])\s+)?([A-Z]{2})(?:\s|$)/);
+    if (noFixMatch) {
+      return {
+        sequence: noFixMatch[1],
+        fix: '',
+        fixSection: undefined,
+        recordPart: noFixMatch[2].startsWith('2P') ? '2P' as const : '1E' as const,
+        endOfProcedure: false,
+        recordText: noFixMatch[0],
+      };
+    }
   }
   return undefined;
+}
+
+function procedureNameFromRouteCode(routeCode: string) {
+  const match = routeCode.match(/^([A-Z]{4})(\d[A-Z])$/);
+  if (!match) return routeCode;
+  return `${match[1]} ${match[2]}`;
 }
 
 function extractPathTerminator(line: string) {

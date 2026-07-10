@@ -295,13 +295,13 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
       }
       if (legType === 'FINAL_COMMON_SEGMENT' && !finalCommonSeen.has('RDL340')) {
         finalCommonSeen.add('RDL340');
-        pushLabel(feature, linePointAt(feature.geometry, 0.58), 'RDL340\n160°', 'ProcedureCourse', 76);
+        pushLabel(feature, linePointAt(feature.geometry, 0.58), finalCommonLabel(feature), 'ProcedureCourse', 76);
       }
     }
 
     if (objectType === 'CommonFinalSegment' && !finalCommonSeen.has('RDL340')) {
       finalCommonSeen.add('RDL340');
-      pushLabel(feature, linePointAt(feature.geometry, 0.58), 'RDL340\n160°', 'ProcedureCourse', 76);
+      pushLabel(feature, linePointAt(feature.geometry, 0.58), finalCommonLabel(feature), 'ProcedureCourse', 76);
     }
   }
 
@@ -488,6 +488,14 @@ function rnavCourseDistanceLabel(props: Record<string, unknown>): string {
   const courseText = Number.isFinite(course) ? `${padCourse(course)}°` : '';
   const distanceText = Number.isFinite(distance) && distance > 0 ? formatNm(distance) : '';
   return [courseText, distanceText].filter(Boolean).join(' ');
+}
+
+function finalCommonLabel(feature: ProcedureFeature): string {
+  const props = feature.properties;
+  const finalRadial = asString(props.final_radial || props.ident);
+  const course = Number(props.course_deg_mag || props.final_track_mag || props.inbound_track_mag);
+  const courseText = Number.isFinite(course) ? `${padCourse(course)}°` : '160°';
+  return finalRadial.includes('RDL') ? `${finalRadial}\n${courseText}` : courseText;
 }
 
 function formatNm(value: number): string {

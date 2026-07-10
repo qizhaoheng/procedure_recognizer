@@ -1,5 +1,5 @@
 import type { Feature, FeatureCollection, Geometry, GeoJsonProperties, LineString, Point } from 'geojson';
-import type { ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
+import type { PdfPageAsset, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
 import { withBbox } from './geojsonValidator';
 
 type ProcedureFeature = Feature<Geometry | null, GeoJsonProperties>;
@@ -62,6 +62,16 @@ type GeometrySemanticRecord = {
   reviewRequired?: boolean;
 };
 
+type RunwayGeometryRecord = {
+  identifier: string;
+  threshold?: [number, number];
+  end?: [number, number];
+  bearing?: number;
+  rawThreshold?: string | null;
+  rawEnd?: string | null;
+  sourcePage?: number | null;
+};
+
 type LabelPlanRecord = {
   text?: string | null;
   labelKind?: string | null;
@@ -91,8 +101,9 @@ const EARTH_RADIUS_NM = 3440.065;
 export function buildGeoJsonFromProcedureUnderstanding(
   understanding: ProcedureUnderstandingResult,
   group: ProcedureGroup,
+  pages: PdfPageAsset[] = [],
 ): FeatureCollection<Geometry | null, GeoJsonProperties> {
-  const fixes = (understanding.fixes ?? []) as FixRecord[];
+  const fixes = enrichFixesWithPageCoordinates((understanding.fixes ?? []) as FixRecord[], group, pages);
   const procedures = (understanding.procedures ?? []) as ProcedureRecord[];
   const geometrySemantics = (understanding.geometrySemantics ?? []) as GeometrySemanticRecord[];
   const chartTexts = (understanding.chartTexts ?? []) as ChartTextRecord[];
@@ -102,19 +113,23 @@ export function buildGeoJsonFromProcedureUnderstanding(
       .map((fix) => [String(fix.identifier).toUpperCase(), fix]),
   );
   const navaidMap = buildNavaidMap(understanding, group);
+  const runwayMap = buildRunwayMap(understanding, group);
   const arcContext = resolveArcContext(geometrySemantics, navaidMap);
   const fixMetadata = buildFixMetadata(procedures, chartTexts, understanding, group);
   const syntheticFixes = new Map<string, FixRecord>();
   const legChainFeatures = procedures.flatMap(
-    (procedure) => procedureFeatures(procedure, fixMap, arcContext, syntheticFixes, understanding, group),
+    (procedure) => procedureFeatures(procedure, fixMap, arcContext, runwayMap, syntheticFixes, understanding, group),
   );
+  const finalCommonFeatures = finalCommonSegmentFeatures(procedures, fixMap, fixMetadata, understanding, group);
 
   const features: ProcedureFeature[] = [
     procedureChartFeature(understanding, group),
+    ...runwayFeatures(runwayMap),
     ...navaidFeatures(navaidMap),
     ...fixes.flatMap((fix) => fixFeature(fix, fixMetadata)),
     ...syntheticFixFeatures(syntheticFixes),
     ...legChainFeatures,
+    ...finalCommonFeatures,
     ...geometrySemanticFeatures(geometrySemantics, procedures, fixMap, navaidMap, understanding, group),
   ];
   features.push(...labelPlanFeatures(understanding, group, features));
@@ -194,6 +209,7 @@ function procedureFeatures(
   procedure: ProcedureRecord,
   fixMap: Map<string, FixRecord>,
   arcContext: ArcContext | undefined,
+  runwayMap: Map<string, RunwayGeometryRecord>,
   syntheticFixes: Map<string, FixRecord>,
   understanding: ProcedureUnderstandingResult,
   group: ProcedureGroup,
@@ -204,18 +220,25 @@ function procedureFeatures(
   const features: ProcedureFeature[] = [];
   const chain: number[][] = [];
   let current: [number, number] | undefined;
+  let lastDmeNm: number | undefined;
   let usedDerivedGeometry = false;
 
   for (const leg of orderedLegs) {
     const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
-    const resolved = resolveLegTarget(leg, fixMap, arcContext, syntheticFixes);
+    const start = resolveLegStart(leg, fixMap, runwayMap, procedure.runway ?? understanding.runway ?? group.runway);
+    if (!current && start) current = start.coordinate;
+    const resolved = resolveLegTarget(leg, fixMap, arcContext, runwayMap, syntheticFixes, current, lastDmeNm);
     let target = resolved?.coordinate;
     let geometry: number[][] | undefined;
-    let quality = 'derived_from_fix_coordinates';
+    let quality = resolved?.quality ?? 'derived_from_fix_coordinates';
 
-    if (pathTerminator === 'CI' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
+    if (pathTerminator === 'CA' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
+      target = destinationPoint(pointRecord(current), Number(leg.courseDegMag), legDistanceOrDefault(leg.distanceNm, 2));
+      geometry = [current, target];
+      quality = 'derived_from_sid_course_to_altitude';
+    } else if (pathTerminator === 'CI' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
       // 航向截获腿：从当前位置沿磁航向推算终点（无命名 Fix）。
-      target = destinationPoint(pointRecord(current), Number(leg.courseDegMag), Number(leg.distanceNm ?? 2));
+      target = destinationPoint(pointRecord(current), Number(leg.courseDegMag), legDistanceOrDefault(leg.distanceNm, 2));
       geometry = [current, target];
       quality = 'derived_from_course_intercept';
     } else if (pathTerminator === 'AF' && arcContext && current && target) {
@@ -229,7 +252,7 @@ function procedureFeatures(
       quality = 'derived_from_dme_arc_semantics';
     } else if (current && target) {
       geometry = [current, target];
-      quality = resolved?.synthetic ? 'derived_from_dme_fix_name' : 'derived_from_fix_coordinates';
+      quality = resolved?.quality ?? (resolved?.synthetic ? 'derived_from_dme_fix_name' : 'derived_from_fix_coordinates');
     }
 
     if (geometry) {
@@ -241,6 +264,7 @@ function procedureFeatures(
       chain.push(target);
     }
     if (target) current = target;
+    lastDmeNm = dmeDistanceFromText(leg.fixIdentifier) ?? dmeDistanceFromText(leg.remarks) ?? lastDmeNm;
   }
 
   if (chain.length >= 2) {
@@ -269,14 +293,40 @@ function resolveLegTarget(
   leg: LegRecord,
   fixMap: Map<string, FixRecord>,
   arcContext: ArcContext | undefined,
+  runwayMap: Map<string, RunwayGeometryRecord>,
   syntheticFixes: Map<string, FixRecord>,
-): { coordinate: [number, number]; synthetic: boolean; dmeDistanceNm?: number } | undefined {
+  current?: [number, number],
+  lastDmeNm?: number,
+): { coordinate: [number, number]; synthetic: boolean; dmeDistanceNm?: number; quality?: string } | undefined {
   const ident = String(leg.fixIdentifier ?? '').trim().toUpperCase();
   if (!ident) return undefined;
 
   const fix = fixMap.get(ident);
   if (fix && isCoordinate(fix.longitude, fix.latitude)) {
     return { coordinate: coord(fix.longitude, fix.latitude), synthetic: false };
+  }
+
+  const runway = runwayMap.get(normalizeRunwayName(ident));
+  if (runway?.threshold) {
+    return { coordinate: runway.threshold, synthetic: true, quality: 'derived_from_runway_threshold' };
+  }
+
+  if (ident === 'DER') {
+    const startRunway = runwayMap.get(normalizeRunwayName(leg.fromFix));
+    if (startRunway?.end) {
+      return { coordinate: startRunway.end, synthetic: true, quality: 'derived_from_runway_end' };
+    }
+  }
+
+  const namedDme = dmeDistanceFromText(ident);
+  if (namedDme !== undefined && current && Number.isFinite(Number(leg.courseDegMag))) {
+    const distanceFromCurrent = Math.max(0.2, namedDme - (lastDmeNm ?? 0));
+    return {
+      coordinate: destinationPoint(pointRecord(current), Number(leg.courseDegMag), distanceFromCurrent),
+      synthetic: true,
+      dmeDistanceNm: namedDme,
+      quality: 'derived_from_radar_sid_dme',
+    };
   }
 
   if (!arcContext) return undefined;
@@ -295,6 +345,25 @@ function resolveLegTarget(
   return { coordinate: decoded.coordinate, synthetic: true, dmeDistanceNm: decoded.distanceNm };
 }
 
+function resolveLegStart(
+  leg: LegRecord,
+  fixMap: Map<string, FixRecord>,
+  runwayMap: Map<string, RunwayGeometryRecord>,
+  fallbackRunway?: string | null,
+): { coordinate: [number, number]; quality: string } | undefined {
+  const ident = String(leg.fromFix ?? fallbackRunway ?? '').trim().toUpperCase();
+  if (!ident) return undefined;
+  const fix = fixMap.get(ident);
+  if (fix && isCoordinate(fix.longitude, fix.latitude)) {
+    return { coordinate: coord(fix.longitude, fix.latitude), quality: 'derived_from_fix_coordinates' };
+  }
+  const runway = runwayMap.get(normalizeRunwayName(ident));
+  if (runway?.threshold) {
+    return { coordinate: runway.threshold, quality: 'derived_from_runway_threshold' };
+  }
+  return undefined;
+}
+
 // 终端 DME Fix 命名：D + 径向线(3位) + 距离字母（A=1NM … K=11NM, M=13NM）。
 function decodeDmeFix(ident: string, arcContext: ArcContext) {
   const match = ident.match(/^D(\d{3})([A-Z])$/);
@@ -307,6 +376,19 @@ function decodeDmeFix(ident: string, arcContext: ArcContext) {
     distanceNm,
     coordinate: destinationPoint(arcContext.center, radialDeg, distanceNm),
   };
+}
+
+function dmeDistanceFromText(value: unknown) {
+  const text = String(value ?? '').toUpperCase();
+  const match = text.match(/(\d+(?:\.\d+)?)\s*(?:DME|D)\s*[_\s-]*[A-Z]{2,4}/);
+  if (!match) return undefined;
+  const distanceNm = Number(match[1]);
+  return Number.isFinite(distanceNm) ? distanceNm : undefined;
+}
+
+function legDistanceOrDefault(value: unknown, fallbackNm: number) {
+  const distanceNm = Number(value);
+  return Number.isFinite(distanceNm) && distanceNm > 0 ? distanceNm : fallbackNm;
 }
 
 function syntheticFixFeatures(syntheticFixes: Map<string, FixRecord>): ProcedureFeature[] {
@@ -441,6 +523,60 @@ function navaidFeatures(navaidMap: Map<string, FixRecord>): ProcedureFeature[] {
   });
 }
 
+function runwayFeatures(runwayMap: Map<string, RunwayGeometryRecord>): ProcedureFeature[] {
+  return [...runwayMap.values()].flatMap((runway) => {
+    const features: ProcedureFeature[] = [];
+    if (runway.threshold && runway.end) {
+      features.push({
+        type: 'Feature',
+        geometry: line([runway.threshold, runway.end]),
+        properties: baseProps({
+          object_type: 'Runway',
+          feature_id: `runway_${slug(runway.identifier)}`,
+          ident: runway.identifier,
+          name: runway.identifier,
+          bearing_deg: runway.bearing ?? null,
+          source_page: runway.sourcePage ?? null,
+          source_text: [runway.rawThreshold, runway.rawEnd].filter(Boolean).join(' / ') || runway.identifier,
+          coordinate_quality: 'supporting_runway_data',
+          review_required: false,
+          confidence: 0.78,
+        }),
+      });
+    }
+    if (runway.threshold) {
+      features.push(runwayPointFeature(runway, 'RunwayThreshold', runway.threshold, runway.rawThreshold));
+    }
+    if (runway.end) {
+      features.push(runwayPointFeature(runway, 'RunwayEnd', runway.end, runway.rawEnd));
+    }
+    return features;
+  });
+}
+
+function runwayPointFeature(
+  runway: RunwayGeometryRecord,
+  objectType: 'RunwayThreshold' | 'RunwayEnd',
+  coordinate: [number, number],
+  rawCoordinate?: string | null,
+): ProcedureFeature {
+  return {
+    type: 'Feature',
+    geometry: { type: 'Point', coordinates: coordinate },
+    properties: baseProps({
+      object_type: objectType,
+      feature_id: `${objectType === 'RunwayThreshold' ? 'thr' : 'end'}_${slug(runway.identifier)}`,
+      ident: runway.identifier,
+      name: objectType === 'RunwayThreshold' ? `${runway.identifier} THR` : `${runway.identifier} END`,
+      source_page: runway.sourcePage ?? null,
+      source_text: rawCoordinate ?? runway.identifier,
+      coordinate_quality: 'supporting_runway_data',
+      review_required: false,
+      confidence: 0.78,
+    }),
+  };
+}
+
 function radialFeature(radial: GeometrySemanticRecord, center: FixRecord, lengthNm: number, objectType: 'RadialReference' | 'LeadRadial'): ProcedureFeature {
   const radialDeg = Number(radial.radialDeg);
   const start = destinationPoint(center, radialDeg, 0.5);
@@ -523,6 +659,162 @@ function legFeature(procedureName: string, leg: LegRecord, coordinates: number[]
       confidence: leg.confidence ?? 0.5,
     }),
   };
+}
+
+function finalCommonSegmentFeatures(
+  procedures: ProcedureRecord[],
+  fixMap: Map<string, FixRecord>,
+  fixMetadata: Map<string, FixMetadata>,
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+): ProcedureFeature[] {
+  const navigationType = String(understanding.navigationType ?? group.navigationType ?? '').toUpperCase();
+  if (navigationType !== 'RNAV') return [];
+  const course = runwayCourse(understanding, group);
+  if (!Number.isFinite(Number(course))) return [];
+
+  const finalFixCounts = new Map<string, number>();
+  for (const procedure of procedures) {
+    const orderedLegs = [...(procedure.legs ?? [])].sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0));
+    const finalFix = String(orderedLegs[orderedLegs.length - 1]?.fixIdentifier ?? '').toUpperCase();
+    if (finalFix) finalFixCounts.set(finalFix, (finalFixCounts.get(finalFix) ?? 0) + 1);
+  }
+
+  const finalFixIdent = [...finalFixCounts.entries()]
+    .filter(([ident, count]) => count >= 2 && fixMetadata.get(ident)?.role === 'IF')
+    .sort((a, b) => b[1] - a[1])[0]?.[0];
+  if (!finalFixIdent) return [];
+
+  const finalFix = fixMap.get(finalFixIdent);
+  if (!finalFix || !isCoordinate(finalFix.longitude, finalFix.latitude)) return [];
+
+  const start = coord(finalFix.longitude, finalFix.latitude);
+  const runwayTarget = runwayThresholdCoordinate(understanding, group);
+  const end = runwayTarget ?? destinationPoint(finalFix, Number(course), 8);
+  const runway = normalizeRunwayName(understanding.runway ?? group.runway ?? '');
+  const altitudeFt = fixMetadata.get(finalFixIdent)?.altitudeFt ?? null;
+
+  return [{
+    type: 'Feature',
+    geometry: line([start, end]),
+    properties: baseProps({
+      object_type: 'ProcedureLeg',
+      feature_id: `leg_final_common_${slug(finalFixIdent)}_${slug(runway)}`,
+      procedure: `${runway} FINAL`,
+      leg_seq: 999,
+      leg_type: 'FINAL_COMMON_SEGMENT',
+      path_terminator: 'FINAL_COMMON_SEGMENT',
+      from_fix: finalFixIdent,
+      to_fix: runway || null,
+      fix_identifier: runway || null,
+      course_deg_mag: Number(course),
+      distance_nm: Math.round(distanceNmFrom(finalFix, end) * 10) / 10,
+      turn_direction: null,
+      altitude_constraint: altitudeFt ? `+${String(Math.round(altitudeFt)).padStart(5, '0')}` : null,
+      altitude_ft: altitudeFt,
+      lower_ft: null,
+      upper_ft: null,
+      source_page: group.chartPageNo ?? group.chartPages?.[0] ?? null,
+      source_text: `${finalFixIdent} ${runway} inbound ${Math.round(Number(course))}°`,
+      coordinate_quality: runwayTarget ? 'derived_from_fix_to_runway_threshold' : 'derived_from_final_inbound_course',
+      review_required: !runwayTarget,
+      confidence: runwayTarget ? 0.7 : 0.55,
+    }),
+  }];
+}
+
+function enrichFixesWithPageCoordinates(
+  fixes: FixRecord[],
+  group: ProcedureGroup,
+  pages: PdfPageAsset[],
+): FixRecord[] {
+  const coordinateMap = waypointCoordinateMap(group, pages);
+  if (!coordinateMap.size) return fixes;
+
+  return fixes.map((fix) => {
+    if (!fix.identifier || isCoordinate(fix.longitude, fix.latitude)) return fix;
+    const coordinate = coordinateMap.get(String(fix.identifier).toUpperCase());
+    if (!coordinate) return fix;
+    return {
+      ...fix,
+      latitude: coordinate.lat,
+      longitude: coordinate.lon,
+      rawCoordinate: coordinate.raw,
+      sourcePage: coordinate.sourcePage,
+      confidence: Math.max(fix.confidence ?? 0, 0.82),
+      reviewRequired: fix.reviewRequired ?? false,
+    };
+  });
+}
+
+function waypointCoordinateMap(group: ProcedureGroup, pages: PdfPageAsset[]) {
+  const wantedPages = new Set([...(group.coordinatePages ?? []), ...(group.relatedPageNos ?? [])]);
+  const coordinates = new Map<string, { lat: number; lon: number; raw: string; sourcePage: number }>();
+  for (const page of pages) {
+    if (!wantedPages.has(page.pageNo)) continue;
+    const text = `${decodeEmbeddedPdfText(page.ocrText ?? '')}\n${decodeEmbeddedPdfText(page.textLayerText ?? '')}`.replace(/\u0003/g, ' ');
+    const coordinateRegion = text.includes('COORDINATE') ? text.slice(text.indexOf('COORDINATE')) : text;
+    const idents = [...new Set([
+      ...((group.procedureNames ?? []).flatMap((name) => name.match(/\b[A-Z][A-Z0-9]{2,5}\b/g) ?? [])),
+      ...((group.waypointCandidates ?? []).map((candidate) => candidate.ident)),
+    ])];
+    const tableIdents = [...coordinateRegion.matchAll(/\b[A-Z][A-Z0-9]{2,5}\b/g)].map((match) => match[0]);
+    for (const ident of [...idents, ...tableIdents]) {
+      const key = String(ident).toUpperCase();
+      if (coordinates.has(key)) continue;
+      const parsed = coordinateForIdent(coordinateRegion, key);
+      if (!parsed) continue;
+      coordinates.set(key, { ...parsed, sourcePage: page.pageNo });
+    }
+  }
+  return coordinates;
+}
+
+function coordinateForIdent(text: string, ident: string) {
+  const index = text.indexOf(ident);
+  if (index < 0) return undefined;
+  const segment = text.slice(index + ident.length, index + ident.length + 120);
+  const numbers = [...segment.matchAll(/\d+(?:\.\d+)?/g)].map((match) => match[0]);
+  if (numbers.length < 6) return undefined;
+  const [latDegText, latMinText, latSecText, lonDegText, lonMinText, lonSecText] = numbers.slice(0, 6);
+  const [latDeg, latMin, latSec, lonDeg, lonMin, lonSec] = [
+    latDegText,
+    latMinText,
+    latSecText,
+    lonDegText,
+    lonMinText,
+    lonSecText,
+  ].map(Number);
+  if (![latDeg, latMin, latSec, lonDeg, lonMin, lonSec].every(Number.isFinite)) return undefined;
+  if (latDeg > 90 || lonDeg > 180 || latMin >= 60 || lonMin >= 60 || latSec >= 60 || lonSec >= 60) return undefined;
+  const lat = latDeg + latMin / 60 + latSec / 3600;
+  const lon = lonDeg + lonMin / 60 + lonSec / 3600;
+  return {
+    lat,
+    lon,
+    raw: `${latDegText.padStart(2, '0')}${latMinText.padStart(2, '0')}${formatSeconds(latSecText)}N ${lonDegText.padStart(3, '0')}${lonMinText.padStart(2, '0')}${formatSeconds(lonSecText)}E`,
+  };
+}
+
+function decodeEmbeddedPdfText(text: string) {
+  const hasEncodedGlyphs = [...text].some((char) => {
+    const code = char.charCodeAt(0);
+    return code === 0x03 || code === 0x0e || code === 0x10 || code === 0x11 || (code >= 0x13 && code <= 0x1c);
+  });
+  if (!hasEncodedGlyphs) return text;
+
+  return [...text].map((char) => {
+    const code = char.charCodeAt(0);
+    if (code === 0x0e) return '+';
+    if (code === 0x10) return '-';
+    if (code === 0x11) return '.';
+    if (code >= 0x13 && code <= 0x3d) return String.fromCharCode(code + 0x1d);
+    return char;
+  }).join('');
+}
+
+function formatSeconds(value: string) {
+  return Number(value).toFixed(2).padStart(5, '0');
 }
 
 // labelPlan → LabelPoint：把识别阶段的标签规划落成带 text_anchor/text_offset 的点要素。
@@ -850,6 +1142,26 @@ function runwayCourse(understanding: ProcedureUnderstandingResult, group: Proced
   return match ? Number(match[1]) * 10 : undefined;
 }
 
+function runwayThresholdCoordinate(understanding: ProcedureUnderstandingResult, group: ProcedureGroup): [number, number] | undefined {
+  const runwayName = normalizeRunwayName(understanding.runway ?? group.runway ?? '');
+  const runway = (understanding.runways ?? []).find((item) => {
+    const record = item as Record<string, unknown>;
+    return normalizeRunwayName(record.identifier) === runwayName;
+  }) as Record<string, unknown> | undefined;
+  if (!runway) return undefined;
+  const lat = Number(runway.thresholdLatitude);
+  const lon = Number(runway.thresholdLongitude);
+  return isCoordinate(lon, lat) ? [lon, lat] : undefined;
+}
+
+function normalizeRunwayName(value: unknown) {
+  const text = String(value ?? '').toUpperCase().replace(/\s+/g, '').replace(/^RWY/, 'RW');
+  const match = text.match(/^RW(\d{2}[A-Z]?)$/);
+  if (match) return `RW${match[1]}`;
+  const digits = text.match(/(\d{2}[A-Z]?)/)?.[1];
+  return digits ? `RW${digits}` : text;
+}
+
 function baseProps(properties: Record<string, unknown>) {
   return {
     ...properties,
@@ -880,6 +1192,76 @@ function isCoordinate(lon: unknown, lat: unknown) {
 
 function slug(value: unknown) {
   return String(value ?? 'unknown').trim().replace(/[^\w]+/g, '_').replace(/^_+|_+$/g, '') || 'unknown';
+}
+
+function buildRunwayMap(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {
+  const runways = new Map<string, RunwayGeometryRecord>();
+
+  for (const runway of (understanding.runways ?? []) as Array<Record<string, unknown>>) {
+    const identifier = normalizeRunwayName(runway.identifier);
+    if (!identifier) continue;
+    const threshold = coordinateFromLonLat(runway.thresholdLongitude, runway.thresholdLatitude);
+    const end = coordinateFromLonLat(runway.endLongitude, runway.endLatitude);
+    if (!threshold && !end) continue;
+    runways.set(identifier, {
+      identifier,
+      threshold,
+      end,
+      bearing: finiteNumber(runway.magneticBearing ?? runway.trueBearing),
+      rawThreshold: typeof runway.rawCoordinate === 'string' ? runway.rawCoordinate : null,
+      rawEnd: null,
+      sourcePage: finiteNumber(runway.sourcePageNo),
+    });
+  }
+
+  const runwayData = group.supportingInfoSummary?.runwayData;
+  const summaries = Array.isArray(runwayData) ? runwayData as Array<Record<string, unknown>> : [];
+  for (const summary of summaries) {
+    const coordinates = Array.isArray(summary.coordinates) ? summary.coordinates as string[] : [];
+    const parsed = coordinates.map((value) => parseCompactLatLon(value));
+    if (parsed.length >= 2 && parsed[0] && parsed[1]) {
+      const bearing = firstBearing(summary, 0);
+      runways.set('RW16', {
+        identifier: 'RW16',
+        threshold: [parsed[0].lon, parsed[0].lat],
+        end: [parsed[1].lon, parsed[1].lat],
+        bearing,
+        rawThreshold: coordinates[0],
+        rawEnd: coordinates[1],
+        sourcePage: finiteNumber(summary.pageNo),
+      });
+    }
+    if (parsed.length >= 4 && parsed[2] && parsed[3]) {
+      const bearing = firstBearing(summary, 1);
+      runways.set('RW34', {
+        identifier: 'RW34',
+        threshold: [parsed[2].lon, parsed[2].lat],
+        end: [parsed[3].lon, parsed[3].lat],
+        bearing,
+        rawThreshold: coordinates[2],
+        rawEnd: coordinates[3],
+        sourcePage: finiteNumber(summary.pageNo),
+      });
+    }
+  }
+
+  return runways;
+}
+
+function coordinateFromLonLat(lon: unknown, lat: unknown): [number, number] | undefined {
+  return isCoordinate(lon, lat) ? [Number(lon), Number(lat)] : undefined;
+}
+
+function firstBearing(summary: Record<string, unknown>, index: number) {
+  const trueBearings = Array.isArray(summary.trueBearings) ? summary.trueBearings : [];
+  return finiteNumber(trueBearings[index]);
+}
+
+function finiteNumber(value: unknown) {
+  if (value === null || value === undefined) return undefined;
+  const match = String(value).match(/-?\d+(?:\.\d+)?/);
+  const number = match ? Number(match[0]) : Number(value);
+  return Number.isFinite(number) ? number : undefined;
 }
 
 function buildNavaidMap(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {

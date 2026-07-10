@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildGeoJsonFromProcedureUnderstanding } from '../procedureUnderstandingGeojson';
-import type { ProcedureGroup, ProcedureUnderstandingResult } from '../../types/procedure';
+import type { PdfPageAsset, ProcedureGroup, ProcedureUnderstandingResult } from '../../types/procedure';
 
 const EARTH_RADIUS_NM = 3440.065;
 const VJB = { lat: 1.6394, lon: 103.6736 };
@@ -219,6 +219,116 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assert.equal(commonFix?.properties?.final_track_mag, 160);
     const track = geojson.features.find((f) => f.properties?.object_type === 'ProcedureTrack');
     assert.equal(track?.properties?.coordinate_quality, 'derived_from_fix_coordinates');
+  });
+
+  it('adds a final common segment from the shared IF toward the runway', () => {
+    const rnav: ProcedureUnderstandingResult = {
+      airportIcao: 'WMKJ',
+      runway: 'RWY16',
+      navigationType: 'RNAV',
+      chartTexts: [
+        { text: 'OSRUP (IF) 2000', role: 'FIX', region: 'MAIN_CHART', usedInProcedure: true, confidence: 0.9 },
+      ],
+      fixes: [
+        { identifier: 'ADLOV', latitude: 2.04, longitude: 103.79 },
+        { identifier: 'EMTUV', latitude: 1.69, longitude: 103.3 },
+        { identifier: 'GOVNU', latitude: 1.85, longitude: 103.71 },
+        { identifier: 'UDOSU', latitude: 1.76, longitude: 103.52 },
+        { identifier: 'OSRUP', latitude: 1.8, longitude: 103.61 },
+      ],
+      procedures: [
+        {
+          procedureName: 'ADLOV 1E',
+          runway: 'RWY16',
+          legs: [
+            { sequence: 10, pathTerminator: 'IF', fixIdentifier: 'ADLOV' },
+            { sequence: 20, pathTerminator: 'TF', fromFix: 'ADLOV', fixIdentifier: 'GOVNU', courseDegMag: 198, distanceNm: 14.5 },
+            { sequence: 30, pathTerminator: 'TF', fromFix: 'GOVNU', fixIdentifier: 'OSRUP', courseDegMag: 250, distanceNm: 6, altitudeConstraint: { rawText: '+2000', altitudeFt: 2000 } },
+          ],
+        },
+        {
+          procedureName: 'EMTUV 1E',
+          runway: 'RWY16',
+          legs: [
+            { sequence: 10, pathTerminator: 'IF', fixIdentifier: 'EMTUV' },
+            { sequence: 20, pathTerminator: 'TF', fromFix: 'EMTUV', fixIdentifier: 'UDOSU', courseDegMag: 72, distanceNm: 13.4 },
+            { sequence: 30, pathTerminator: 'TF', fromFix: 'UDOSU', fixIdentifier: 'OSRUP', courseDegMag: 70, distanceNm: 6, altitudeConstraint: { rawText: '+2000', altitudeFt: 2000 } },
+          ],
+        },
+      ],
+    };
+
+    const geojson = buildGeoJsonFromProcedureUnderstanding(rnav, group);
+    const final = geojson.features.find((f) => f.properties?.leg_type === 'FINAL_COMMON_SEGMENT');
+    assert.ok(final, 'final common segment missing');
+    assert.equal(final?.properties?.from_fix, 'OSRUP');
+    assert.equal(final?.properties?.to_fix, 'RW16');
+    assert.equal(final?.properties?.course_deg_mag, 160);
+    assert.equal(final?.properties?.altitude_ft, 2000);
+    assert.ok((final?.geometry as GeoJSON.LineString).coordinates.length >= 2);
+  });
+
+  it('enriches SID fixes from coordinate pages and renders CA initial climb legs', () => {
+    const sidGroup = {
+      ...group,
+      packageName: 'RWY16 RNAV SID ADLOV 1J',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'RNAV',
+      coordinatePages: [35],
+      relatedPageNos: [33, 35],
+      procedureNames: ['ADLOV 1J'],
+      waypointCandidates: [{ ident: 'INVOV' }, { ident: 'ADLOV' }],
+    } as unknown as ProcedureGroup;
+    const sid: ProcedureUnderstandingResult = {
+      airportIcao: 'WMKJ',
+      runway: 'RWY16',
+      navigationType: 'RNAV',
+      runways: [
+        {
+          identifier: 'RWY16',
+          thresholdLatitude: 1.6555083333333331,
+          thresholdLongitude: 103.66396944444445,
+          endLatitude: 1.6086111111111112,
+          endLongitude: 103.67527777777778,
+        },
+      ],
+      fixes: [
+        { identifier: 'INVOV' },
+        { identifier: 'ADLOV' },
+      ],
+      procedures: [
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RWY16',
+          legs: [
+            { sequence: 10, pathTerminator: 'CA', courseDegMag: 160, distanceNm: 0, altitudeConstraint: { rawText: '+1000', altitudeFt: 1000 } },
+            { sequence: 20, pathTerminator: 'DF', fixIdentifier: 'INVOV', turnDirection: 'R', altitudeConstraint: { rawText: '+6000', altitudeFt: 6000 } },
+            { sequence: 30, pathTerminator: 'TF', fromFix: 'INVOV', fixIdentifier: 'ADLOV', courseDegMag: 41, distanceNm: 23.8 },
+          ],
+        },
+      ],
+    };
+    const pages = [{
+      pageNo: 35,
+      chartRole: 'WAYPOINT_COORDINATES',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'RNAV',
+      textLayerText: 'COORDINATE INVOV 01 40 31.40 N 103 32 26.40 E ADLOV 02 03 57.10 N 103 46 40.10 E',
+    }] as unknown as PdfPageAsset[];
+
+    const geojson = buildGeoJsonFromProcedureUnderstanding(sid, sidGroup, pages);
+    const invov = geojson.features.find((f) => f.properties?.object_type === 'ProcedureFix' && f.properties?.ident === 'INVOV');
+    const adlov = geojson.features.find((f) => f.properties?.object_type === 'ProcedureFix' && f.properties?.ident === 'ADLOV');
+    assertClose((invov?.geometry as GeoJSON.Point).coordinates as [number, number], [103.54066666666667, 1.6753888888888888], 0.00001);
+    assertClose((adlov?.geometry as GeoJSON.Point).coordinates as [number, number], [103.77780555555556, 2.065861111111111], 0.00001);
+
+    const ca = geojson.features.find((f) => f.properties?.object_type === 'ProcedureLeg' && f.properties?.leg_seq === 10);
+    assert.ok(ca, 'CA leg feature missing');
+    assert.equal(ca?.properties?.coordinate_quality, 'derived_from_sid_course_to_altitude');
+    const coords = (ca?.geometry as GeoJSON.LineString).coordinates;
+    assert.equal(coords.length, 2);
+    assert.ok(distanceNm({ lat: coords[0][1], lon: coords[0][0] }, coords[1]) > 1.9, 'CA leg should use fallback distance when input is zero');
   });
 });
 

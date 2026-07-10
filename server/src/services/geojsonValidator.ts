@@ -17,6 +17,7 @@ export interface GeoJsonValidationResult {
   valid: boolean;
   warnings: string[];
   errors: string[];
+  renderableCount: number;
 }
 
 export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGroup): GeoJsonValidationResult {
@@ -24,10 +25,11 @@ export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGrou
   const errors: string[] = [];
 
   if (!isFeatureCollection(geojson)) {
-    return { valid: false, warnings, errors: ['GeoJSON must be a FeatureCollection.'] };
+    return { valid: false, warnings, errors: ['GeoJSON must be a FeatureCollection.'], renderableCount: 0 };
   }
 
   let hasLabelPoint = false;
+  let renderableCount = 0;
   const allowedSourcePages = group ? new Set([...(group.relatedPageNos ?? []), ...(group.supportingPages ?? [])]) : undefined;
   geojson.features.forEach((feature, index) => {
     const props = (feature.properties ?? {}) as Record<string, unknown>;
@@ -56,17 +58,22 @@ export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGrou
     }
     if (feature.geometry && !isGeometry(feature.geometry)) {
       errors.push(`feature[${index}] geometry is invalid.`);
+    } else if (feature.geometry) {
+      renderableCount += 1;
     }
   });
 
   if (!hasLabelPoint) warnings.push('GeoJSON does not include LabelPoint features; map labels may be incomplete.');
+  if (group && ['SID', 'STAR', 'APPROACH'].includes(group.packageType || '') && renderableCount === 0) {
+    errors.push('GeoJSON contains no renderable geometry for map preview.');
+  }
   if (group?.procedureCategory === 'APPROACH' && !group.supportingInfoRefs?.runwayOperationalData?.length) {
     warnings.push('APPROACH package is missing runwayOperationalData supporting info.');
   }
   if (/(ILS_LOC|ILS|LOC|DME_ARC|CONVENTIONAL|VOR|NDB)/.test(group?.navigationType || '') && !group?.supportingInfoRefs?.navaid?.length) {
     warnings.push(`${group?.navigationType} package is missing navaid supporting info.`);
   }
-  return { valid: errors.length === 0, warnings, errors };
+  return { valid: errors.length === 0, warnings, errors, renderableCount };
 }
 
 export function withBbox(geojson: FeatureCollection<Geometry | null, GeoJsonProperties>) {
