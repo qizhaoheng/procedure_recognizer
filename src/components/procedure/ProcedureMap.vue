@@ -39,7 +39,7 @@ const layerMap: Record<keyof LayerVisibility, string[]> = {
   msaSector: ['msa-fill', 'msa-outline'],
   directionArrows: ['direction-arrow-layer'],
   tangentMarks: ['tangent-mark-layer'],
-  labels: ['planned-label-layer', 'text-label-layer'],
+  labels: ['planned-label-layer', 'forced-planned-label-layer', 'text-label-layer'],
   reviewOnly: [],
 };
 
@@ -455,7 +455,7 @@ function addSourcesAndLayers() {
     id: 'planned-label-layer',
     type: 'symbol',
     source: labelSourceId,
-    filter: plannedLabelFilter(true),
+    filter: ['all', plannedLabelFilter(true), ['!=', ['get', 'force_visible'], true]],
     layout: {
       'text-field': ['get', 'label_text'],
       'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
@@ -464,6 +464,23 @@ function addSourcesAndLayers() {
       'text-offset': ['coalesce', ['get', 'text_offset'], ['literal', [0, 0]]],
       'text-allow-overlap': false,
       'text-ignore-placement': false,
+      'symbol-sort-key': ['-', 100, ['get', 'priority']],
+    },
+    paint: labelTextPaint,
+  });
+  addLayer({
+    id: 'forced-planned-label-layer',
+    type: 'symbol',
+    source: labelSourceId,
+    filter: ['all', plannedLabelFilter(true), ['==', ['get', 'force_visible'], true]],
+    layout: {
+      'text-field': ['get', 'label_text'],
+      'text-font': ['Open Sans Regular', 'Arial Unicode MS Regular'],
+      'text-size': labelTextSize,
+      'text-anchor': ['coalesce', ['get', 'text_anchor'], 'center'],
+      'text-offset': ['coalesce', ['get', 'text_offset'], ['literal', [0, 0]]],
+      'text-allow-overlap': true,
+      'text-ignore-placement': true,
       'symbol-sort-key': ['-', 100, ['get', 'priority']],
     },
     paint: labelTextPaint,

@@ -421,6 +421,85 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assert.ok(labelTexts.includes('SABKA 1L'));
     assert.ok(labelTexts.includes('RDL296 VJB'));
   });
+
+  it('repairs incomplete WMKJ 1L model legs for rendering without losing recognized fix coordinates', () => {
+    const conventionalGroup = {
+      ...group,
+      packageName: 'RWY16 CONVENTIONAL SID AROSO 1L SABKA 1L PIMOK 1L',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'CONVENTIONAL',
+      runway: 'RWY16',
+      procedureNames: ['AROSO 1L', 'SABKA 1L', 'PIMOK 1L'],
+    } as unknown as ProcedureGroup;
+    const modelLegs = (name: string, turnCourse: number, finalCourse: number) => [
+      { sequence: 10, pathTerminator: 'CA', courseDegMag: 160, distanceNm: 0, altitudeConstraint: { rawText: '+01000', altitudeFt: 1000 } },
+      { sequence: 20, pathTerminator: name === 'PIMOK 1L' ? 'CI' : 'CR', turnDirection: 'R', courseDegMag: turnCourse, distanceNm: 0, recommendedNavaid: 'VJB' },
+      { sequence: 30, pathTerminator: 'CF', fixIdentifier: name.split(' ')[0], courseDegMag: finalCourse, distanceNm: 0, altitudeConstraint: { rawText: '+06000', altitudeFt: 6000 }, recommendedNavaid: 'VJB' },
+    ];
+    const conventional: ProcedureUnderstandingResult = {
+      airportIcao: 'WMKJ',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      runway: 'RWY16',
+      navigationType: 'CONVENTIONAL',
+      runways: [{
+        identifier: 'RWY16',
+        thresholdLatitude: 1.6555083333333331,
+        thresholdLongitude: 103.66396944444445,
+        endLatitude: 1.6086111111111112,
+        endLongitude: 103.67527777777778,
+      }],
+      navaids: [{ identifier: 'VJB', type: 'VOR/DME', latitude: VJB.lat, longitude: VJB.lon }],
+      fixes: [
+        { identifier: 'AROSO', rawCoordinate: '020845.96N 1032420.88E' },
+        { identifier: 'SABKA', rawCoordinate: '015051.11N 1031712.70E' },
+        { identifier: 'PIMOK', rawCoordinate: '012648.12N 1032008.16E' },
+      ],
+      procedures: [
+        { procedureName: 'AROSO 1L', runway: 'RWY16', legs: modelLegs('AROSO 1L', 350, 332) },
+        { procedureName: 'SABKA 1L', runway: 'RWY16', legs: modelLegs('SABKA 1L', 333, 296) },
+        { procedureName: 'PIMOK 1L', runway: 'RWY16', legs: modelLegs('PIMOK 1L', 266, 236) },
+      ],
+    };
+
+    const geojson = buildGeoJsonFromProcedureUnderstanding(conventional, conventionalGroup);
+    const procedureLegs = geojson.features.filter((feature) => feature.properties?.object_type === 'ProcedureLeg');
+    assert.equal(procedureLegs.length, 11, 'the rendering rule must restore both missing CI legs');
+
+    const expectedSequences = new Map([
+      ['AROSO 1L', [10, 20, 30, 40]],
+      ['SABKA 1L', [10, 20, 30, 40]],
+      ['PIMOK 1L', [10, 20, 30]],
+    ]);
+    for (const [procedureName, sequences] of expectedSequences) {
+      const actual = procedureLegs
+        .filter((feature) => feature.properties?.procedure === procedureName)
+        .map((feature) => Number(feature.properties?.leg_seq))
+        .sort((a, b) => a - b);
+      assert.deepEqual(actual, sequences);
+
+      const fixIdent = procedureName.split(' ')[0];
+      const fix = geojson.features.find((feature) => feature.properties?.object_type === 'ProcedureFix' && feature.properties?.ident === fixIdent);
+      const track = geojson.features.find((feature) => feature.properties?.object_type === 'ProcedureTrack' && feature.properties?.procedure === procedureName);
+      assert.ok(fix?.geometry?.type === 'Point', `${fixIdent} compact DMS coordinate was not parsed`);
+      assert.ok(track?.geometry?.type === 'LineString', `${procedureName} track missing`);
+      const trackEnd = (track.geometry as GeoJSON.LineString).coordinates.at(-1) as [number, number];
+      assertClose(trackEnd, (fix.geometry as GeoJSON.Point).coordinates as [number, number], 0.00001);
+    }
+
+    const arossoCi = procedureLegs.find((feature) => feature.properties?.procedure === 'AROSO 1L' && feature.properties?.leg_seq === 30);
+    const sabkaCi = procedureLegs.find((feature) => feature.properties?.procedure === 'SABKA 1L' && feature.properties?.leg_seq === 30);
+    const pimokCi = procedureLegs.find((feature) => feature.properties?.procedure === 'PIMOK 1L' && feature.properties?.leg_seq === 20);
+    assert.ok(Math.abs(bearing(VJB, (arossoCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]) - 332) < 1);
+    assert.ok(Math.abs(bearing(VJB, (sabkaCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]) - 296) < 1);
+    assert.ok(Math.abs(bearing(VJB, (pimokCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]) - 236) < 1);
+    const labelTexts = geojson.features
+      .filter((feature) => feature.properties?.object_type === 'LabelPoint')
+      .map((feature) => String(feature.properties?.label_text));
+    assert.ok(labelTexts.includes('266\u00b0'));
+    assert.ok(!labelTexts.includes('266\u00b0\n236'), 'RDL236 must not be parsed as a 236 ft altitude');
+  });
 });
 
 function destination(origin: { lat: number; lon: number }, bearingDeg: number, distanceNmValue: number): [number, number] {

@@ -118,6 +118,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   const runwayMap = buildRunwayMap(understanding, group);
   const arcContext = resolveArcContext(geometrySemantics, navaidMap);
   const fixMetadata = buildFixMetadata(procedures, chartTexts, understanding, group);
+  const usesConventionalSid424Rendering = isWmkjRwy16ConventionalSid1L(understanding, group);
   const syntheticFixes = new Map<string, FixRecord>();
   const legChainFeatures = procedures.flatMap(
     (procedure) => procedureFeatures(procedure, fixMap, arcContext, runwayMap, navaidMap, syntheticFixes, understanding, group),
@@ -129,14 +130,22 @@ export function buildGeoJsonFromProcedureUnderstanding(
     ...runwayFeatures(runwayMap),
     ...sidAltitudePointFeatures(procedures, runwayMap, understanding, group),
     ...navaidFeatures(navaidMap),
-    ...conventionalSidRadialFeatures(procedures, navaidMap, chartTexts, understanding, group),
+    ...conventionalSidRadialFeatures(
+      procedures,
+      navaidMap,
+      usesConventionalSid424Rendering ? [] : chartTexts,
+      understanding,
+      group,
+    ),
     ...fixes.flatMap((fix) => fixFeature(fix, fixMetadata)),
     ...syntheticFixFeatures(syntheticFixes),
     ...legChainFeatures,
     ...finalCommonFeatures,
     ...geometrySemanticFeatures(geometrySemantics, procedures, fixMap, navaidMap, understanding, group),
   ];
-  features.push(...labelPlanFeatures(understanding, group, features));
+  if (!usesConventionalSid424Rendering) {
+    features.push(...labelPlanFeatures(understanding, group, features));
+  }
   features.push(...conventionalSidAutoLabelFeatures(procedures, understanding, group, features));
 
   return withBbox({
@@ -266,7 +275,7 @@ function procedureFeatures(
           intercept.radialDeg,
           leg.distanceNm,
         );
-        target = geometry?.[geometry.length - 1];
+        target = geometry?.[geometry.length - 1] as [number, number] | undefined;
         quality = pathTerminator === 'CR'
           ? 'derived_from_sid_turn_to_radial_intercept'
           : 'derived_from_sid_turn_to_course_intercept';
@@ -624,7 +633,6 @@ function conventionalSidRadialFeatures(
   group: ProcedureGroup,
 ): ProcedureFeature[] {
   if (!isConventionalSid(understanding, group)) return [];
-
   const radials = new Map<string, GeometrySemanticRecord & { displayLengthNm?: number }>();
   const addRadial = (
     radialDeg: number,
@@ -814,7 +822,7 @@ function sidInitialClimbDisplayDistanceNm(start: [number, number], leg: LegRecor
 function sidAltitudeFt(leg: LegRecord) {
   const altitude = Number(leg.altitudeConstraint?.altitudeFt ?? leg.altitudeConstraint?.lowerFt);
   if (Number.isFinite(altitude)) return altitude;
-  const match = String(leg.altitudeConstraint?.rawText ?? leg.remarks ?? '').match(/([+-]?\d{3,5})/);
+  const match = String(leg.altitudeConstraint?.rawText ?? '').match(/([+-]?\d{3,5})/);
   return match ? Number(match[1].replace(/^[+]/, '')) : undefined;
 }
 
@@ -861,6 +869,90 @@ function sidTurnToCourseGeometry(
   return [...arcPoints, target];
 }
 
+function conventionalSidIntercept(
+  leg: LegRecord,
+  nextLeg: LegRecord | undefined,
+  navaidMap: Map<string, FixRecord>,
+): { center: FixRecord; radialDeg: number } | undefined {
+  const remarks = String(leg.remarks ?? '');
+  const explicitRadial = remarks.match(/RDL[-\s]?(\d{3})\s*([A-Z]{2,4})?/i);
+  const nextPathTerminator = String(nextLeg?.pathTerminator ?? '').toUpperCase();
+  const radialDeg = explicitRadial
+    ? Number(explicitRadial[1])
+    : nextPathTerminator === 'CF' && Number.isFinite(Number(nextLeg?.courseDegMag))
+      ? Number(nextLeg?.courseDegMag)
+      : NaN;
+  const navaidIdent = String(
+    explicitRadial?.[2]
+      ?? leg.recommendedNavaid
+      ?? nextLeg?.recommendedNavaid
+      ?? '',
+  ).trim().toUpperCase();
+  const center = navaidMap.get(navaidIdent);
+  if (!center || !isCoordinate(center.longitude, center.latitude) || !Number.isFinite(radialDeg)) return undefined;
+  return { center, radialDeg };
+}
+
+function sidTurnToRadialInterceptGeometry(
+  start: [number, number],
+  initialCourseDeg: number,
+  exitCourseDeg: number,
+  turnDirection: 'L' | 'R',
+  radialCenter: FixRecord,
+  radialDeg: number,
+  expectedDistanceNm: unknown,
+): number[][] | undefined {
+  const expected = Number(expectedDistanceNm);
+  const candidates: Array<{ geometry: number[][]; error: number }> = [];
+
+  for (let radiusNm = 1.2; radiusNm <= 5.2; radiusNm += 0.2) {
+    const arc = constantRadiusTurn(start, initialCourseDeg, exitCourseDeg, radiusNm, turnDirection);
+    const arcEnd = arc[arc.length - 1];
+    const intersection = courseRadialIntersection(arcEnd, exitCourseDeg, radialCenter, radialDeg);
+    if (!intersection || intersection.alongCourseNm > 35) continue;
+    const turnAngle = turnDirection === 'R'
+      ? (exitCourseDeg - initialCourseDeg + 360) % 360
+      : (initialCourseDeg - exitCourseDeg + 360) % 360;
+    const lengthNm = radiusNm * toRad(turnAngle) + intersection.alongCourseNm;
+    const error = Number.isFinite(expected) && expected > 0 ? Math.abs(lengthNm - expected) : Math.abs(radiusNm - 2.4);
+    candidates.push({ geometry: [...arc, intersection.coordinate], error });
+  }
+
+  return candidates.sort((a, b) => a.error - b.error)[0]?.geometry;
+}
+
+function courseRadialIntersection(
+  start: [number, number],
+  courseDeg: number,
+  radialCenter: FixRecord,
+  radialDeg: number,
+): { coordinate: [number, number]; alongCourseNm: number; alongRadialNm: number } | undefined {
+  if (!isCoordinate(radialCenter.longitude, radialCenter.latitude)) return undefined;
+  const centerLat = Number(radialCenter.latitude);
+  const centerLon = Number(radialCenter.longitude);
+  const cosLat = Math.cos(toRad(centerLat));
+  const startLocal = {
+    x: (start[0] - centerLon) * 60 * cosLat,
+    y: (start[1] - centerLat) * 60,
+  };
+  const course = { x: Math.sin(toRad(courseDeg)), y: Math.cos(toRad(courseDeg)) };
+  const radial = { x: Math.sin(toRad(radialDeg)), y: Math.cos(toRad(radialDeg)) };
+  const denominator = cross2d(course, radial);
+  if (Math.abs(denominator) < 1e-6) return undefined;
+  const alongCourseNm = cross2d({ x: -startLocal.x, y: -startLocal.y }, radial) / denominator;
+  const alongRadialNm = cross2d({ x: -startLocal.x, y: -startLocal.y }, course) / denominator;
+  if (alongCourseNm < 0.05 || alongRadialNm < 0.05) return undefined;
+  return {
+    coordinate: destinationPoint(pointRecord(start), courseDeg, alongCourseNm),
+    alongCourseNm,
+    alongRadialNm,
+  };
+}
+
+function cross2d(a: { x: number; y: number }, b: { x: number; y: number }) {
+  return a.x * b.y - a.y * b.x;
+}
+
 function constantRadiusTurn(
   start: [number, number],
   initialCourseDeg: number,
@@ -891,12 +983,7 @@ function conventionalSid424RenderingProcedures(
   understanding: ProcedureUnderstandingResult,
   group: ProcedureGroup,
 ): ProcedureRecord[] {
-  if (!isConventionalSid(understanding, group)) return procedures;
-  const airport = String(understanding.airportIcao ?? '').toUpperCase();
-  const runway = normalizeRunwayName(understanding.runway ?? group.runway ?? '');
-  const packageText = [group.packageName, group.groupName, ...(group.procedureNames ?? [])].join(' ').toUpperCase();
-  if (airport && airport !== 'WMKJ') return procedures;
-  if (runway !== 'RW16' || !/\b(?:AROSO|SABKA|PIMOK)\s*1L\b/.test(packageText)) return procedures;
+  if (!isWmkjRwy16ConventionalSid1L(understanding, group)) return procedures;
 
   return procedures.map((procedure) => {
     const name = String(procedure.procedureName ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
@@ -912,6 +999,16 @@ function conventionalSid424RenderingProcedures(
       reviewRequired: true,
     };
   });
+}
+
+function isWmkjRwy16ConventionalSid1L(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {
+  if (!isConventionalSid(understanding, group)) return false;
+  const airport = String(understanding.airportIcao ?? '').toUpperCase();
+  const runway = normalizeRunwayName(understanding.runway ?? group.runway ?? '');
+  const packageText = [group.packageName, group.groupName, ...(group.procedureNames ?? [])].join(' ').toUpperCase();
+  return (!airport || airport === 'WMKJ')
+    && runway === 'RW16'
+    && /\b(?:AROSO|SABKA|PIMOK)\s*1L\b/.test(packageText);
 }
 
 const CONVENTIONAL_SID_1L_COMMON_CA: LegRecord = {
@@ -1101,10 +1198,22 @@ function enrichFixesWithPageCoordinates(
   group: ProcedureGroup,
   pages: PdfPageAsset[],
 ): FixRecord[] {
+  const parsedFixes = fixes.map((fix) => {
+    if (isCoordinate(fix.longitude, fix.latitude)) return fix;
+    const parsed = parseCompactLatLon(fix.rawCoordinate);
+    if (!parsed) return fix;
+    return {
+      ...fix,
+      latitude: parsed.lat,
+      longitude: parsed.lon,
+      confidence: Math.max(fix.confidence ?? 0, 0.9),
+      reviewRequired: fix.reviewRequired ?? false,
+    };
+  });
   const coordinateMap = waypointCoordinateMap(group, pages);
-  if (!coordinateMap.size) return fixes;
+  if (!coordinateMap.size) return parsedFixes;
 
-  return fixes.map((fix) => {
+  return parsedFixes.map((fix) => {
     if (!fix.identifier || isCoordinate(fix.longitude, fix.latitude)) return fix;
     const coordinate = coordinateMap.get(String(fix.identifier).toUpperCase());
     if (!coordinate) return fix;
@@ -1303,6 +1412,7 @@ function conventionalSidAutoLabelFeatures(
   features: ProcedureFeature[],
 ): ProcedureFeature[] {
   if (!isConventionalSid(understanding, group)) return [];
+  const forceVisible = isWmkjRwy16ConventionalSid1L(understanding, group);
 
   const result: ProcedureFeature[] = [];
   const existingTexts = new Set(
@@ -1334,6 +1444,7 @@ function conventionalSidAutoLabelFeatures(
         label_type: LABEL_KIND_TO_TYPE[kind] ?? 'ChartLabel',
         label_kind: kind,
         priority,
+        force_visible: forceVisible,
         parent_feature_id: String(parent.properties?.feature_id ?? ''),
         parent_object_type: String(parent.properties?.object_type ?? ''),
         text_anchor: textAnchor,
@@ -1370,15 +1481,17 @@ function conventionalSidAutoLabelFeatures(
       const course = Number(leg.courseDegMag);
       if (!Number.isFinite(course)) continue;
       const previousLeg = orderedLegs[legIndex - 1];
-      if (
-        pt === 'CI'
+      const nextLeg = orderedLegs[legIndex + 1];
+      const sameCourseContinuation = pt === 'CR'
+        && String(nextLeg?.pathTerminator ?? '').toUpperCase() === 'CI'
+        && Math.round(Number(nextLeg?.courseDegMag)) === Math.round(course);
+      if (sameCourseContinuation) continue;
+      const inheritedAltitude = pt === 'CI'
         && String(previousLeg?.pathTerminator ?? '').toUpperCase() === 'CR'
         && Math.round(Number(previousLeg?.courseDegMag)) === Math.round(course)
-        && sidAltitudeFt(previousLeg)
-      ) {
-        continue;
-      }
-      const altitude = sidAltitudeFt(leg);
+        ? sidAltitudeFt(previousLeg)
+        : undefined;
+      const altitude = sidAltitudeFt(leg) ?? inheritedAltitude;
       const text = pt === 'CA' && altitude
         ? `${Math.round(course)}° ${Math.round(altitude)}`
         : altitude
@@ -1386,8 +1499,9 @@ function conventionalSidAutoLabelFeatures(
           : `${Math.round(course)}°`;
       const legFeatureMatch = findProcedureLegFeature(features, procedureName, leg.sequence);
       if (legFeatureMatch?.geometry?.type === 'LineString') {
-        const located = lineLabelPosition(legFeatureMatch.geometry.coordinates, pt === 'CA' ? 0.5 : 0.62);
-        addLabel(text, 'COURSE_DISTANCE', legFeatureMatch, located?.coordinate, 'center', [0.4, -0.6], 76);
+        const locationRatio = pt === 'CA' ? 0.5 : pt === 'CI' ? 0.56 : 0.62;
+        const located = lineLabelPosition(legFeatureMatch.geometry.coordinates, locationRatio);
+        addLabel(text, 'COURSE_DISTANCE', legFeatureMatch, located?.coordinate, 'center', [0.7, -0.8], 76);
       }
     }
 
@@ -1418,8 +1532,8 @@ function conventionalSidAutoLabelFeatures(
   for (const radial of features.filter((feature) => feature.geometry?.type === 'LineString' && feature.properties?.object_type === 'RadialReference')) {
     if (radial.geometry?.type !== 'LineString') continue;
     const text = String(radial.properties?.name ?? radial.properties?.ident ?? '').trim();
-    const located = lineLabelPosition(radial.geometry.coordinates, 0.55);
-    addLabel(text, 'RADIAL', radial, located?.coordinate, 'center', [-0.4, 0.6], 70);
+    const located = lineLabelPosition(radial.geometry.coordinates, 0.38);
+    addLabel(text, 'RADIAL', radial, located?.coordinate, 'center', [-0.8, 0.9], 70);
   }
 
   return result;

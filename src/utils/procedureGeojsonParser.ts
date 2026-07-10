@@ -116,6 +116,7 @@ export interface LabelFeatureProperties {
   review_required?: boolean;
   text_anchor?: string;
   text_offset?: [number, number];
+  force_visible?: boolean;
   /** true = 识别阶段规划的标签（LabelPoint），优先于前端启发式标签 */
   planned?: boolean;
 }
@@ -162,6 +163,7 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
         Number(feature.properties.text_offset_x ?? 0),
         Number(feature.properties.text_offset_y ?? 0.8),
       ],
+      force_visible: feature.properties.force_visible === true,
       planned: true,
     },
   }));
