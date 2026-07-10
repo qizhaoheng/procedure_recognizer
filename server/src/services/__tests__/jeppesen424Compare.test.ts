@@ -16,6 +16,17 @@ const sampleText = [
   'SSPAP WMKJWMEEMTU1E2RW16020UDOSUWMPC2P                                  0134',
 ].join('\n');
 
+const sidSampleText = [
+  'SSPAP WMKJWMDADLO1J2RW16  010         1        CA                     1600        + 01000     11000       VJB   WMD    D   001572209',
+  'SSPAP WMKJWMDADLO1J2RW16  010         2P                                  0020                                             001582209',
+  'SSPAP WMKJWMDADLO1J2RW16  020INVOVWMPC1E   R   DF                                 + 06000                              D   001602209',
+  'SSPAP WMKJWMDADLO1J2RW16  020INVOVWMPC2P                                  0120                                             001612209',
+  'SSPAP WMKJWMDADLO1J2RW16  030UDOSUWMPC1E       TF                                                                      D   001622209',
+  'SSPAP WMKJWMDADLO1J2RW16  030UDOSUWMPC2P                                  0056                                             001632209',
+  'SSPAP WMKJWMDADLO1J2RW16  040ADLOVWMEA1EE      TF                                 + 06000                              D   001642209',
+  'SSPAP WMKJWMDADLO1J2RW16  040ADLOVWMEA2P                                  0238                                             001652209',
+].join('\n');
+
 describe('Jeppesen 424 text compare MVP', () => {
   it('parses 1E records and merges 2P distances', () => {
     const legs = parseJeppesen424Text(sampleText);
@@ -35,6 +46,84 @@ describe('Jeppesen 424 text compare MVP', () => {
         { sequence: '010', fix: 'ADLOV', pathTerminator: 'IF', distanceNm: undefined, altitudeRaw: '+06000', altitudeValue: 6000 },
         { sequence: '020', fix: 'GOVNU', pathTerminator: 'TF', distanceNm: 14.5, altitudeRaw: '+03500', altitudeValue: 3500 },
         { sequence: '030', fix: 'OSRUP', pathTerminator: 'TF', distanceNm: 6, altitudeRaw: '+02000', altitudeValue: 2000 },
+      ],
+    );
+  });
+
+  it('parses WMD SID records including no-fix CA legs', () => {
+    const legs = parseJeppesen424Text(sidSampleText);
+    assert.deepEqual(
+      legs.map((leg) => ({
+        procedureName: leg.procedureName,
+        runway: leg.runway,
+        sequence: leg.sequence,
+        fix: leg.fix,
+        pathTerminator: leg.pathTerminator,
+        turnDirection: leg.turnDirection,
+        distanceNm: leg.distanceNm,
+        altitudeValue: leg.altitudeValue,
+        altitudeUpperFt: leg.altitudeUpperFt,
+        courseDegMag: leg.courseDegMag,
+        recommendedNavaid: leg.recommendedNavaid,
+        endOfProcedure: leg.endOfProcedure,
+      })),
+      [
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          sequence: '010',
+          fix: '',
+          pathTerminator: 'CA',
+          turnDirection: '',
+          distanceNm: 2,
+          altitudeValue: 1000,
+          altitudeUpperFt: 11000,
+          courseDegMag: 160,
+          recommendedNavaid: 'VJB',
+          endOfProcedure: false,
+        },
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          sequence: '020',
+          fix: 'INVOV',
+          pathTerminator: 'DF',
+          turnDirection: 'R',
+          distanceNm: 12,
+          altitudeValue: 6000,
+          altitudeUpperFt: undefined,
+          courseDegMag: undefined,
+          recommendedNavaid: undefined,
+          endOfProcedure: false,
+        },
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          sequence: '030',
+          fix: 'UDOSU',
+          pathTerminator: 'TF',
+          turnDirection: '',
+          distanceNm: 5.6,
+          altitudeValue: undefined,
+          altitudeUpperFt: undefined,
+          courseDegMag: undefined,
+          recommendedNavaid: undefined,
+          endOfProcedure: false,
+        },
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          sequence: '040',
+          fix: 'ADLOV',
+          pathTerminator: 'TF',
+          turnDirection: '',
+          distanceNm: 23.8,
+          altitudeValue: 6000,
+          altitudeUpperFt: undefined,
+          courseDegMag: undefined,
+          recommendedNavaid: undefined,
+          endOfProcedure: true,
+        },
       ],
     );
   });
@@ -105,5 +194,46 @@ describe('Jeppesen 424 text compare MVP', () => {
     assert.equal(result.procedureName, 'ADLOV 1E');
     assert.equal(result.score, 100);
     assert.equal(result.matchedLegs, 3);
+  });
+
+  it('keeps no-fix AI CA legs so SID comparisons include the initial climb leg', () => {
+    const understanding: ProcedureUnderstandingResult = {
+      runway: 'RW16',
+      procedures: [
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          legs: [
+            {
+              sequence: 10,
+              pathTerminator: 'CA',
+              courseDegMag: 160,
+              distanceNm: 2,
+              altitudeConstraint: { rawText: '+01000 11000' },
+              recommendedNavaid: 'VJB',
+            },
+            {
+              sequence: 20,
+              fixIdentifier: 'INVOV',
+              pathTerminator: 'DF',
+              turnDirection: 'R',
+              distanceNm: 12,
+              altitudeConstraint: { rawText: '+06000' },
+            },
+          ],
+        },
+      ],
+      fixes: [],
+      sourceEvidence: [],
+      warnings: [],
+      confidence: 1,
+      reviewRequired: false,
+    };
+
+    const aiLegs = aiProcedureToSimpleLegs(understanding);
+    assert.deepEqual(aiLegs.map((leg) => [leg.sequence, leg.fix, leg.pathTerminator]), [
+      ['010', '', 'CA'],
+      ['020', 'INVOV', 'DF'],
+    ]);
   });
 });

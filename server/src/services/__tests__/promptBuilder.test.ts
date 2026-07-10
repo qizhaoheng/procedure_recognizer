@@ -41,6 +41,40 @@ describe('prompt builder', () => {
     assert.match(builtPrompt.userPrompt, /"pageNo": 51/);
     assert.deepEqual(builtPrompt.inputImages.map((inputPage) => inputPage.pageNo), [51, 52, 53]);
   });
+
+  it('routes RADAR SID packages to the conventional SID prompt', async () => {
+    const group: ProcedureGroup = {
+      groupId: 'pkg-radar-sid',
+      packageId: 'pkg-radar-sid',
+      groupName: 'RWY16/34 RADAR SID TWO DEPARTURE',
+      packageName: 'RWY16/34 RADAR SID TWO DEPARTURE',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'RADAR',
+      runway: 'RWY16/34',
+      chartNo: 'AD 2-WMKJ-6-1',
+      chartPages: [31],
+      tabularPages: [],
+      coordinatePages: [],
+      minimaPages: [],
+      otherPages: [],
+      procedureNames: ['JOHOR RADAR TWO DEPARTURE'],
+      status: 'GROUPED',
+    };
+    const pages = [page(31, 'CHART')];
+    const aiInputPackage = buildAiInputPackage(group, pages, 'gpt-5.5');
+    const builtPrompt = await buildPrompt({
+      taskId: 'task-test',
+      packageId: group.packageId!,
+      procedurePackage: group,
+      aiInputPackage,
+    });
+
+    assert.equal(routePromptTemplate(group).id, 'conventional_sid_v1');
+    assert.equal(builtPrompt.promptTemplateId, 'conventional_sid_v1');
+    assert.match(builtPrompt.userPrompt, /Conventional \/ RADAR SID recognition/);
+    assert.match(builtPrompt.userPrompt, /turn to assigned heading/);
+  });
 });
 
 function page(pageNo: number, chartRole: PdfPageAsset['chartRole']): PdfPageAsset {

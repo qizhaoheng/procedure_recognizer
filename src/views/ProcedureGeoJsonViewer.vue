@@ -32,6 +32,10 @@ const labelWarning = computed(() => {
   const hasLabelPoint = model.value.allFeatures.some((feature) => feature.properties.object_type === 'LabelPoint');
   return hasLabelPoint ? '' : '当前 GeoJSON 未包含 LabelPoint，文字标签无法完整显示。';
 });
+const noRenderableWarning = computed(() => {
+  if (!model.value || model.value.spatialFeatures.length > 0) return '';
+  return '当前 GeoJSON 没有可显示的点、线或面，请回到识别结果检查几何合成状态。';
+});
 
 const layerVisibility = ref<LayerVisibility>({
   procedureTrack: true,
@@ -307,6 +311,7 @@ function clearModelOnly() {
         <span>上传 GeoJSON 后显示程序图层；也可以从 PDF 识别流程跳转进来。</span>
       </div>
 
+      <div v-if="noRenderableWarning" class="toast warning">{{ noRenderableWarning }}</div>
       <div v-if="labelWarning" class="toast warning">{{ labelWarning }}</div>
       <div v-if="error" class="toast error">{{ error }}</div>
     </section>

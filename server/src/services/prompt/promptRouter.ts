@@ -10,7 +10,9 @@ export function routePromptTemplate(procedurePackage: ProcedureGroup, templateOv
   if (packageType === 'STAR' && navigationType === 'RNAV') return getPromptTemplate('rnav_star_v1');
   if (packageType === 'STAR' && navigationType === 'DME_ARC') return getPromptTemplate('dme_arc_star_v1');
   if (packageType === 'SID' && navigationType === 'RNAV') return getPromptTemplate('rnav_sid_v1');
-  if (packageType === 'SID' && navigationType === 'CONVENTIONAL') return getPromptTemplate('conventional_sid_v1');
+  if (packageType === 'SID' && ['CONVENTIONAL', 'RADAR', 'VOR', 'NDB', 'DME_ARC'].includes(navigationType)) {
+    return getPromptTemplate('conventional_sid_v1');
+  }
   if (packageType === 'APPROACH' && ['ILS', 'LOC', 'ILS_LOC'].includes(navigationType)) return getPromptTemplate('ils_loc_approach_v1');
   if (packageType === 'APPROACH' && navigationType === 'VOR') return getPromptTemplate('vor_approach_v1');
   if (packageType === 'APPROACH' && navigationType === 'RNP') return getPromptTemplate('rnp_approach_v1');

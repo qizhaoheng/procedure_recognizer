@@ -17,6 +17,15 @@ You MUST actively look for:
 - runway labels
 - notes
 
+For SID charts, also actively look for:
+- DER / runway-end references
+- runway track labels, e.g. `TRACK 160`, `TRACK 340`, `RWY HDG`
+- DME turn or climb triggers, e.g. `0.5 DME VJB`, `2.6 DME VJB`, `5.7 DME VJB`
+- ATC/radar instructions, e.g. `turn to assigned heading`, `radar`, `as directed by ATC`
+- climb gradients and minimum climb requirements
+- speed restrictions in turns
+- transition altitude and communication frequencies when printed on the procedure chart
+
 Output every item into `chartTexts` in this shape:
 
 ```json

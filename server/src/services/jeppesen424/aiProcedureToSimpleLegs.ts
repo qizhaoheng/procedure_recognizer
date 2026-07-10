@@ -63,7 +63,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         rawRecord: JSON.stringify(record),
       };
     });
-  }).filter((leg) => leg.procedureName && leg.sequence && leg.fix);
+  }).filter((leg) => leg.procedureName && leg.sequence && (leg.fix || allowsBlankFix(leg.pathTerminator)));
 }
 
 function normalizeSequence(value: unknown) {
@@ -95,6 +95,10 @@ function cleanTurnDirection(value: unknown, pathTerminator: string, isRnavStar: 
   const turn = normalizeTurn(value);
   if (isRnavStar && pathTerminator === 'TF') return '';
   return turn;
+}
+
+function allowsBlankFix(pathTerminator: unknown) {
+  return ['CA', 'CI', 'CR', 'VA', 'VI'].includes(normalizedText(pathTerminator));
 }
 
 function numberOrUndefined(value: unknown) {

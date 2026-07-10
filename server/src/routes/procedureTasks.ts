@@ -285,11 +285,14 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
     };
     group.aiResponse = await runProcedureRecognition(group, preview);
     group.geojson = group.aiResponse.geojson;
-    group.geojsonStatus = group.geojson ? 'GENERATED' : 'ERROR';
-    group.geojsonGeneratedAt = group.geojson ? new Date().toISOString() : undefined;
-    group.geojsonError = group.geojson ? undefined : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
-    group.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
-    task.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
+    const validation = group.geojson ? validateProcedureGeoJson(group.geojson, group) : undefined;
+    group.geojsonStatus = group.geojson && validation?.valid ? 'GENERATED' : 'ERROR';
+    group.geojsonGeneratedAt = group.geojson && validation?.valid ? new Date().toISOString() : undefined;
+    group.geojsonError = group.geojson
+      ? validation?.errors.join('; ') || group.aiResponse.errors?.join('; ')
+      : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
+    group.status = group.geojson && validation?.valid ? 'AI_COMPLETED' : 'ERROR';
+    task.status = group.status === 'AI_COMPLETED' ? 'AI_COMPLETED' : 'ERROR';
     await saveTask(task);
 
     res.json({
@@ -315,7 +318,7 @@ router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, ne
     const group = findGroup(task.groups, req.params.packageId);
     const model = req.body?.model || process.env.LLM_MODEL || 'mock-procedure-recognizer';
     if (group.procedureUnderstanding) {
-      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group);
+      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group, task.pages);
       const validation = validateProcedureGeoJson(group.geojson, group);
       group.geojsonStatus = validation.valid ? 'GENERATED' : 'ERROR';
       group.geojsonGeneratedAt = validation.valid ? new Date().toISOString() : undefined;
@@ -341,8 +344,8 @@ router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, ne
         ? validation?.errors.join('; ') || group.aiResponse.errors?.join('; ')
         : group.aiResponse.errors?.join('; ') || 'GeoJSON generation failed';
     }
-    group.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
-    task.status = group.geojson ? 'AI_COMPLETED' : 'ERROR';
+    group.status = group.geojson && group.geojsonStatus !== 'ERROR' ? 'AI_COMPLETED' : 'ERROR';
+    task.status = group.status === 'AI_COMPLETED' ? 'AI_COMPLETED' : 'ERROR';
     await saveTask(task);
 
     if (!group.geojson || group.geojsonStatus === 'ERROR') {
