@@ -1,7 +1,7 @@
 import type { PromptTemplate } from './promptTypes';
 
-const VERSION = '1.4.2';
-const DATE = '2026-07-08T00:00:00.000Z';
+const VERSION = '1.4.3';
+const DATE = '2026-07-10T00:00:00.000Z';
 
 export const PROMPT_TEMPLATES: PromptTemplate[] = [
   template('generic_procedure_v1', 'Generic Procedure Understanding', 'GENERIC', ['UNKNOWN'], 'generic-procedure.prompt.md'),

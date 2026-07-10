@@ -199,6 +199,8 @@ describe('Jeppesen 424 text compare MVP', () => {
   it('keeps no-fix AI CA legs so SID comparisons include the initial climb leg', () => {
     const understanding: ProcedureUnderstandingResult = {
       runway: 'RW16',
+      packageType: 'SID',
+      navigationType: 'RNAV',
       procedures: [
         {
           procedureName: 'ADLOV 1J',
@@ -235,5 +237,111 @@ describe('Jeppesen 424 text compare MVP', () => {
       ['010', '', 'CA'],
       ['020', 'INVOV', 'DF'],
     ]);
+  });
+
+  it('maps RNAV SID no-fix CA and final transition fix sections like Jeppesen 424', () => {
+    const understanding: ProcedureUnderstandingResult = {
+      runway: 'RW16',
+      packageType: 'SID',
+      navigationType: 'RNAV',
+      procedures: [
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          legs: [
+            {
+              sequence: 10,
+              pathTerminator: 'CA',
+              courseDegMag: 160,
+              distanceNm: 2,
+              altitudeConstraint: { rawText: '+01000 11000', altitudeFt: 1000, upperFt: 11000 },
+              recommendedNavaid: 'VJB',
+            },
+            {
+              sequence: 20,
+              fixIdentifier: 'INVOV',
+              pathTerminator: 'DF',
+              turnDirection: 'R',
+              distanceNm: 12,
+              altitudeConstraint: { rawText: '+06000', altitudeFt: 6000 },
+            },
+            {
+              sequence: 30,
+              fixIdentifier: 'UDOSU',
+              pathTerminator: 'TF',
+              distanceNm: 5.6,
+            },
+            {
+              sequence: 40,
+              fixIdentifier: 'ADLOV',
+              pathTerminator: 'TF',
+              distanceNm: 23.8,
+              altitudeConstraint: { rawText: '+06000', altitudeFt: 6000 },
+            },
+          ],
+        },
+      ],
+      fixes: [],
+      sourceEvidence: [],
+      warnings: [],
+      confidence: 1,
+      reviewRequired: false,
+    };
+
+    const aiLegs = aiProcedureToSimpleLegs(understanding);
+    assert.deepEqual(
+      aiLegs.map((leg) => ({
+        sequence: leg.sequence,
+        fix: leg.fix,
+        pathTerminator: leg.pathTerminator,
+        distanceNm: leg.distanceNm,
+        altitudeUpperFt: leg.altitudeUpperFt,
+        recommendedNavaid: leg.recommendedNavaid,
+        fixSection: leg.fixSection,
+        turnDirection: leg.turnDirection,
+      })),
+      [
+        {
+          sequence: '010',
+          fix: '',
+          pathTerminator: 'CA',
+          distanceNm: 2,
+          altitudeUpperFt: 11000,
+          recommendedNavaid: 'VJB',
+          fixSection: '',
+          turnDirection: '',
+        },
+        {
+          sequence: '020',
+          fix: 'INVOV',
+          pathTerminator: 'DF',
+          distanceNm: 12,
+          altitudeUpperFt: undefined,
+          recommendedNavaid: undefined,
+          fixSection: 'PC',
+          turnDirection: 'R',
+        },
+        {
+          sequence: '030',
+          fix: 'UDOSU',
+          pathTerminator: 'TF',
+          distanceNm: 5.6,
+          altitudeUpperFt: undefined,
+          recommendedNavaid: undefined,
+          fixSection: 'PC',
+          turnDirection: '',
+        },
+        {
+          sequence: '040',
+          fix: 'ADLOV',
+          pathTerminator: 'TF',
+          distanceNm: 23.8,
+          altitudeUpperFt: undefined,
+          recommendedNavaid: undefined,
+          fixSection: 'EA',
+          turnDirection: '',
+        },
+      ],
+    );
   });
 });

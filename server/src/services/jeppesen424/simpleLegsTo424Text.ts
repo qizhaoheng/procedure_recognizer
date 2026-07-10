@@ -40,7 +40,7 @@ export function simpleLegsTo424Text(legs: SimpleProcedureLeg[], options: Jeppese
         airport,
         region,
         routeCode: resolveRouteCode(leg.procedureName),
-        fixSection: leg.fixSection ?? (index === 0 ? 'EA' : 'PC'),
+        fixSection: leg.fixSection ?? fallbackFixSection(leg, index),
         isLastLeg: leg.endOfProcedure ?? (index === procedureLegs.length - 1),
         hasHolding: leg.holdingAtFix === true || holdingFixes.has(leg.fix),
       };
@@ -70,7 +70,7 @@ function primaryRecord(leg: SimpleProcedureLeg, context: LegContext) {
   if (leg.pathTerminator) put(chars, 47, leg.pathTerminator);
   // 磁航向（71-74 列，×10）：与 Jeppesen 一致，只在 CI/AF 腿上编码
   const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
-  if ((pathTerminator === 'AF' || pathTerminator === 'CI') && leg.courseDegMag !== undefined) {
+  if (['AF', 'CA', 'CF', 'CI', 'CR'].includes(pathTerminator) && leg.courseDegMag !== undefined) {
     put(chars, 70, String(Math.round(leg.courseDegMag * 10)).padStart(4, '0'));
   }
   // 推荐导航台：AF/CI 在 51-56 列（导航台+区域），IF 在 107-110/113-115 列（导航台+区域+D）
@@ -78,7 +78,7 @@ function primaryRecord(leg: SimpleProcedureLeg, context: LegContext) {
     if (pathTerminator === 'AF' || pathTerminator === 'CI') {
       put(chars, 50, leg.recommendedNavaid.slice(0, 4));
       put(chars, 54, context.region);
-    } else if (pathTerminator === 'IF') {
+    } else if (pathTerminator === 'IF' || pathTerminator === 'CA') {
       put(chars, 106, leg.recommendedNavaid.slice(0, 4));
       put(chars, 112, `${context.region}D`);
     }
@@ -130,13 +130,21 @@ function baseRecord(leg: SimpleProcedureLeg, context: LegContext) {
   put(chars, 20, leg.runway);
   put(chars, 26, sequence);
   put(chars, 29, leg.fix);
-  put(chars, 34, context.region);
-  put(chars, 36, context.fixSection);
+  if (leg.fix || context.fixSection) {
+    put(chars, 34, context.region);
+    put(chars, 36, context.fixSection);
+  }
   return chars;
 }
 
 function put(chars: string[], pos: number, text: string) {
   for (let i = 0; i < text.length; i += 1) chars[pos + i] = text[i];
+}
+
+function fallbackFixSection(leg: SimpleProcedureLeg, index: number) {
+  const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
+  if (!leg.fix && ['CA', 'CI', 'CR', 'VA', 'VI'].includes(pathTerminator)) return '';
+  return index === 0 ? 'EA' : 'PC';
 }
 
 function resolveRouteCode(procedureName: string) {

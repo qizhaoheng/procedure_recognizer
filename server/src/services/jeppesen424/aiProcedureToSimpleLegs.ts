@@ -6,12 +6,13 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
 
   const isRnavStar = normalizedText(procedureUnderstanding.packageType) === 'STAR'
     && normalizedText(procedureUnderstanding.navigationType) === 'RNAV';
+  const isSid = normalizedText(procedureUnderstanding.packageType) === 'SID';
   const holdingFixes = new Set(
     (procedureUnderstanding.holdings ?? [])
       .map((holding) => normalizedText((holding as Record<string, unknown>).fixIdentifier ?? (holding as Record<string, unknown>).fix ?? ''))
       .filter(Boolean),
   );
-  // Jeppesen 在 IF/AF 腿上编码推荐导航台（本例为弧心 VJB）；AI 侧从 DME_ARC 语义推导
+  // Jeppesen codes the arc center navaid on IF/AF legs; AI can infer it from DME_ARC geometry.
   const arcCenter = normalizedText(
     procedureUnderstanding.geometrySemantics?.find((item) => item.type === 'DME_ARC' && item.centerNavaid)?.centerNavaid ?? '',
   ) || undefined;
@@ -40,6 +41,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         || (pathTerminator === 'AF' || pathTerminator === 'IF' ? arcCenter : undefined);
       const courseDegMag = optionalCourse(record.courseDegMag ?? record.courseDeg);
       const holdingAtFix = Boolean(record.holdingAtFix) || holdingFixes.has(fix);
+
       return {
         procedureName,
         runway,
@@ -56,8 +58,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         courseDegMag,
         holdingAtFix,
         endOfProcedure: Number.isFinite(sequenceValue) && sequenceValue === lastSequence,
-        // 与导出器一致的启发式：首腿为航路入航点（EA），其余为终端点（PC）
-        fixSection: Number.isFinite(sequenceValue) && sequenceValue === firstSequence ? 'EA' : 'PC',
+        fixSection: inferredFixSection({ isSid, fix, sequenceValue, firstSequence, lastSequence }),
         recommendedNavaid: recommendedNavaid || undefined,
         source: 'AI' as const,
         rawRecord: JSON.stringify(record),
@@ -95,6 +96,26 @@ function cleanTurnDirection(value: unknown, pathTerminator: string, isRnavStar: 
   const turn = normalizeTurn(value);
   if (isRnavStar && pathTerminator === 'TF') return '';
   return turn;
+}
+
+interface FixSectionInput {
+  isSid: boolean;
+  fix: string;
+  sequenceValue: number;
+  firstSequence?: number;
+  lastSequence?: number;
+}
+
+function inferredFixSection(input: FixSectionInput): string {
+  const { isSid, fix, sequenceValue, firstSequence, lastSequence } = input;
+  if (!Number.isFinite(sequenceValue)) return '';
+
+  if (isSid) {
+    if (!fix) return '';
+    return sequenceValue === lastSequence ? 'EA' : 'PC';
+  }
+
+  return sequenceValue === firstSequence ? 'EA' : 'PC';
 }
 
 function allowsBlankFix(pathTerminator: unknown) {
