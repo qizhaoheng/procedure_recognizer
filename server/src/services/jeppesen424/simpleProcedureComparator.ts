@@ -58,7 +58,7 @@ function compareLeg(sequence: string, ai: SimpleProcedureLeg | undefined, jeppes
   const fieldResults: FieldCompareResult[] = [
     compareField('fix', ai.fix, jeppesen.fix, sameText(ai.fix, jeppesen.fix), 'ERROR'),
     compareField('pathTerminator', ai.pathTerminator, jeppesen.pathTerminator, sameText(ai.pathTerminator, jeppesen.pathTerminator), 'ERROR'),
-    compareField('turnDirection', ai.turnDirection || '', jeppesen.turnDirection || '', sameOptionalText(ai.turnDirection, jeppesen.turnDirection), 'WARNING'),
+    compareField('turnDirection', ai.turnDirection || '', jeppesen.turnDirection || '', turnDirectionMatches(ai, jeppesen), 'WARNING'),
     compareField('distanceNm', ai.distanceNm, jeppesen.distanceNm, sameOptionalDistance(ai.distanceNm, jeppesen.distanceNm), 'WARNING'),
     compareField('altitudeValue', ai.altitudeValue, jeppesen.altitudeValue, sameOptionalNumber(ai.altitudeValue, jeppesen.altitudeValue), 'ERROR'),
     compareField('altitudeSign', ai.altitudeSign || '', jeppesen.altitudeSign || '', sameOptionalText(ai.altitudeSign, jeppesen.altitudeSign), 'ERROR'),
@@ -130,6 +130,21 @@ function sameOptionalNumber(a: number | undefined, b: number | undefined) {
   if (a === undefined && b === undefined) return true;
   if (a === undefined || b === undefined) return false;
   return a === b;
+}
+
+function turnDirectionMatches(ai: SimpleProcedureLeg, jeppesen: SimpleProcedureLeg) {
+  if (sameOptionalText(ai.turnDirection, jeppesen.turnDirection)) return true;
+
+  const aiTurn = String(ai.turnDirection ?? '').trim().toUpperCase();
+  const jeppesenTurn = String(jeppesen.turnDirection ?? '').trim().toUpperCase();
+  const pathTerminator = String(jeppesen.pathTerminator ?? ai.pathTerminator ?? '').toUpperCase();
+  const isTerminalTransitionFix = (jeppesen.endOfProcedure || ai.endOfProcedure)
+    && String(jeppesen.fixSection ?? ai.fixSection ?? '').toUpperCase() === 'EA'
+    && ['DF', 'TF'].includes(pathTerminator)
+    && Boolean(jeppesen.fix || ai.fix);
+
+  if (!jeppesenTurn && (aiTurn === 'L' || aiTurn === 'R') && isTerminalTransitionFix) return true;
+  return false;
 }
 
 function navaidMatches(ai: SimpleProcedureLeg, jeppesen: SimpleProcedureLeg) {

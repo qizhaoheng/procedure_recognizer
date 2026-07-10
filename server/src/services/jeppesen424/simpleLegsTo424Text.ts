@@ -75,7 +75,7 @@ function primaryRecord(leg: SimpleProcedureLeg, context: LegContext) {
   }
   // 推荐导航台：AF/CI 在 51-56 列（导航台+区域），IF 在 107-110/113-115 列（导航台+区域+D）
   if (leg.recommendedNavaid) {
-    if (pathTerminator === 'AF' || pathTerminator === 'CI') {
+    if (pathTerminator === 'AF' || pathTerminator === 'CI' || pathTerminator === 'CR' || pathTerminator === 'CF') {
       put(chars, 50, leg.recommendedNavaid.slice(0, 4));
       put(chars, 54, context.region);
     } else if (pathTerminator === 'IF' || pathTerminator === 'CA') {

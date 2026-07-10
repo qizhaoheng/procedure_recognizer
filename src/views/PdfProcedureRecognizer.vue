@@ -77,9 +77,6 @@ const sourceLabels: Record<string, string> = {
   MANUAL: '人工',
 };
 
-const RNAV_1E_PROCEDURES = ['ADLOV 1E', 'EMTUV 1E', 'OMKOM 1E', 'PIMOK 1E'];
-const DME_ARC_1G_PROCEDURES = ['ADLOV 1G', 'EMTUV 1G', 'OMKOM 1G', 'PIMOK 1G'];
-
 const fileInput = ref<HTMLInputElement>();
 const task = ref<ProcedureTask>();
 const selectedPageNo = ref<number>();
@@ -102,7 +99,6 @@ const rawJsonOpen = ref(false);
 const jeppesenText = ref('');
 const jeppesenCompareBusy = ref(false);
 const jeppesenCompareResult = ref<Jeppesen424CompareResponse>();
-const jeppesenFilterMode = ref<'CURRENT' | 'RNAV_1E' | 'INCLUDE_1G'>('RNAV_1E');
 const jeppesen424ExportText = ref('');
 const jeppesen424ExportError = ref('');
 const jeppesen424ExportBusy = ref(false);
@@ -483,9 +479,7 @@ const geojsonSummaryText = computed(() => {
 });
 
 const jeppesenProcedureFilter = computed(() => {
-  if (jeppesenFilterMode.value === 'CURRENT') return selectedGroup.value?.procedureNames?.length ? selectedGroup.value.procedureNames : [];
-  if (jeppesenFilterMode.value === 'INCLUDE_1G') return [...RNAV_1E_PROCEDURES, ...DME_ARC_1G_PROCEDURES];
-  return RNAV_1E_PROCEDURES;
+  return selectedGroup.value?.procedureNames?.length ? selectedGroup.value.procedureNames : [];
 });
 
 const jeppesenSummaryText = computed(() => {
@@ -1048,6 +1042,23 @@ function legMarkers(leg?: SimpleProcedureLeg) {
   if (!leg) return '-';
   const markers = [leg.fixSection, leg.holdingAtFix ? 'H' : '', leg.endOfProcedure ? 'EE' : ''].filter(Boolean);
   return markers.join(' ') || '-';
+}
+
+function compareFixText(leg?: SimpleProcedureLeg) {
+  if (!leg) return '-';
+  if (leg.fix) return leg.fix;
+  const pathTerminator = String(leg.pathTerminator || '').toUpperCase();
+  if (['CA', 'CI', 'CR', 'VA', 'VI'].includes(pathTerminator)) return `no-fix ${pathTerminator}`;
+  return '-';
+}
+
+function altitudeText(leg?: SimpleProcedureLeg) {
+  if (!leg) return '-';
+  if (typeof leg.altitudeValue === 'number') {
+    const sign = leg.altitudeSign ?? (leg.altitudeRaw?.startsWith('+') ? '+' : leg.altitudeRaw?.startsWith('-') ? '-' : '');
+    return `${sign}${String(Math.round(leg.altitudeValue)).padStart(5, '0')}`;
+  }
+  return leg.altitudeRaw || '-';
 }
 
 function legDiffTitle(leg: LegCompareResult) {
@@ -2096,21 +2107,6 @@ function isCancelledError(value: unknown) {
               spellcheck="false"
             ></textarea>
 
-            <div class="filter-row">
-              <label>
-                <input v-model="jeppesenFilterMode" type="radio" value="CURRENT" />
-                当前程序包
-              </label>
-              <label>
-                <input v-model="jeppesenFilterMode" type="radio" value="RNAV_1E" />
-                仅 RNAV 1E
-              </label>
-              <label>
-                <input v-model="jeppesenFilterMode" type="radio" value="INCLUDE_1G" />
-                包含 DME ARC 1G
-              </label>
-            </div>
-
             <div class="manifest-grid">
               <span>筛选程序</span><strong>{{ jeppesenProcedureFilter.join(' / ') || '当前 AI 程序' }}</strong>
               <span>跑道</span><strong>{{ selectedGroup.runway || procedureUnderstanding?.runway || 'RW16' }}</strong>
@@ -2155,6 +2151,9 @@ function isCancelledError(value: unknown) {
                 {{ procedure.partialLegs }} partial,
                 {{ procedure.mismatchedLegs }} mismatch
               </summary>
+              <p class="hint">
+                SID first no-fix CA legs are coded without Fix/EA-PC markers in Jeppesen 424. Alt2/Nav are shown only when 424 encodes them on that leg; for WMKJ RNAV SID this is normally the first CA leg carrying transition altitude and VJB.
+              </p>
               <div class="table-wrap">
                 <table class="compare-table">
                   <thead>
@@ -2184,14 +2183,14 @@ function isCancelledError(value: unknown) {
                   <tbody>
                     <tr v-for="leg in procedure.legResults" :key="`${procedure.procedureName}-${leg.sequence}`" :class="statusClass(leg.status)">
                       <td>{{ leg.sequence }}</td>
-                      <td>{{ leg.ai?.fix || '-' }}</td>
-                      <td>{{ leg.jeppesen?.fix || '-' }}</td>
+                      <td>{{ compareFixText(leg.ai) }}</td>
+                      <td>{{ compareFixText(leg.jeppesen) }}</td>
                       <td>{{ leg.ai?.pathTerminator || '-' }}</td>
                       <td>{{ leg.jeppesen?.pathTerminator || '-' }}</td>
                       <td>{{ valueText(leg.ai?.distanceNm) }}</td>
                       <td>{{ valueText(leg.jeppesen?.distanceNm) }}</td>
-                      <td>{{ leg.ai?.altitudeRaw || valueText(leg.ai?.altitudeValue) }}</td>
-                      <td>{{ leg.jeppesen?.altitudeRaw || valueText(leg.jeppesen?.altitudeValue) }}</td>
+                      <td>{{ altitudeText(leg.ai) }}</td>
+                      <td>{{ altitudeText(leg.jeppesen) }}</td>
                       <td>{{ valueText(leg.ai?.altitudeUpperFt) }}</td>
                       <td>{{ valueText(leg.jeppesen?.altitudeUpperFt) }}</td>
                       <td>{{ valueText(leg.ai?.courseDegMag) }}</td>

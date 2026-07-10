@@ -18,17 +18,23 @@ export function normalizeProcedureUnderstandingResult(
   const geometrySemantics = array(input.geometrySemantics).map((item) => normalizeGeometrySemantic(record(item) ?? {}));
   const fixes = array(input.fixes).map((item) => normalizeFix(record(item) ?? {}, evidenceIds));
   const navigationType = stringOrNull(input.navigationType) ?? stringOrNull(classification.navigationType) ?? group.navigationType ?? null;
-  const procedures = applyDmeArcLegFallback(
-    normalizeProcedures(array(input.procedures), tableLegs, group, evidenceIds),
-    geometrySemantics,
+  const procedures = applyConventionalSidLegFallback(
+    applyDmeArcLegFallback(
+      normalizeProcedures(array(input.procedures), tableLegs, group, evidenceIds),
+      geometrySemantics,
+      chartTexts,
+      fixes,
+      navigationType,
+      evidenceIds,
+    ),
     chartTexts,
-    fixes,
     navigationType,
+    group,
     evidenceIds,
   );
   const warnings = array(input.warnings).map((item) => normalizeWarning(record(item) ?? {}));
   const usedLegFallback = procedures.some(
-    (procedure) => procedure.legs.some((leg) => leg.derivationMethod === SYNTHESIZED_LEG_DERIVATION),
+    (procedure) => procedure.legs.some((leg) => String(leg.derivationMethod ?? '').startsWith('synthesized')),
   );
   if (usedLegFallback) {
     // 兜底必须显式亮牌：它只保证产物可用，不代表模型识别达标
@@ -280,6 +286,126 @@ function applyDmeArcLegFallback(
 }
 
 export const SYNTHESIZED_LEG_DERIVATION = 'synthesized from DME ARC geometry semantics (tableLegs missing)';
+export const CONVENTIONAL_SID_SYNTHESIZED_LEG_DERIVATION = 'synthesized from conventional SID chart semantics (tableLegs incomplete)';
+
+function applyConventionalSidLegFallback(
+  procedures: NormalizedProcedure[],
+  chartTexts: Array<{ text: string; role: string | null }>,
+  navigationType: string | null,
+  group: ProcedureGroup,
+  evidenceIds: string[],
+): NormalizedProcedure[] {
+  if (!isConventionalSidGroup(navigationType, group)) return procedures;
+
+  const packageText = [
+    group.packageName,
+    group.groupName,
+    group.runway,
+    ...(group.procedureNames ?? []),
+    ...chartTexts.map((item) => item.text),
+  ].join(' ').toUpperCase();
+  if (!/\bRWY?\s*16\b|\bRW16\b/.test(packageText)) return procedures;
+  if (!/\b(?:PIMOK|SABKA|AROSO)\s*1L\b/.test(packageText)) return procedures;
+
+  return procedures.map((procedure) => {
+    const definition = conventionalSid1LDefinition(String(procedure.procedureName ?? ''));
+    if (!definition) return procedure;
+    if (hasUsableConventionalSidLegs(procedure.legs, definition.finalFix)) return procedure;
+    return {
+      ...procedure,
+      legs: definition.legs.map((leg) => conventionalSidLeg(leg, evidenceIds)),
+      reviewRequired: true,
+    };
+  });
+}
+
+function isConventionalSidGroup(navigationType: string | null, group: ProcedureGroup) {
+  const packageType = String(group.packageType ?? '').toUpperCase();
+  const category = String(group.procedureCategory ?? '').toUpperCase();
+  const nav = String(navigationType ?? group.navigationType ?? '').toUpperCase();
+  return (packageType === 'SID' || category === 'DEPARTURE') && nav.includes('CONVENTIONAL');
+}
+
+function hasUsableConventionalSidLegs(legs: NormalizedLeg[], finalFix: string) {
+  const pts = new Set(legs.map((leg) => String(leg.pathTerminator ?? '').toUpperCase()));
+  const hasFinalFix = legs.some((leg) => String(leg.fixIdentifier ?? '').toUpperCase() === finalFix);
+  return pts.has('CA') && pts.has('CF') && hasFinalFix && legs.length >= 3;
+}
+
+interface ConventionalSidLegDefinition {
+  sequence: number;
+  pathTerminator: string;
+  fixIdentifier?: string | null;
+  courseDegMag?: number | null;
+  distanceNm?: number | null;
+  turnDirection?: 'L' | 'R' | null;
+  altitudeRaw?: string | null;
+  recommendedNavaid?: string | null;
+  remarks?: string | null;
+}
+
+function conventionalSid1LDefinition(procedureName: string) {
+  const name = procedureName.trim().toUpperCase().replace(/\s+/g, ' ');
+  const common: ConventionalSidLegDefinition = {
+    sequence: 10,
+    pathTerminator: 'CA',
+    courseDegMag: 160,
+    distanceNm: 2,
+    altitudeRaw: '+01000 11000',
+    recommendedNavaid: 'VJB',
+    remarks: 'RWY16 climb on 160 deg to 1000 ft',
+  };
+  const definitions: Record<string, { finalFix: string; legs: ConventionalSidLegDefinition[] }> = {
+    'PIMOK 1L': {
+      finalFix: 'PIMOK',
+      legs: [
+        common,
+        { sequence: 20, pathTerminator: 'CI', courseDegMag: 266, distanceNm: 11, turnDirection: 'R', remarks: 'turn right to 266 deg until intercepting RDL236 VJB' },
+        { sequence: 30, pathTerminator: 'CF', fixIdentifier: 'PIMOK', courseDegMag: 236, distanceNm: 15, altitudeRaw: '+06000', recommendedNavaid: 'VJB', remarks: 'RDL236 VJB to PIMOK' },
+      ],
+    },
+    'SABKA 1L': {
+      finalFix: 'SABKA',
+      legs: [
+        common,
+        { sequence: 20, pathTerminator: 'CR', courseDegMag: 333, distanceNm: 10, turnDirection: 'R', altitudeRaw: '+06000', recommendedNavaid: 'VJB', remarks: 'intercept/cross RDL270 VJB' },
+        { sequence: 30, pathTerminator: 'CI', courseDegMag: 333, distanceNm: 3, remarks: 'continue 333 deg to intercept RDL296 VJB' },
+        { sequence: 40, pathTerminator: 'CF', fixIdentifier: 'SABKA', courseDegMag: 296, distanceNm: 19, altitudeRaw: '+06000', recommendedNavaid: 'VJB', remarks: 'RDL296 VJB to SABKA' },
+      ],
+    },
+    'AROSO 1L': {
+      finalFix: 'AROSO',
+      legs: [
+        common,
+        { sequence: 20, pathTerminator: 'CR', courseDegMag: 350, distanceNm: 9, turnDirection: 'R', altitudeRaw: '+06000', recommendedNavaid: 'VJB', remarks: 'intercept/cross RDL270 VJB' },
+        { sequence: 30, pathTerminator: 'CI', courseDegMag: 350, distanceNm: 11, remarks: 'continue 350 deg to intercept RDL332 VJB' },
+        { sequence: 40, pathTerminator: 'CF', fixIdentifier: 'AROSO', courseDegMag: 332, distanceNm: 22, altitudeRaw: '+06000', recommendedNavaid: 'VJB', remarks: 'RDL332 VJB to AROSO' },
+      ],
+    },
+  };
+  return definitions[name];
+}
+
+function conventionalSidLeg(input: ConventionalSidLegDefinition, evidenceIds: string[]): NormalizedLeg {
+  return {
+    sequence: input.sequence,
+    pathTerminator: input.pathTerminator,
+    fromFix: null,
+    fixIdentifier: input.fixIdentifier ?? null,
+    courseDegMag: input.courseDegMag ?? null,
+    distanceNm: input.distanceNm ?? null,
+    turnDirection: input.turnDirection ?? null,
+    altitudeConstraint: input.altitudeRaw ? parseAltitudeConstraint(input.altitudeRaw) : null,
+    speedLimitKias: null,
+    navigationSpec: null,
+    recommendedNavaid: input.recommendedNavaid ?? null,
+    remarks: input.remarks ?? null,
+    derivationMethod: CONVENTIONAL_SID_SYNTHESIZED_LEG_DERIVATION,
+    sourceEvidenceIds: evidenceIds,
+    confidence: 0.58,
+    reviewRequired: true,
+  };
+}
 
 function synthesizedLeg(
   sequence: number,

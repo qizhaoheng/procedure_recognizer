@@ -7,6 +7,8 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
   const isRnavStar = normalizedText(procedureUnderstanding.packageType) === 'STAR'
     && normalizedText(procedureUnderstanding.navigationType) === 'RNAV';
   const isSid = normalizedText(procedureUnderstanding.packageType) === 'SID';
+  const sidTransitionAltitudeFt = isSid ? transitionAltitudeFt(procedureUnderstanding) : undefined;
+  const sidInitialNavaid = isSid ? sidInitialRecommendedNavaid(procedureUnderstanding) : undefined;
   const holdingFixes = new Set(
     (procedureUnderstanding.holdings ?? [])
       .map((holding) => normalizedText((holding as Record<string, unknown>).fixIdentifier ?? (holding as Record<string, unknown>).fix ?? ''))
@@ -38,9 +40,12 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
       const fix = normalizedText(record.fixIdentifier ?? record.toFix ?? record.fix ?? '');
       const pathTerminator = normalizedText(record.pathTerminator ?? '');
       const recommendedNavaid = normalizedText(record.recommendedNavaid ?? '')
+        || (isSidInitialNoFixCa({ isSid, fix, pathTerminator, sequenceValue, firstSequence }) ? sidInitialNavaid : undefined)
         || (pathTerminator === 'AF' || pathTerminator === 'IF' ? arcCenter : undefined);
       const courseDegMag = optionalCourse(record.courseDegMag ?? record.courseDeg);
       const holdingAtFix = Boolean(record.holdingAtFix) || holdingFixes.has(fix);
+      const altitudeUpperFt = altitude.upper
+        ?? (isSidInitialNoFixCa({ isSid, fix, pathTerminator, sequenceValue, firstSequence }) ? sidTransitionAltitudeFt : undefined);
 
       return {
         procedureName,
@@ -54,7 +59,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         altitudeRaw: altitude.raw,
         altitudeValue: altitude.value,
         altitudeSign: altitude.sign,
-        altitudeUpperFt: altitude.upper,
+        altitudeUpperFt,
         courseDegMag,
         holdingAtFix,
         endOfProcedure: Number.isFinite(sequenceValue) && sequenceValue === lastSequence,
@@ -116,6 +121,67 @@ function inferredFixSection(input: FixSectionInput): string {
   }
 
   return sequenceValue === firstSequence ? 'EA' : 'PC';
+}
+
+function isSidInitialNoFixCa(input: Pick<FixSectionInput, 'isSid' | 'fix' | 'sequenceValue' | 'firstSequence'> & { pathTerminator: string }) {
+  return input.isSid
+    && !input.fix
+    && input.pathTerminator === 'CA'
+    && Number.isFinite(input.sequenceValue)
+    && input.sequenceValue === input.firstSequence;
+}
+
+function transitionAltitudeFt(understanding: ProcedureUnderstandingResult) {
+  for (const text of candidateTexts(understanding)) {
+    const normalized = text.replace(/\s+/g, ' ').toUpperCase();
+    const match = normalized.match(/TRANSITION\s+ALT(?:ITUDE)?[^0-9]{0,20}(\d{4,5})\s*(?:FT|FT ALT)?/);
+    if (match) return Number(match[1]);
+  }
+  return undefined;
+}
+
+function sidInitialRecommendedNavaid(understanding: ProcedureUnderstandingResult) {
+  const explicit = [...candidateTexts(understanding)]
+    .map((text) => text.toUpperCase())
+    .find((text) => /\bVJB\b/.test(text) && /\b(?:VOR|DME|VOR\/DME|MSA|NAVAID)\b/.test(text));
+  if (explicit) return 'VJB';
+
+  const navaid = firstIdent(understanding.navaids)
+    ?? firstIdent(understanding.supportObjects?.filter((item) => normalizedText(item.type) === 'NAVAID'));
+  return navaid;
+}
+
+function firstIdent(items: unknown) {
+  if (!Array.isArray(items)) return undefined;
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const ident = normalizedText((item as Record<string, unknown>).ident ?? (item as Record<string, unknown>).identifier);
+    if (/^[A-Z0-9]{2,5}$/.test(ident)) return ident;
+  }
+  return undefined;
+}
+
+function candidateTexts(value: unknown): string[] {
+  const texts: string[] = [];
+  collectTexts(value, texts, 0);
+  return texts;
+}
+
+function collectTexts(value: unknown, texts: string[], depth: number) {
+  if (depth > 5 || texts.length > 1000) return;
+  if (typeof value === 'string') {
+    if (/[A-Z0-9]/i.test(value)) texts.push(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) collectTexts(item, texts, depth + 1);
+    return;
+  }
+  if (!value || typeof value !== 'object') return;
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    if (/rawResponse|parsedJson|geojson/i.test(key)) continue;
+    collectTexts(child, texts, depth + 1);
+  }
 }
 
 function allowsBlankFix(pathTerminator: unknown) {

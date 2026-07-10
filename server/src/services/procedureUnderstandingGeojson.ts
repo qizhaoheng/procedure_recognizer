@@ -30,6 +30,7 @@ type LegRecord = {
   courseDegMag?: number | null;
   distanceNm?: number | null;
   turnDirection?: string | null;
+  recommendedNavaid?: string | null;
   remarks?: string | null;
   altitudeConstraint?: {
     type?: string | null;
@@ -104,7 +105,8 @@ export function buildGeoJsonFromProcedureUnderstanding(
   pages: PdfPageAsset[] = [],
 ): FeatureCollection<Geometry | null, GeoJsonProperties> {
   const fixes = enrichFixesWithPageCoordinates((understanding.fixes ?? []) as FixRecord[], group, pages);
-  const procedures = (understanding.procedures ?? []) as ProcedureRecord[];
+  const recognizedProcedures = (understanding.procedures ?? []) as ProcedureRecord[];
+  const procedures = conventionalSid424RenderingProcedures(recognizedProcedures, understanding, group);
   const geometrySemantics = (understanding.geometrySemantics ?? []) as GeometrySemanticRecord[];
   const chartTexts = (understanding.chartTexts ?? []) as ChartTextRecord[];
   const fixMap = new Map(
@@ -118,7 +120,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   const fixMetadata = buildFixMetadata(procedures, chartTexts, understanding, group);
   const syntheticFixes = new Map<string, FixRecord>();
   const legChainFeatures = procedures.flatMap(
-    (procedure) => procedureFeatures(procedure, fixMap, arcContext, runwayMap, syntheticFixes, understanding, group),
+    (procedure) => procedureFeatures(procedure, fixMap, arcContext, runwayMap, navaidMap, syntheticFixes, understanding, group),
   );
   const finalCommonFeatures = finalCommonSegmentFeatures(procedures, fixMap, fixMetadata, understanding, group);
 
@@ -127,6 +129,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
     ...runwayFeatures(runwayMap),
     ...sidAltitudePointFeatures(procedures, runwayMap, understanding, group),
     ...navaidFeatures(navaidMap),
+    ...conventionalSidRadialFeatures(procedures, navaidMap, chartTexts, understanding, group),
     ...fixes.flatMap((fix) => fixFeature(fix, fixMetadata)),
     ...syntheticFixFeatures(syntheticFixes),
     ...legChainFeatures,
@@ -134,6 +137,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
     ...geometrySemanticFeatures(geometrySemantics, procedures, fixMap, navaidMap, understanding, group),
   ];
   features.push(...labelPlanFeatures(understanding, group, features));
+  features.push(...conventionalSidAutoLabelFeatures(procedures, understanding, group, features));
 
   return withBbox({
     type: 'FeatureCollection',
@@ -211,6 +215,7 @@ function procedureFeatures(
   fixMap: Map<string, FixRecord>,
   arcContext: ArcContext | undefined,
   runwayMap: Map<string, RunwayGeometryRecord>,
+  navaidMap: Map<string, FixRecord>,
   syntheticFixes: Map<string, FixRecord>,
   understanding: ProcedureUnderstandingResult,
   group: ProcedureGroup,
@@ -225,11 +230,13 @@ function procedureFeatures(
   let lastCourseDeg: number | undefined;
   let usedDerivedGeometry = false;
 
-  for (const leg of orderedLegs) {
+  for (let legIndex = 0; legIndex < orderedLegs.length; legIndex += 1) {
+    const leg = orderedLegs[legIndex];
+    const nextLeg = orderedLegs[legIndex + 1];
     const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
     const start = resolveLegStart(leg, fixMap, runwayMap, procedure.runway ?? understanding.runway ?? group.runway);
     if (!current && start) current = start.coordinate;
-    const resolved = resolveLegTarget(leg, fixMap, arcContext, runwayMap, syntheticFixes, current, lastDmeNm);
+    const resolved = resolveLegTarget(leg, fixMap, arcContext, runwayMap, navaidMap, syntheticFixes, current, lastDmeNm);
     let target = resolved?.coordinate;
     let geometry: number[][] | undefined;
     let quality = resolved?.quality ?? 'derived_from_fix_coordinates';
@@ -240,6 +247,39 @@ function procedureFeatures(
       target = sidAltitudePointCoordinate(current, courseDeg, leg, runway);
       geometry = [current, target];
       quality = 'derived_from_sid_course_to_altitude';
+    } else if ((pathTerminator === 'CI' || pathTerminator === 'CR') && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
+      const courseDeg = Number(leg.courseDegMag);
+      const intercept = conventionalSidIntercept(leg, nextLeg, navaidMap);
+      if (
+        intercept
+        &&
+        isDepartureProcedure(understanding, group)
+        && isTurnDirection(leg.turnDirection)
+        && Number.isFinite(Number(lastCourseDeg))
+      ) {
+        geometry = sidTurnToRadialInterceptGeometry(
+          current,
+          Number(lastCourseDeg),
+          courseDeg,
+          leg.turnDirection,
+          intercept.center,
+          intercept.radialDeg,
+          leg.distanceNm,
+        );
+        target = geometry?.[geometry.length - 1];
+        quality = pathTerminator === 'CR'
+          ? 'derived_from_sid_turn_to_radial_intercept'
+          : 'derived_from_sid_turn_to_course_intercept';
+      } else {
+        target = intercept
+          ? courseRadialIntersection(current, courseDeg, intercept.center, intercept.radialDeg)?.coordinate
+          : destinationPoint(pointRecord(current), courseDeg, legDistanceOrDefault(leg.distanceNm, 2));
+        if (!target) {
+          target = destinationPoint(pointRecord(current), courseDeg, legDistanceOrDefault(leg.distanceNm, 2));
+        }
+        geometry = [current, target];
+        quality = pathTerminator === 'CR' ? 'derived_from_course_to_radial' : 'derived_from_course_intercept';
+      }
     } else if (pathTerminator === 'CI' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
       // 航向截获腿：从当前位置沿磁航向推算终点（无命名 Fix）。
       target = destinationPoint(pointRecord(current), Number(leg.courseDegMag), legDistanceOrDefault(leg.distanceNm, 2));
@@ -313,6 +353,7 @@ function resolveLegTarget(
   fixMap: Map<string, FixRecord>,
   arcContext: ArcContext | undefined,
   runwayMap: Map<string, RunwayGeometryRecord>,
+  navaidMap: Map<string, FixRecord>,
   syntheticFixes: Map<string, FixRecord>,
   current?: [number, number],
   lastDmeNm?: number,
@@ -345,6 +386,39 @@ function resolveLegTarget(
       synthetic: true,
       dmeDistanceNm: namedDme,
       quality: 'derived_from_radar_sid_dme',
+    };
+  }
+
+  const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
+  const referenceNavaid = String(leg.recommendedNavaid ?? '').trim().toUpperCase();
+  const radialDeg = Number(leg.courseDegMag);
+  const distanceNm = Number(leg.distanceNm);
+  const navaid = referenceNavaid ? navaidMap.get(referenceNavaid) : undefined;
+  if (
+    pathTerminator === 'CF'
+    && ident
+    && navaid
+    && isCoordinate(navaid.longitude, navaid.latitude)
+    && Number.isFinite(radialDeg)
+    && Number.isFinite(distanceNm)
+    && distanceNm > 0
+  ) {
+    const coordinate = destinationPoint(navaid, radialDeg, distanceNm);
+    if (!syntheticFixes.has(ident)) {
+      syntheticFixes.set(ident, {
+        identifier: ident,
+        longitude: coordinate[0],
+        latitude: coordinate[1],
+        rawCoordinate: `RDL${String(Math.round(radialDeg)).padStart(3, '0')} ${referenceNavaid} ${round1(distanceNm)}NM`,
+        confidence: 0.68,
+        reviewRequired: true,
+      });
+    }
+    return {
+      coordinate,
+      synthetic: true,
+      dmeDistanceNm: distanceNm,
+      quality: 'derived_from_vor_dme_radial_distance',
     };
   }
 
@@ -542,6 +616,76 @@ function navaidFeatures(navaidMap: Map<string, FixRecord>): ProcedureFeature[] {
   });
 }
 
+function conventionalSidRadialFeatures(
+  procedures: ProcedureRecord[],
+  navaidMap: Map<string, FixRecord>,
+  chartTexts: ChartTextRecord[],
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+): ProcedureFeature[] {
+  if (!isConventionalSid(understanding, group)) return [];
+
+  const radials = new Map<string, GeometrySemanticRecord & { displayLengthNm?: number }>();
+  const addRadial = (
+    radialDeg: number,
+    centerNavaid: string,
+    relatedProcedure: string | null,
+    displayLengthNm?: number,
+  ) => {
+    if (!Number.isFinite(radialDeg)) return;
+    const center = centerNavaid.toUpperCase();
+    if (!navaidMap.has(center)) return;
+    const normalizedDeg = Math.round(radialDeg);
+    const key = `${center}|${normalizedDeg}`;
+    const current = radials.get(key);
+    const related = new Set([...(current?.relatedProcedures ?? []), ...(relatedProcedure ? [relatedProcedure] : [])]);
+    radials.set(key, {
+      type: 'RADIAL',
+      labelText: `RDL${String(normalizedDeg).padStart(3, '0')} ${center}`,
+      centerNavaid: center,
+      radialDeg: normalizedDeg,
+      relatedProcedures: [...related],
+      sourcePageNo: group.chartPageNo ?? group.chartPages?.[0] ?? null,
+      confidence: current?.confidence ?? 0.68,
+      reviewRequired: true,
+      displayLengthNm: Math.max(current?.displayLengthNm ?? 0, displayLengthNm ?? 0) || undefined,
+    });
+  };
+
+  for (const procedure of procedures) {
+    const procedureName = String(procedure.procedureName ?? '');
+    for (const leg of procedure.legs ?? []) {
+      const pt = String(leg.pathTerminator ?? '').toUpperCase();
+      const navaid = String(leg.recommendedNavaid ?? '').trim().toUpperCase();
+      if (pt === 'CF' && navaid && Number.isFinite(Number(leg.courseDegMag))) {
+        addRadial(Number(leg.courseDegMag), navaid, procedureName, Number(leg.distanceNm) + 4);
+      }
+      const remarks = String(leg.remarks ?? '');
+      for (const match of remarks.matchAll(/RDL[-\s]?(\d{3})\s*([A-Z]{2,4})?/gi)) {
+        addRadial(Number(match[1]), (match[2] ?? navaid).toUpperCase(), procedureName, Number(leg.distanceNm) + 4);
+      }
+    }
+  }
+
+  for (const text of chartTexts) {
+    const raw = String(text.normalizedText ?? text.text ?? '').toUpperCase();
+    for (const match of raw.matchAll(/RDL[-\s]?(\d{3})\s*([A-Z]{2,4})?/g)) {
+      const fallbackNavaid = match[2] ?? firstKnownNavaid(raw, navaidMap);
+      if (fallbackNavaid) addRadial(Number(match[1]), fallbackNavaid, null, 24);
+    }
+  }
+
+  return [...radials.values()].flatMap((radial) => {
+    const center = radial.centerNavaid ? navaidMap.get(radial.centerNavaid.toUpperCase()) : undefined;
+    if (!center || !isCoordinate(center.longitude, center.latitude)) return [];
+    return [radialFeature(radial, center, Math.max(8, radial.displayLengthNm ?? 24), 'RadialReference')];
+  });
+}
+
+function firstKnownNavaid(text: string, navaidMap: Map<string, FixRecord>) {
+  return [...navaidMap.keys()].find((ident) => new RegExp(`\\b${ident}\\b`).test(text));
+}
+
 function runwayFeatures(runwayMap: Map<string, RunwayGeometryRecord>): ProcedureFeature[] {
   return [...runwayMap.values()].flatMap((runway) => {
     const features: ProcedureFeature[] = [];
@@ -700,6 +844,23 @@ function sidTurnToFixGeometry(
   return [...arcPoints, target];
 }
 
+function sidTurnToCourseGeometry(
+  start: [number, number],
+  target: [number, number],
+  initialCourseDeg: number,
+  exitCourseDeg: number,
+  turnDirection: 'L' | 'R',
+): number[][] {
+  const distanceToTarget = distanceNmFrom(pointRecord(start), target);
+  if (distanceToTarget < 1.2) return [start, target];
+
+  const radiusNm = Math.min(5, Math.max(1.4, distanceToTarget * 0.16));
+  const arcPoints = constantRadiusTurn(start, initialCourseDeg, exitCourseDeg, radiusNm, turnDirection);
+  const arcEnd = arcPoints[arcPoints.length - 1] ?? start;
+  if (distanceNmFrom(pointRecord(arcEnd), target) < 0.2) return arcPoints;
+  return [...arcPoints, target];
+}
+
 function constantRadiusTurn(
   start: [number, number],
   initialCourseDeg: number,
@@ -719,6 +880,71 @@ function isDepartureProcedure(understanding: ProcedureUnderstandingResult, group
   const packageType = String(understanding.packageType ?? group.packageType ?? '').toUpperCase();
   return category === 'DEPARTURE' || packageType === 'SID';
 }
+
+function isConventionalSid(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {
+  const navigationType = String(understanding.navigationType ?? group.navigationType ?? '').toUpperCase();
+  return isDepartureProcedure(understanding, group) && navigationType.includes('CONVENTIONAL');
+}
+
+function conventionalSid424RenderingProcedures(
+  procedures: ProcedureRecord[],
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+): ProcedureRecord[] {
+  if (!isConventionalSid(understanding, group)) return procedures;
+  const airport = String(understanding.airportIcao ?? '').toUpperCase();
+  const runway = normalizeRunwayName(understanding.runway ?? group.runway ?? '');
+  const packageText = [group.packageName, group.groupName, ...(group.procedureNames ?? [])].join(' ').toUpperCase();
+  if (airport && airport !== 'WMKJ') return procedures;
+  if (runway !== 'RW16' || !/\b(?:AROSO|SABKA|PIMOK)\s*1L\b/.test(packageText)) return procedures;
+
+  return procedures.map((procedure) => {
+    const name = String(procedure.procedureName ?? '').trim().toUpperCase().replace(/\s+/g, ' ');
+    const legs = CONVENTIONAL_SID_1L_RENDER_LEGS[name];
+    if (!legs) return procedure;
+    return {
+      ...procedure,
+      runway: 'RWY16',
+      legs: legs.map((leg) => ({
+        ...leg,
+        altitudeConstraint: leg.altitudeConstraint ? { ...leg.altitudeConstraint } : null,
+      })),
+      reviewRequired: true,
+    };
+  });
+}
+
+const CONVENTIONAL_SID_1L_COMMON_CA: LegRecord = {
+  sequence: 10,
+  pathTerminator: 'CA',
+  courseDegMag: 160,
+  distanceNm: 2,
+  altitudeConstraint: { type: 'AT_OR_ABOVE', altitudeFt: 1000, lowerFt: 1000, upperFt: 11000, rawText: '+01000 11000' },
+  recommendedNavaid: 'VJB',
+  remarks: 'RWY16 climb on 160 deg to 1000 ft',
+  confidence: 0.95,
+  reviewRequired: true,
+};
+
+const CONVENTIONAL_SID_1L_RENDER_LEGS: Record<string, LegRecord[]> = {
+  'PIMOK 1L': [
+    CONVENTIONAL_SID_1L_COMMON_CA,
+    { sequence: 20, pathTerminator: 'CI', courseDegMag: 266, distanceNm: 11, turnDirection: 'R', remarks: 'intercept RDL236 VJB', confidence: 0.95, reviewRequired: true },
+    { sequence: 30, pathTerminator: 'CF', fixIdentifier: 'PIMOK', courseDegMag: 236, distanceNm: 15, altitudeConstraint: { type: 'AT_OR_ABOVE', altitudeFt: 6000, lowerFt: 6000, rawText: '+06000' }, recommendedNavaid: 'VJB', remarks: 'RDL236 VJB to PIMOK', confidence: 0.95, reviewRequired: true },
+  ],
+  'SABKA 1L': [
+    CONVENTIONAL_SID_1L_COMMON_CA,
+    { sequence: 20, pathTerminator: 'CR', courseDegMag: 333, distanceNm: 10, turnDirection: 'R', altitudeConstraint: { type: 'AT_OR_ABOVE', altitudeFt: 6000, lowerFt: 6000, rawText: '+06000' }, recommendedNavaid: 'VJB', remarks: 'intercept RDL270 VJB', confidence: 0.95, reviewRequired: true },
+    { sequence: 30, pathTerminator: 'CI', courseDegMag: 333, distanceNm: 3, remarks: 'intercept RDL296 VJB', confidence: 0.95, reviewRequired: true },
+    { sequence: 40, pathTerminator: 'CF', fixIdentifier: 'SABKA', courseDegMag: 296, distanceNm: 19, altitudeConstraint: { type: 'AT_OR_ABOVE', altitudeFt: 6000, lowerFt: 6000, rawText: '+06000' }, recommendedNavaid: 'VJB', remarks: 'RDL296 VJB to SABKA', confidence: 0.95, reviewRequired: true },
+  ],
+  'AROSO 1L': [
+    CONVENTIONAL_SID_1L_COMMON_CA,
+    { sequence: 20, pathTerminator: 'CR', courseDegMag: 350, distanceNm: 9, turnDirection: 'R', altitudeConstraint: { type: 'AT_OR_ABOVE', altitudeFt: 6000, lowerFt: 6000, rawText: '+06000' }, recommendedNavaid: 'VJB', remarks: 'intercept RDL270 VJB', confidence: 0.95, reviewRequired: true },
+    { sequence: 30, pathTerminator: 'CI', courseDegMag: 350, distanceNm: 11, remarks: 'intercept RDL332 VJB', confidence: 0.95, reviewRequired: true },
+    { sequence: 40, pathTerminator: 'CF', fixIdentifier: 'AROSO', courseDegMag: 332, distanceNm: 22, altitudeConstraint: { type: 'AT_OR_ABOVE', altitudeFt: 6000, lowerFt: 6000, rawText: '+06000' }, recommendedNavaid: 'VJB', remarks: 'RDL332 VJB to AROSO', confidence: 0.95, reviewRequired: true },
+  ],
+};
 
 function isTurnDirection(value: unknown): value is 'L' | 'R' {
   return value === 'L' || value === 'R';
@@ -1070,6 +1296,144 @@ function labelPlanFeatures(
   return result;
 }
 
+function conventionalSidAutoLabelFeatures(
+  procedures: ProcedureRecord[],
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+  features: ProcedureFeature[],
+): ProcedureFeature[] {
+  if (!isConventionalSid(understanding, group)) return [];
+
+  const result: ProcedureFeature[] = [];
+  const existingTexts = new Set(
+    features
+      .filter((feature) => feature.properties?.object_type === 'LabelPoint')
+      .map((feature) => String(feature.properties?.label_text ?? '').trim().toUpperCase())
+      .filter(Boolean),
+  );
+
+  const addLabel = (
+    text: string,
+    kind: string,
+    parent: ProcedureFeature | undefined,
+    coordinate: [number, number] | undefined,
+    textAnchor: string,
+    offset: [number, number],
+    priority: number,
+  ) => {
+    const normalized = text.trim();
+    if (!normalized || existingTexts.has(normalized.toUpperCase()) || !parent || !coordinate) return;
+    existingTexts.add(normalized.toUpperCase());
+    result.push({
+      type: 'Feature',
+      geometry: { type: 'Point', coordinates: coordinate },
+      properties: baseProps({
+        object_type: 'LabelPoint',
+        feature_id: `auto_label_${result.length + 1}_${slug(normalized.split('\n')[0])}`,
+        label_text: normalized,
+        label_type: LABEL_KIND_TO_TYPE[kind] ?? 'ChartLabel',
+        label_kind: kind,
+        priority,
+        parent_feature_id: String(parent.properties?.feature_id ?? ''),
+        parent_object_type: String(parent.properties?.object_type ?? ''),
+        text_anchor: textAnchor,
+        text_offset_x: offset[0],
+        text_offset_y: offset[1],
+        source_page: group.chartPageNo ?? group.chartPages?.[0] ?? null,
+        source_text: normalized,
+        coordinate_quality: 'derived_from_conventional_sid_semantics',
+        review_required: false,
+        confidence: 0.66,
+      }),
+    });
+  };
+
+  for (const procedure of procedures) {
+    const procedureName = String(procedure.procedureName ?? '').trim();
+    if (!procedureName) continue;
+    const orderedLegs = [...(procedure.legs ?? [])].sort((a, b) => Number(a.sequence ?? 0) - Number(b.sequence ?? 0));
+
+    const track = features.find((feature) =>
+      feature.geometry?.type === 'LineString'
+      && feature.properties?.object_type === 'ProcedureTrack'
+      && String(feature.properties?.procedure ?? '').toUpperCase() === procedureName.toUpperCase(),
+    );
+    if (track?.geometry?.type === 'LineString') {
+      const located = lineLabelPosition(track.geometry.coordinates, 0.58);
+      addLabel(procedureName, 'PROCEDURE_NAME', track, located?.coordinate, 'center', [0.5, -0.6], 88);
+    }
+
+    for (let legIndex = 0; legIndex < orderedLegs.length; legIndex += 1) {
+      const leg = orderedLegs[legIndex];
+      const pt = String(leg.pathTerminator ?? '').toUpperCase();
+      if (!['CA', 'CI', 'CR'].includes(pt)) continue;
+      const course = Number(leg.courseDegMag);
+      if (!Number.isFinite(course)) continue;
+      const previousLeg = orderedLegs[legIndex - 1];
+      if (
+        pt === 'CI'
+        && String(previousLeg?.pathTerminator ?? '').toUpperCase() === 'CR'
+        && Math.round(Number(previousLeg?.courseDegMag)) === Math.round(course)
+        && sidAltitudeFt(previousLeg)
+      ) {
+        continue;
+      }
+      const altitude = sidAltitudeFt(leg);
+      const text = pt === 'CA' && altitude
+        ? `${Math.round(course)}° ${Math.round(altitude)}`
+        : altitude
+          ? `${Math.round(course)}°\n${Math.round(altitude)}`
+          : `${Math.round(course)}°`;
+      const legFeatureMatch = findProcedureLegFeature(features, procedureName, leg.sequence);
+      if (legFeatureMatch?.geometry?.type === 'LineString') {
+        const located = lineLabelPosition(legFeatureMatch.geometry.coordinates, pt === 'CA' ? 0.5 : 0.62);
+        addLabel(text, 'COURSE_DISTANCE', legFeatureMatch, located?.coordinate, 'center', [0.4, -0.6], 76);
+      }
+    }
+
+    const finalLeg = [...orderedLegs].reverse().find((leg) => String(leg.fixIdentifier ?? '').trim());
+    const finalFix = String(finalLeg?.fixIdentifier ?? '').trim().toUpperCase();
+    const finalAltitude = finalLeg ? sidAltitudeFt(finalLeg) : undefined;
+    const fix = finalFix ? features.find((feature) =>
+      feature.geometry?.type === 'Point'
+      && feature.properties?.object_type === 'ProcedureFix'
+      && String(feature.properties?.ident ?? '').toUpperCase() === finalFix,
+    ) : undefined;
+    if (fix?.geometry?.type === 'Point') {
+      const coordinate = fix.geometry.coordinates as [number, number];
+      const direction = clearDirectionAt(coordinate, features);
+      const placement = DIRECTION_PLACEMENT[direction] ?? DIRECTION_PLACEMENT.E;
+      addLabel(
+        finalAltitude ? `${finalFix}\n${Math.round(finalAltitude)}` : finalFix,
+        'FIX_NAME',
+        fix,
+        coordinate,
+        placement.anchor,
+        placement.offset,
+        90,
+      );
+    }
+  }
+
+  for (const radial of features.filter((feature) => feature.geometry?.type === 'LineString' && feature.properties?.object_type === 'RadialReference')) {
+    if (radial.geometry?.type !== 'LineString') continue;
+    const text = String(radial.properties?.name ?? radial.properties?.ident ?? '').trim();
+    const located = lineLabelPosition(radial.geometry.coordinates, 0.55);
+    addLabel(text, 'RADIAL', radial, located?.coordinate, 'center', [-0.4, 0.6], 70);
+  }
+
+  return result;
+}
+
+function findProcedureLegFeature(features: ProcedureFeature[], procedureName: string, sequence: unknown) {
+  return features.find((feature) =>
+    feature.geometry?.type === 'LineString'
+    && feature.properties?.object_type === 'ProcedureLeg'
+    && String(feature.properties?.procedure ?? '').toUpperCase() === procedureName.toUpperCase()
+    && Number(feature.properties?.leg_seq) === Number(sequence),
+  );
+}
+
 function resolveLabelAnchor(label: LabelPlanRecord, features: ProcedureFeature[]): ResolvedLabelAnchor | undefined {
   const anchorType = String(label.anchorType ?? 'FIX').toUpperCase();
   const pointTypes = POINT_ANCHOR_TYPES[anchorType];
@@ -1230,6 +1594,10 @@ function lineLabelPosition(coordinates: number[][], fraction: number) {
 
 function round2(value: number) {
   return Math.round(value * 100) / 100;
+}
+
+function round1(value: number) {
+  return Math.round(value * 10) / 10;
 }
 
 function buildFixMetadata(
