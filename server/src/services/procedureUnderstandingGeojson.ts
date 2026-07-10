@@ -125,6 +125,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   const features: ProcedureFeature[] = [
     procedureChartFeature(understanding, group),
     ...runwayFeatures(runwayMap),
+    ...sidAltitudePointFeatures(procedures, runwayMap, understanding, group),
     ...navaidFeatures(navaidMap),
     ...fixes.flatMap((fix) => fixFeature(fix, fixMetadata)),
     ...syntheticFixFeatures(syntheticFixes),
@@ -221,6 +222,7 @@ function procedureFeatures(
   const chain: number[][] = [];
   let current: [number, number] | undefined;
   let lastDmeNm: number | undefined;
+  let lastCourseDeg: number | undefined;
   let usedDerivedGeometry = false;
 
   for (const leg of orderedLegs) {
@@ -233,7 +235,9 @@ function procedureFeatures(
     let quality = resolved?.quality ?? 'derived_from_fix_coordinates';
 
     if (pathTerminator === 'CA' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
-      target = destinationPoint(pointRecord(current), Number(leg.courseDegMag), legDistanceOrDefault(leg.distanceNm, 2));
+      const runway = runwayMap.get(normalizeRunwayName(procedure.runway ?? understanding.runway ?? group.runway));
+      const courseDeg = Number(leg.courseDegMag);
+      target = sidAltitudePointCoordinate(current, courseDeg, leg, runway);
       geometry = [current, target];
       quality = 'derived_from_sid_course_to_altitude';
     } else if (pathTerminator === 'CI' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
@@ -250,6 +254,16 @@ function procedureFeatures(
       const arcPoints = arcCoordinates(arcContext.center, radiusNm, startDeg, endDeg, direction);
       geometry = [current, ...arcPoints.slice(1, -1), target];
       quality = 'derived_from_dme_arc_semantics';
+    } else if (
+      pathTerminator === 'DF'
+      && current
+      && target
+      && isDepartureProcedure(understanding, group)
+      && isTurnDirection(leg.turnDirection)
+      && Number.isFinite(Number(lastCourseDeg))
+    ) {
+      geometry = sidTurnToFixGeometry(current, target, Number(lastCourseDeg), leg.turnDirection as 'L' | 'R');
+      quality = 'derived_from_sid_chart_turn';
     } else if (current && target) {
       geometry = [current, target];
       quality = resolved?.quality ?? (resolved?.synthetic ? 'derived_from_dme_fix_name' : 'derived_from_fix_coordinates');
@@ -264,6 +278,11 @@ function procedureFeatures(
       chain.push(target);
     }
     if (target) current = target;
+    if (Number.isFinite(Number(leg.courseDegMag)) && Number(leg.courseDegMag) > 0) {
+      lastCourseDeg = Number(leg.courseDegMag);
+    } else if (geometry && geometry.length >= 2) {
+      lastCourseDeg = bearingFrom(pointRecord(geometry[geometry.length - 2] as [number, number]), geometry[geometry.length - 1]);
+    }
     lastDmeNm = dmeDistanceFromText(leg.fixIdentifier) ?? dmeDistanceFromText(leg.remarks) ?? lastDmeNm;
   }
 
@@ -575,6 +594,134 @@ function runwayPointFeature(
       confidence: 0.78,
     }),
   };
+}
+
+function sidAltitudePointFeatures(
+  procedures: ProcedureRecord[],
+  runwayMap: Map<string, RunwayGeometryRecord>,
+  understanding: ProcedureUnderstandingResult,
+  group: ProcedureGroup,
+): ProcedureFeature[] {
+  if (!isDepartureProcedure(understanding, group)) return [];
+  const features = new Map<string, ProcedureFeature>();
+
+  for (const procedure of procedures) {
+    const runwayName = normalizeRunwayName(procedure.runway ?? understanding.runway ?? group.runway);
+    const runway = runwayMap.get(runwayName);
+    const start = runway?.threshold;
+    if (!start) continue;
+
+    for (const leg of procedure.legs ?? []) {
+      if (String(leg.pathTerminator ?? '').toUpperCase() !== 'CA') continue;
+      const courseDeg = Number(leg.courseDegMag);
+      const altitudeFt = sidAltitudeFt(leg);
+      if (!Number.isFinite(courseDeg) || !Number.isFinite(altitudeFt)) continue;
+
+      const coordinate = sidAltitudePointCoordinate(start, courseDeg, leg, runway);
+      const distanceNm = Math.round(distanceNmFrom(pointRecord(start), coordinate) * 10) / 10;
+      const key = `${runwayName}_${Math.round(courseDeg)}_${Math.round(Number(altitudeFt))}`;
+      if (features.has(key)) continue;
+
+      features.set(key, {
+        type: 'Feature',
+        geometry: { type: 'Point', coordinates: coordinate },
+        properties: baseProps({
+          object_type: 'SIDAltitudePoint',
+          feature_id: `sid_altitude_${slug(runwayName)}_${Math.round(Number(altitudeFt))}`,
+          ident: `${Math.round(Number(altitudeFt))}FT`,
+          name: `${Math.round(Number(altitudeFt))}`,
+          runway: runwayName,
+          course_deg_mag: Math.round(courseDeg),
+          altitude_ft: Math.round(Number(altitudeFt)),
+          lower_ft: leg.altitudeConstraint?.lowerFt ?? leg.altitudeConstraint?.altitudeFt ?? null,
+          altitude_constraint: leg.altitudeConstraint?.rawText ?? `+${Math.round(Number(altitudeFt))}`,
+          distance_nm: distanceNm,
+          source_page: group.chartPageNo ?? group.chartPages[0] ?? null,
+          source_text: `${String(Math.round(courseDeg)).padStart(3, '0')}° ${Math.round(Number(altitudeFt))}`,
+          coordinate_quality: 'aip_ad_charted_initial_climb_point',
+          review_required: false,
+          confidence: leg.confidence ?? understanding.confidence ?? 0.72,
+        }),
+      });
+    }
+  }
+
+  return [...features.values()];
+}
+
+function sidAltitudePointCoordinate(
+  start: [number, number],
+  courseDeg: number,
+  leg: LegRecord,
+  runway?: RunwayGeometryRecord,
+): [number, number] {
+  const distanceNm = sidInitialClimbDisplayDistanceNm(start, leg, runway);
+  return destinationPoint(pointRecord(start), courseDeg, distanceNm);
+}
+
+function sidInitialClimbDisplayDistanceNm(start: [number, number], leg: LegRecord, runway?: RunwayGeometryRecord) {
+  const explicitDistance = Number(leg.distanceNm);
+  if (Number.isFinite(explicitDistance) && explicitDistance > 0) return explicitDistance;
+
+  const runwayLengthNm = runway?.end ? distanceNmFrom(pointRecord(start), runway.end) : 0;
+  return Math.max(2, runwayLengthNm + 0.45);
+}
+
+function sidAltitudeFt(leg: LegRecord) {
+  const altitude = Number(leg.altitudeConstraint?.altitudeFt ?? leg.altitudeConstraint?.lowerFt);
+  if (Number.isFinite(altitude)) return altitude;
+  const match = String(leg.altitudeConstraint?.rawText ?? leg.remarks ?? '').match(/([+-]?\d{3,5})/);
+  return match ? Number(match[1].replace(/^[+]/, '')) : undefined;
+}
+
+function sidTurnToFixGeometry(
+  start: [number, number],
+  target: [number, number],
+  initialCourseDeg: number,
+  turnDirection: 'L' | 'R',
+): number[][] {
+  const distanceToTarget = distanceNmFrom(pointRecord(start), target);
+  if (distanceToTarget < 2) return [start, target];
+
+  const radiusNm = Math.min(5.5, Math.max(1.8, distanceToTarget * 0.18));
+  let exitCourseDeg = bearingFrom(pointRecord(start), target);
+  let arcPoints: [number, number][] = [];
+
+  for (let iteration = 0; iteration < 4; iteration += 1) {
+    arcPoints = constantRadiusTurn(start, initialCourseDeg, exitCourseDeg, radiusNm, turnDirection);
+    const arcEnd = arcPoints[arcPoints.length - 1];
+    const remainingNm = distanceNmFrom(pointRecord(arcEnd), target);
+    if (remainingNm < 0.4) break;
+    exitCourseDeg = bearingFrom(pointRecord(arcEnd), target);
+  }
+
+  const arcEnd = arcPoints[arcPoints.length - 1] ?? start;
+  if (distanceNmFrom(pointRecord(arcEnd), target) < 0.2) return arcPoints;
+  return [...arcPoints, target];
+}
+
+function constantRadiusTurn(
+  start: [number, number],
+  initialCourseDeg: number,
+  exitCourseDeg: number,
+  radiusNm: number,
+  turnDirection: 'L' | 'R',
+): [number, number][] {
+  const centerBearing = turnDirection === 'R' ? initialCourseDeg + 90 : initialCourseDeg - 90;
+  const startRadial = turnDirection === 'R' ? initialCourseDeg - 90 : initialCourseDeg + 90;
+  const endRadial = turnDirection === 'R' ? exitCourseDeg - 90 : exitCourseDeg + 90;
+  const centerCoordinate = destinationPoint(pointRecord(start), centerBearing, radiusNm);
+  return arcCoordinates(pointRecord(centerCoordinate), radiusNm, startRadial, endRadial, turnDirection) as [number, number][];
+}
+
+function isDepartureProcedure(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {
+  const category = String(understanding.procedureCategory ?? group.procedureCategory ?? '').toUpperCase();
+  const packageType = String(understanding.packageType ?? group.packageType ?? '').toUpperCase();
+  return category === 'DEPARTURE' || packageType === 'SID';
+}
+
+function isTurnDirection(value: unknown): value is 'L' | 'R' {
+  return value === 'L' || value === 'R';
 }
 
 function radialFeature(radial: GeometrySemanticRecord, center: FixRecord, lengthNm: number, objectType: 'RadialReference' | 'LeadRadial'): ProcedureFeature {

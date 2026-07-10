@@ -89,7 +89,7 @@ export function parseProcedureGeoJson(
     procedureTracks,
     legsByProcedure,
     fixes: allFeatures.filter((feature) =>
-      ['ProcedureFix', 'DerivedFix', 'LeadRadialPoint', 'RunwayThreshold', 'RunwayEnd'].includes(
+      ['ProcedureFix', 'DerivedFix', 'LeadRadialPoint', 'SIDAltitudePoint', 'RunwayThreshold', 'RunwayEnd'].includes(
         asString(feature.properties.object_type),
       ),
     ),
@@ -232,6 +232,14 @@ export function buildLabelFeatures(spatialFeatures: ProcedureFeature[]): Feature
       } else if (name.includes('RDL340 FINAL INTERCEPT')) {
         pushLabel(feature, point, 'RDL340\n160°', 'DerivedFix', 75);
       }
+    }
+
+    if (objectType === 'SIDAltitudePoint') {
+      const altitude = props.altitude_ft ? `${props.altitude_ft}` : asString(props.name || props.ident);
+      pushLabel(feature, point, altitude, 'SIDAltitudePoint', 84, {
+        text_anchor: 'bottom',
+        text_offset: [0, -0.7],
+      });
     }
 
     if (objectType === 'LeadRadialPoint') {
@@ -629,6 +637,7 @@ function buildDisplayLabel(properties: Record<string, unknown>): string {
     const dme = properties.dme_nm ? `${properties.dme_nm}D ` : '';
     return asString(properties.name).includes('13D') ? '13D VJB' : `${radial}${dme}${asString(properties.name)}`;
   }
+  if (type === 'SIDAltitudePoint') return properties.altitude_ft ? `${properties.altitude_ft}` : asString(properties.name || properties.ident);
   if (type === 'RunwayThreshold' || type === 'RunwayEnd' || type === 'Runway') return asString(properties.name);
   if (type === 'ChartLabel') return asString(properties.name);
   if (type === 'ProcedureLeg' && properties.leg_type === 'FINAL_COMMON_SEGMENT') return '160°';
