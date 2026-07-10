@@ -44,7 +44,9 @@ Rules:
 
 SID-specific geometry rules:
 - RUNWAY_ALIGNMENT: output runway track/course labels such as `TRACK 160`, `TRACK 340`, runway heading,
-  DER, and runway end/threshold context. Use inboundTrackDeg for the runway track.
+  compact climb labels such as `160° 1000`, DER, and runway end/threshold context. Use inboundTrackDeg
+  for the runway track. When an altitude is printed beside the runway track, preserve it in labelText
+  because it controls the charted turn trigger for CA-style SID legs.
 - PROCEDURE_TRACK: output each visible SID path, including short radar departure tracks that end at a
   DME/altitude/assigned-heading condition rather than at a named waypoint.
 - TURN: output explicit left/right turns, turns after DER, turns at DME, turns at altitude, and turns to

@@ -329,6 +329,17 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     const coords = (ca?.geometry as GeoJSON.LineString).coordinates;
     assert.equal(coords.length, 2);
     assert.ok(distanceNm({ lat: coords[0][1], lon: coords[0][0] }, coords[1]) > 1.9, 'CA leg should use fallback distance when input is zero');
+
+    const altitudePoint = geojson.features.find((f) => f.properties?.object_type === 'SIDAltitudePoint');
+    assert.ok(altitudePoint, 'SID altitude point missing');
+    assert.equal(altitudePoint?.properties?.altitude_ft, 1000);
+    assert.equal(altitudePoint?.properties?.course_deg_mag, 160);
+    assertClose((altitudePoint?.geometry as GeoJSON.Point).coordinates as [number, number], coords[1] as [number, number], 0.00001);
+
+    const df = geojson.features.find((f) => f.properties?.object_type === 'ProcedureLeg' && f.properties?.leg_seq === 20);
+    assert.ok(df, 'DF turn leg feature missing');
+    assert.equal(df?.properties?.coordinate_quality, 'derived_from_sid_chart_turn');
+    assert.ok((df?.geometry as GeoJSON.LineString).coordinates.length > 3, 'DF leg should be sampled as a charted turn, not a direct two-point line');
   });
 });
 

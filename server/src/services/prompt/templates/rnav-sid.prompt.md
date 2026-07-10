@@ -14,6 +14,9 @@ SID-specific reading rules:
   procedures even when they share the same terminal waypoint.
 - The first leg of an RNAV SID may still be a runway/course-to-altitude leg. If the table says track 160
   or 340 to 1000/1500 ft before joining RNAV fixes, output a CA-style leg before the first named fix.
+- If the plan view prints a runway-alignment label such as `160° 1000`, read it as "track/course 160
+  until 1000 ft before turning". Preserve `1000` as the CA altitude constraint and include the same
+  text in geometrySemantics as RUNWAY_ALIGNMENT.
 - Use DF when the instruction is direct to a waypoint after the initial climb/turn; use TF only for
   fix-to-fix tracks with a named fromFix and toFix.
 - Preserve intermediate computer fixes such as KJ703, INVOV, UDOSU, AKSOT, and final transition fixes
@@ -30,5 +33,7 @@ Label plan mapping (RNAV SID):
 - waypoint labels -> labelKind=FIX_NAME, anchorType=FIX
 - procedure-name labels -> labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK
 - course/distance labels -> labelKind=COURSE_DISTANCE, anchorType=LEG
+- runway-alignment climb labels such as `160° 1000` -> labelKind=COURSE_DISTANCE, anchorType=LEG,
+  anchored to the CA leg
 - climb-gradient/speed/turn notes -> labelKind=NOTE, anchorType=LEG or PROCEDURE_TRACK
 - navaid or DME reference labels -> labelKind=NAVAID_INFO or NOTE, anchored to the navaid or leg

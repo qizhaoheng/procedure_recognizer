@@ -21,6 +21,8 @@ Core SID elements to extract:
 Expected path-terminator reading:
 - CA: course/track from runway until an altitude, e.g. `track 160 until 1000 ft`; output fixIdentifier=null,
   courseDegMag=160, altitudeConstraint with the printed altitude, and recommendedNavaid only if printed.
+  A compact plan-view label like `160° 1000` is also a CA trigger: course/track 160 until 1000 ft,
+  then the published turn/DF/CI/CF continuation.
 - CI: course/track to intercept a later course/radial; output the course in courseDegMag and describe the
   intercept target in remarks when no named fix exists.
 - CF: course to a fix/radial/DME fix; use when the row or chart gives a course plus a terminating fix or
@@ -48,6 +50,8 @@ Label plan mapping (Conventional / RADAR SID):
 - runway labels -> labelKind=RUNWAY, anchorType=RUNWAY
 - procedure names -> labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK
 - track/course and DME text -> labelKind=COURSE_DISTANCE, anchorType=LEG
+- runway-alignment climb labels such as `160° 1000` -> labelKind=COURSE_DISTANCE, anchorType=LEG,
+  anchored to the CA leg
 - radial labels -> labelKind=RADIAL, anchorType=RADIAL
 - navaid boxes/frequencies -> labelKind=NAVAID_INFO, anchorType=NAVAID
 - radar/ATC notes and climb-gradient notes -> labelKind=NOTE, anchored to the relevant leg or track
