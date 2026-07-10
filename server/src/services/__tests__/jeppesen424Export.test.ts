@@ -106,6 +106,49 @@ describe('Jeppesen 424 export', () => {
     assert.equal(final.turnDirection, '');
   });
 
+  it('exports RNAV SID no-fix CA coding used by the static Jeppesen comparison', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'WMKJ',
+      runway: 'RW16',
+      packageType: 'SID',
+      navigationType: 'RNAV',
+      procedures: [
+        {
+          procedureName: 'ADLOV 1J',
+          runway: 'RW16',
+          legs: [
+            {
+              sequence: 10,
+              pathTerminator: 'CA',
+              courseDegMag: 160,
+              distanceNm: 2,
+              altitudeConstraint: { rawText: '+01000 11000', altitudeFt: 1000, upperFt: 11000 },
+              recommendedNavaid: 'VJB',
+            },
+            {
+              sequence: 20,
+              fixIdentifier: 'INVOV',
+              pathTerminator: 'DF',
+              turnDirection: 'R',
+              distanceNm: 12,
+              altitudeConstraint: { rawText: '+06000', altitudeFt: 6000 },
+            },
+          ],
+        },
+      ],
+    });
+
+    const [first] = parseJeppesen424Text(simpleLegsTo424Text(aiLegs, { airportIcao: 'WMKJ' }));
+    assert.equal(first.fix, '');
+    assert.equal(first.pathTerminator, 'CA');
+    assert.equal(first.fixSection, undefined);
+    assert.equal(first.courseDegMag, 160);
+    assert.equal(first.distanceNm, 2);
+    assert.equal(first.altitudeValue, 1000);
+    assert.equal(first.altitudeUpperFt, 11000);
+    assert.equal(first.recommendedNavaid, 'VJB');
+  });
+
   it('marks DME ARC (1G) procedures with the DG qualifier and turn direction', () => {
     const aiLegs = aiProcedureToSimpleLegs({
       airportIcao: 'WMKJ',
