@@ -341,6 +341,86 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assert.equal(df?.properties?.coordinate_quality, 'derived_from_sid_chart_turn');
     assert.ok((df?.geometry as GeoJSON.LineString).coordinates.length > 3, 'DF leg should be sampled as a charted turn, not a direct two-point line');
   });
+
+  it('renders conventional SID CR/CI/CF legs from charted VOR radial intercepts', () => {
+    const conventionalGroup = {
+      ...group,
+      packageName: 'RWY16 CONVENTIONAL SID AROSO 1L SABKA 1L PIMOK 1L',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'CONVENTIONAL',
+      procedureNames: ['SABKA 1L'],
+    } as unknown as ProcedureGroup;
+    const conventional: ProcedureUnderstandingResult = {
+      airportIcao: 'WMKJ',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      runway: 'RWY16',
+      navigationType: 'CONVENTIONAL',
+      runways: [
+        {
+          identifier: 'RWY16',
+          thresholdLatitude: 1.6555083333333331,
+          thresholdLongitude: 103.66396944444445,
+          endLatitude: 1.6086111111111112,
+          endLongitude: 103.67527777777778,
+        },
+      ],
+      navaids: [
+        { identifier: 'VJB', type: 'VOR/DME', latitude: VJB.lat, longitude: VJB.lon },
+      ],
+      fixes: [
+        { identifier: 'SABKA' },
+      ],
+      procedures: [
+        {
+          procedureName: 'SABKA 1L',
+          runway: 'RWY16',
+          legs: [
+            { sequence: 10, pathTerminator: 'CA', courseDegMag: 160, distanceNm: 2, altitudeConstraint: { rawText: '+1000', altitudeFt: 1000 } },
+            { sequence: 20, pathTerminator: 'CR', turnDirection: 'R', courseDegMag: 333, distanceNm: 10, altitudeConstraint: { rawText: '+6000', altitudeFt: 6000 }, recommendedNavaid: 'VJB', remarks: 'intercept/cross RDL270 VJB' },
+            { sequence: 30, pathTerminator: 'CI', courseDegMag: 333, distanceNm: 3 },
+            { sequence: 40, pathTerminator: 'CF', fixIdentifier: 'SABKA', courseDegMag: 296, distanceNm: 19, altitudeConstraint: { rawText: '+6000', altitudeFt: 6000 }, recommendedNavaid: 'VJB' },
+          ],
+        },
+      ],
+    };
+
+    const geojson = buildGeoJsonFromProcedureUnderstanding(conventional, conventionalGroup);
+    const legs = geojson.features.filter((f) => f.properties?.object_type === 'ProcedureLeg');
+    const bySeq = new Map(legs.map((f) => [f.properties?.leg_seq, f]));
+    assert.deepEqual([...bySeq.keys()].sort((a, b) => Number(a) - Number(b)), [10, 20, 30, 40]);
+
+    const cr = bySeq.get(20);
+    assert.ok(cr, 'CR leg feature missing');
+    assert.equal(cr?.properties?.path_terminator, 'CR');
+    assert.equal(cr?.properties?.coordinate_quality, 'derived_from_sid_turn_to_radial_intercept');
+    assert.ok((cr?.geometry as GeoJSON.LineString).coordinates.length > 3, 'CR leg should include the charted right turn before the intercept course');
+
+    const track = geojson.features.find((f) => f.properties?.object_type === 'ProcedureTrack' && f.properties?.procedure === 'SABKA 1L');
+    assert.ok(track, 'conventional SID procedure track missing');
+    assert.ok((track?.geometry as GeoJSON.LineString).coordinates.length > 6);
+
+    const sabkaFix = geojson.features.find((f) => f.properties?.object_type === 'ProcedureFix' && f.properties?.ident === 'SABKA');
+    assert.ok(sabkaFix, 'SABKA synthetic fix missing');
+    assert.equal(sabkaFix?.properties?.coordinate_quality, 'derived_from_dme_fix_name');
+    assertClose((sabkaFix?.geometry as GeoJSON.Point).coordinates as [number, number], destination(VJB, 296, 19), 0.00001);
+
+    const radialNames = geojson.features
+      .filter((f) => f.properties?.object_type === 'RadialReference')
+      .map((f) => f.properties?.name)
+      .sort();
+    assert.deepEqual(radialNames, ['RDL270 VJB', 'RDL296 VJB']);
+
+    const labelTexts = geojson.features
+      .filter((f) => f.properties?.object_type === 'LabelPoint')
+      .map((f) => String(f.properties?.label_text));
+    assert.ok(labelTexts.includes('160° 1000'));
+    assert.ok(labelTexts.includes('333°\n6000'));
+    assert.ok(labelTexts.includes('SABKA\n6000'));
+    assert.ok(labelTexts.includes('SABKA 1L'));
+    assert.ok(labelTexts.includes('RDL296 VJB'));
+  });
 });
 
 function destination(origin: { lat: number; lon: number }, bearingDeg: number, distanceNmValue: number): [number, number] {

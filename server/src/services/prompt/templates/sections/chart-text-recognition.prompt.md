@@ -25,6 +25,9 @@ For SID charts, also actively look for:
 - climb gradients and minimum climb requirements
 - speed restrictions in turns
 - transition altitude and communication frequencies when printed on the procedure chart
+- header transition-altitude boxes exactly, e.g. output `TRANSITION ALTITUDE 11000FT` as an
+  `ALTITUDE` chartText in the `HEADER` region; this value may be used as Jeppesen 424 Alt2 on
+  the first SID CA leg
 
 Output every item into `chartTexts` in this shape:
 

@@ -24,8 +24,17 @@ SID-specific reading rules:
   `altitudeConstraint.rawText="+01000 11000"`, `altitudeFt=1000`, `lowerFt=null`, and
   `upperFt=11000`. Do not move `11000` to notes; it is the second altitude field used by the
   Jeppesen 424 comparison.
+- If the table row only shows the CA altitude (`+01000`) but the chart header box says
+  `TRANSITION ALTITUDE 11000FT`, still encode the first CA leg as
+  `altitudeConstraint.rawText="+01000 11000"` with `upperFt=11000`. The transition altitude is
+  global chart information, but Jeppesen 424 carries it as Alt2 on the first no-fix CA leg for
+  each SID procedure.
 - If the first CA row references a navaid such as `VJB` for DME/course checking, put
   `recommendedNavaid="VJB"` on that CA leg only.
+- For WMKJ RNAV SID charts, the `MSA 25 NM VJB` box and the aeronautical data tabulation identify
+  `VJB` as the reference VOR/DME. Use `recommendedNavaid="VJB"` on the first no-fix CA leg, and
+  leave later ordinary DF/TF legs with `recommendedNavaid=null` unless their row explicitly uses a
+  navaid.
 - Use DF when the instruction is direct to a waypoint after the initial climb/turn; use TF only for
   fix-to-fix tracks with a named fromFix and toFix.
 - DF legs can also have a printed 2P distance. When the table/424 coding shows values such as
@@ -55,6 +64,19 @@ SID-specific reading rules:
 - SABKA 1J uses DF to `KJ706` with distance 13.0 NM, then TF to `SABKA`.
 - The final named transition fix in each procedure must not carry `turnDirection` unless the table
   explicitly codes one.
+
+424 comparison target for RWY34 RNAV SID 1K:
+- Sequence 010 is a no-fix CA leg: course 340, distance 3.0 NM, altitude `+01500 11000`,
+  recommended navaid `VJB`, and no fix identifier.
+- AROSO 1K uses a DF leg to `AROSO` with distance 32.0 NM.
+- ADLOV 1K uses a DF leg to `ADLOV` with distance 25.0 NM.
+- PIMOK 1K uses a DF leg to `PIMOK` with distance 25.0 NM.
+- SABKA 1K uses a DF leg to `SABKA` with distance 25.0 NM.
+- OMKOM 1K uses DF to `KJ707` with distance 10.0 NM, then TF to `OMKOM` if the table shows the
+  extra terminal-fix row.
+- Do not infer `turnDirection` on ADLOV/AROSO/PIMOK/SABKA/OMKOM terminal transition-fix legs from
+  the visible path bend. Only copy L/R when the table `TURN DIR` column explicitly contains it for
+  that same row.
 
 Label plan mapping (RNAV SID):
 - waypoint labels -> labelKind=FIX_NAME, anchorType=FIX

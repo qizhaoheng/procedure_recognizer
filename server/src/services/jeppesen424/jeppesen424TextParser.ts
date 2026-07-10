@@ -88,8 +88,8 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
     current.fix = current.fix || leg.fix;
 
     if (leg.recordPart === '1E') {
-      current.pathTerminator = extractPathTerminator(line) ?? current.pathTerminator;
-      current.turnDirection = extractTurnDirection(line, leg.recordText) ?? current.turnDirection;
+      current.pathTerminator = leg.pathTerminator ?? extractPathTerminator(line) ?? current.pathTerminator;
+      current.turnDirection = leg.turnDirection ?? extractTurnDirection(line, leg.recordText) ?? current.turnDirection;
       const altitude = extractAltitude(line, leg.recordText);
       current.altitudeRaw = altitude?.raw ?? current.altitudeRaw;
       current.altitudeValue = altitude?.value ?? current.altitudeValue;
@@ -154,6 +154,7 @@ function parseRoute(line: string) {
 function parseLegRecord(line: string, routeKey: string) {
   const afterRoute = line.slice(line.indexOf(routeKey) + routeKey.length);
   const candidates = [afterRoute, line];
+  const pathTerminatorPattern = PATH_TERMINATORS.join('|');
   for (const candidate of candidates) {
     const match = candidate.match(/(\d{3})([A-Z0-9]{5})([A-Z0-9]{4})(1E+|2P)(?:\b|$)/);
     if (match) {
@@ -181,7 +182,7 @@ function parseLegRecord(line: string, routeKey: string) {
       };
     }
 
-    const noFixMatch = candidate.match(/(\d{3})\s+([123][A-Z]?)\s+(?:(?:[LR])\s+)?([A-Z]{2})(?:\s|$)/);
+    const noFixMatch = candidate.match(new RegExp(`(\\d{3})\\s+([123][A-Z]?)\\s+(?:([LR])\\s+)?(${pathTerminatorPattern})(?=[A-Z0-9\\s]|$)`));
     if (noFixMatch) {
       return {
         sequence: noFixMatch[1],
@@ -190,6 +191,8 @@ function parseLegRecord(line: string, routeKey: string) {
         recordPart: noFixMatch[2].startsWith('2P') ? '2P' as const : '1E' as const,
         endOfProcedure: false,
         recordText: noFixMatch[0],
+        turnDirection: noFixMatch[3] as 'L' | 'R' | undefined,
+        pathTerminator: noFixMatch[4],
       };
     }
   }

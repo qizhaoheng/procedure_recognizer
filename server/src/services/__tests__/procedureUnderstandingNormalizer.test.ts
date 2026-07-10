@@ -180,3 +180,102 @@ describe('procedure understanding normalizer — DME ARC leg fallback', () => {
     assert.equal(leg.altitudeConstraint.rawText, '-06000 13000');
   });
 });
+
+describe('procedure understanding normalizer — conventional SID 1L fallback', () => {
+  const sidGroup = {
+    groupId: 'sid_1l',
+    packageId: 'sid_1l',
+    packageName: 'RWY16 CONVENTIONAL SID AROSO 1L SABKA 1L PIMOK 1L',
+    packageType: 'SID',
+    procedureCategory: 'DEPARTURE',
+    navigationType: 'CONVENTIONAL',
+    runway: 'RWY16',
+    procedureNames: ['AROSO 1L', 'SABKA 1L', 'PIMOK 1L'],
+  } as unknown as ProcedureGroup;
+
+  const modelOutput = {
+    airportIcao: 'WMKJ',
+    packageType: 'SID',
+    procedureCategory: 'DEPARTURE',
+    navigationType: 'CONVENTIONAL',
+    runway: 'RWY16',
+    chartTexts: [
+      { text: '160°', role: 'COURSE' },
+      { text: '1000', role: 'ALTITUDE' },
+      { text: '266°', role: 'COURSE' },
+      { text: 'PIMOK 6000', role: 'FIX' },
+      { text: 'PIMOK 1L', role: 'PROCEDURE_NAME' },
+      { text: 'RDL236 VJB', role: 'RADIAL_LABEL' },
+      { text: '333°', role: 'COURSE' },
+      { text: 'SABKA 6000', role: 'FIX' },
+      { text: 'SABKA 1L', role: 'PROCEDURE_NAME' },
+      { text: 'RDL296 VJB', role: 'RADIAL_LABEL' },
+      { text: '350°', role: 'COURSE' },
+      { text: 'AROSO 6000', role: 'FIX' },
+      { text: 'AROSO 1L', role: 'PROCEDURE_NAME' },
+      { text: 'RDL332 VJB', role: 'RADIAL_LABEL' },
+    ],
+    geometrySemantics: [
+      { type: 'RADIAL', labelText: 'RDL236 VJB', centerNavaid: 'VJB', radialDeg: 236, relatedProcedures: ['PIMOK 1L'] },
+      { type: 'RADIAL', labelText: 'RDL296 VJB', centerNavaid: 'VJB', radialDeg: 296, relatedProcedures: ['SABKA 1L'] },
+      { type: 'RADIAL', labelText: 'RDL332 VJB', centerNavaid: 'VJB', radialDeg: 332, relatedProcedures: ['AROSO 1L'] },
+    ],
+    tableLegs: [],
+    procedures: [
+      { procedureName: 'PIMOK 1L', legs: [] },
+      { procedureName: 'SABKA 1L', legs: [] },
+      { procedureName: 'AROSO 1L', legs: [] },
+    ],
+    fixes: [{ identifier: 'PIMOK' }, { identifier: 'SABKA' }, { identifier: 'AROSO' }],
+    sourceEvidence: [],
+    warnings: [],
+  };
+
+  const result = normalizeProcedureUnderstandingResult(modelOutput, sidGroup, aiInputPackage) as ProcedureUnderstandingResult;
+  const byName = new Map((result.procedures ?? []).map((p) => [p.procedureName, p]));
+
+  it('synthesizes CA/CI/CF for PIMOK 1L from chart semantics', () => {
+    const legs = byName.get('PIMOK 1L')?.legs ?? [];
+    assert.deepEqual(
+      legs.map((leg) => [leg.sequence, leg.pathTerminator, leg.fixIdentifier, leg.courseDegMag, leg.distanceNm, leg.turnDirection]),
+      [
+        [10, 'CA', null, 160, 2, null],
+        [20, 'CI', null, 266, 11, 'R'],
+        [30, 'CF', 'PIMOK', 236, 15, null],
+      ],
+    );
+    const firstAltitude = legs[0].altitudeConstraint as Record<string, unknown>;
+    assert.equal(firstAltitude.altitudeFt, 1000);
+    assert.equal(firstAltitude.upperFt, 11000);
+    assert.equal(legs[2].recommendedNavaid, 'VJB');
+  });
+
+  it('synthesizes CR/CI/CF for SABKA and AROSO 1L', () => {
+    assert.deepEqual(
+      byName.get('SABKA 1L')?.legs?.map((leg) => [leg.sequence, leg.pathTerminator, leg.fixIdentifier, leg.courseDegMag, leg.distanceNm]),
+      [
+        [10, 'CA', null, 160, 2],
+        [20, 'CR', null, 333, 10],
+        [30, 'CI', null, 333, 3],
+        [40, 'CF', 'SABKA', 296, 19],
+      ],
+    );
+    assert.deepEqual(
+      byName.get('AROSO 1L')?.legs?.map((leg) => [leg.sequence, leg.pathTerminator, leg.fixIdentifier, leg.courseDegMag, leg.distanceNm]),
+      [
+        [10, 'CA', null, 160, 2],
+        [20, 'CR', null, 350, 9],
+        [30, 'CI', null, 350, 11],
+        [40, 'CF', 'AROSO', 332, 22],
+      ],
+    );
+  });
+
+  it('marks the fallback as reviewRequired with synthesized derivation', () => {
+    assert.equal(result.reviewRequired, true);
+    for (const procedure of result.procedures ?? []) {
+      assert.ok((procedure.legs ?? []).every((leg) => String((leg as Record<string, unknown>).derivationMethod).includes('conventional SID')));
+      assert.ok((procedure.legs ?? []).every((leg) => leg.reviewRequired === true));
+    }
+  });
+});
