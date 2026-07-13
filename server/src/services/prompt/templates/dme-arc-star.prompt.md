@@ -99,9 +99,10 @@ Altitude constraints — per transition, no reuse:
   values — transitions frequently have different values (or none at all) on the same leg position.
 - If a leg has no printed constraint, output altitudeConstraint=null — an invented or copied
   value is worse than null.
-- Preserve dual-altitude text exactly when printed. For example, if the row shows
-  `- 06000     13000`, output altitudeConstraint as `-06000 13000` (or the closest exact raw text
-  available), not just `-06000` and not a copied single value.
+- The airport transition altitude / transition level (e.g. the trailing `13000` in a coded
+  source like `- 06000     13000`, or a chart box `TRANS LEVEL FL130`) is airport-level
+  information: report it as a chartText but do NOT copy it into any leg's altitudeConstraint
+  or upperFt. `upperFt` is only for genuine dual-altitude window constraints of the leg itself.
 - Keep the sign. `-05000`, `+05000`, and `05000` are different constraints.
 - Do not propagate ADLOV's `+3200` to EMTUV/OMKOM/PIMOK. Re-read every transition row.
 

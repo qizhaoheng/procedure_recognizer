@@ -1,4 +1,4 @@
-import { ROUTE_CODE_TO_PROCEDURE } from './jeppesen424TextParser';
+import { deriveRouteCode } from './routeCode';
 import type { SimpleProcedureLeg } from './types';
 
 // 简化版 424 导出：按真实 Jeppesen 静态文本的 132 列定宽布局生成（列位实测自 WMKJ 数据）。
@@ -89,7 +89,8 @@ function primaryRecord(leg: SimpleProcedureLeg, context: LegContext) {
     put(chars, 84, String(Math.round(leg.altitudeValue)).padStart(5, '0'));
   }
   if (leg.altitudeUpperFt !== undefined) {
-    put(chars, 94, String(Math.round(leg.altitudeUpperFt)).padStart(5, '0'));
+    // 第二高度（B 型双高度）在第 90-94 列；95-99 列是过渡高度，导出不生成
+    put(chars, 89, String(Math.round(leg.altitudeUpperFt)).padStart(5, '0'));
   }
   return chars.join('');
 }
@@ -148,22 +149,10 @@ function fallbackFixSection(leg: SimpleProcedureLeg, index: number) {
 }
 
 function resolveRouteCode(procedureName: string) {
-  const normalized = procedureName.trim().replace(/\s+/g, ' ').toUpperCase();
-  const mapped = PROCEDURE_TO_ROUTE_CODE.get(normalized);
-  if (mapped) return mapped;
-
-  // 通用规则：如 "ADLOV 1E" -> "ADLO1E"（Fix 名截断到 6 - 后缀长度）
-  const match = normalized.match(/^([A-Z]{2,5})\s*(\d[A-Z])$/);
-  if (match) {
-    const code = `${match[1].slice(0, 6 - match[2].length)}${match[2]}`;
-    if (code.length === 6) return code;
-  }
+  const code = deriveRouteCode(procedureName);
+  if (code && code.length === 6) return code;
   throw new Error(`无法导出 424：无法从程序名 "${procedureName}" 推导 6 位路线代码。`);
 }
-
-const PROCEDURE_TO_ROUTE_CODE = new Map(
-  Object.entries(ROUTE_CODE_TO_PROCEDURE).map(([code, name]) => [name, code]),
-);
 
 function normalizeAirport(value: string | undefined) {
   const airport = String(value ?? '').trim().toUpperCase();

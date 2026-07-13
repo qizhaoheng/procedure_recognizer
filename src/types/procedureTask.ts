@@ -121,6 +121,9 @@ export interface ProcedureGroup {
   procedureUnderstanding?: ProcedureUnderstandingResult;
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;
+  jeppesen424Source?: Jeppesen424PackageSource;
+  geojsonRenderMode?: GeoJsonRenderMode;
+  geojsonRenderSummary?: GeoJsonRenderSummary;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'GENERATED_WITHOUT_GEOMETRY' | 'ERROR';
   geojsonGeneratedAt?: string;
@@ -128,6 +131,26 @@ export interface ProcedureGroup {
   reviewRequired?: boolean;
   /** 人工标记的识别问题类型，用于后续 Prompt 打磨 */
   recognitionIssueTags?: string[];
+}
+
+export type GeoJsonRenderMode = 'AUTO' | 'JEPPESEN_424' | 'AI';
+export type GeoJsonRenderSource = 'JEPPESEN_424' | 'HYBRID' | 'AI';
+
+export interface Jeppesen424PackageSource {
+  text: string;
+  parsedLegs: SimpleProcedureLeg[];
+  importedAt: string;
+  procedureCount: number;
+  legCount: number;
+}
+
+export interface GeoJsonRenderSummary {
+  requestedMode: GeoJsonRenderMode;
+  source: GeoJsonRenderSource;
+  canonicalProcedureCount: number;
+  canonicalLegCount: number;
+  aiProcedureCount: number;
+  warnings: string[];
 }
 
 export interface PackageWorkflowState {
@@ -466,6 +489,9 @@ export interface SimpleProcedureLeg {
   altitudeSign?: '+' | '-' | '';
   altitudeUpperFt?: number;
   courseDegMag?: number;
+  thetaDegMag?: number;
+  rhoNm?: number;
+  speedLimitKias?: number;
   holdingAtFix?: boolean;
   endOfProcedure?: boolean;
   fixSection?: string;
@@ -521,6 +547,12 @@ export interface Jeppesen424CompareResponse {
   procedureResults: ProcedureCompareResult[];
   parsedJeppesenLegs: SimpleProcedureLeg[];
   aiLegs: SimpleProcedureLeg[];
+  renderSource?: {
+    importedAt: string;
+    procedureCount: number;
+    legCount: number;
+    defaultRenderMode: 'AUTO';
+  };
 }
 
 export interface AiRequestPreview {

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { aiProcedureToSimpleLegs } from '../jeppesen424/aiProcedureToSimpleLegs';
 import { parseJeppesen424Text } from '../jeppesen424/jeppesen424TextParser';
-import { compareSimpleProcedureLegs } from '../jeppesen424/simpleProcedureComparator';
+import { alignJeppesenProcedureNames, compareSimpleProcedureLegs } from '../jeppesen424/simpleProcedureComparator';
 import type { ProcedureUnderstandingResult } from '../../types/procedure';
 
 const sampleText = [
@@ -51,6 +51,108 @@ const conventionalSid1LSampleText = [
   'SSPAP WMKJWMDSABK1L2RW16  040SABKAWMEA1EE      CF VJB WM      2960025029600190D   + 06000                             DG   003132209',
   'SSPAP WMKJWMDSABK1L2RW16  040SABKAWMEA2P                                  0190                                             003142209',
 ].join('\n');
+
+// VHHH（香港）RNAV SID 真实记录：区域码 PAC、subsection D、路线类型 N、含 RNP 列/RF 腿/1EY 飞越/FL 高度/B 型双高度/速度
+const vhhhSidSampleText = [
+  'SPACP VHHHVHDLARI1TNRW07C 010HH302VHPC1E    010CF SMT VH      2554000807400030D               09000       VHHH  VHPA   D   975182505',
+  'SPACP VHHHVHDLARI1TNRW07C 010HH302VHPC2P                                  0030                                             975192412',
+  'SPACP VHHHVHDLARI1TNRW07C 020TEGUBVHPC1E    010TF                                 + 04000          210                 D   975212412',
+  'SPACP VHHHVHDLARI1TNRW07C 020TEGUBVHPC2P                                  0076                                             975222412',
+  'SPACP VHHHVHDLARI1TNRW07C 050SAMEDVHPC1E    010TF                                 + FL130                              D   975272412',
+  'SPACP VHHHVHDLARI1TNRW07C 050SAMEDVHPC2P                                  0120                                             975282412',
+  'SPACP VHHHVHDLARI1TNRW07C 080LARITVHEA1EE   010TF                                                                      D   975332412',
+  'SPACP VHHHVHDLARI1TNRW07C 080LARITVHEA2P                                  0199                                             975342412',
+  'SPACP VHHHVHDBEKO1XNRW07R 030HH341VHPC1E   R010RF       002656            0031                     210    HH941 VHPC   D   972082412',
+  'SPACP VHHHVHDBEKO1XNRW07R 030HH341VHPC2P                                  0031                                             972092412',
+  'SPACP VHHHVHDBEKO1CNRW07C 020ROVERVHPC1EY   010TF                                                  205               + D   971682412',
+  'SPACP VHHHVHDBEKO1CNRW07C 020ROVERVHPC2P                                  0034                                             971692412',
+  'SPACP VHHHVHDBEKO3BNRW25L 050VEDMUVHPC1E    010TF                                 B 0900004000     230                 D   973072412',
+  'SPACP VHHHVHDBEKO3BNRW25L 050VEDMUVHPC2P                                  0040                                             973082412',
+].join('\n');
+
+describe('Jeppesen 424 multi-airport parsing (VHHH RNAV SID)', () => {
+  const legs = parseJeppesen424Text(vhhhSidSampleText);
+  const byKey = new Map(legs.map((leg) => [`${leg.routeKey}|${leg.sequence}`, leg]));
+
+  it('parses VHHH records with PAC area code, subsection D and route type N', () => {
+    const laritLegs = legs.filter((leg) => leg.routeKey === 'LARI1T');
+    assert.equal(laritLegs.length, 4);
+    assert.equal(laritLegs[0].runway, 'RW07C');
+    assert.equal(laritLegs[0].procedureName, 'LARI 1T');
+  });
+
+  it('reads CF legs with recommended navaid, course and distance', () => {
+    const entry = byKey.get('LARI1T|010');
+    assert.equal(entry?.pathTerminator, 'CF');
+    assert.equal(entry?.recommendedNavaid, 'SMT');
+    assert.equal(entry?.courseDegMag, 74);
+    assert.equal(entry?.distanceNm, 3);
+    // 95-99 列的 09000 是 VHHH 过渡高度，不是腿段高度
+    assert.equal(entry?.altitudeValue, undefined);
+    assert.equal(entry?.altitudeUpperFt, undefined);
+  });
+
+  it('reads speed limits and flight-level altitudes', () => {
+    const tegub = byKey.get('LARI1T|020');
+    assert.equal(tegub?.speedLimitKias, 210);
+    assert.equal(tegub?.altitudeValue, 4000);
+    assert.equal(tegub?.altitudeSign, '+');
+    const samed = byKey.get('LARI1T|050');
+    assert.equal(samed?.altitudeValue, 13000);
+    assert.equal(samed?.altitudeSign, '+');
+  });
+
+  it('marks the final enroute transition leg with EE and EA section', () => {
+    const larit = byKey.get('LARI1T|080');
+    assert.equal(larit?.endOfProcedure, true);
+    assert.equal(larit?.fixSection, 'EA');
+  });
+
+  it('parses RF legs with 5-char center fix and positional turn direction', () => {
+    const rf = byKey.get('BEKO1X|030');
+    assert.equal(rf?.pathTerminator, 'RF');
+    assert.equal(rf?.turnDirection, 'R');
+    assert.equal(rf?.recommendedNavaid, 'HH941');
+    assert.equal(rf?.distanceNm, 3.1);
+  });
+
+  it('parses fly-over waypoint description (1EY) records', () => {
+    const rover = byKey.get('BEKO1C|020');
+    assert.equal(rover?.fix, 'ROVER');
+    assert.equal(rover?.endOfProcedure, false);
+    assert.equal(rover?.speedLimitKias, 205);
+  });
+
+  it('reads BETWEEN altitude windows into value + upper', () => {
+    const vedmu = byKey.get('BEKO3B|050');
+    assert.equal(vedmu?.altitudeValue, 9000);
+    assert.equal(vedmu?.altitudeUpperFt, 4000);
+    assert.equal(vedmu?.altitudeSign, '');
+  });
+
+  it('aligns Jeppesen legs to AI procedure names via route code', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'VHHH',
+      runway: 'RWY07C',
+      packageType: 'SID',
+      navigationType: 'RNAV',
+      procedures: [
+        {
+          procedureName: 'LARIT 1T RWY 07C',
+          runway: 'RWY07C',
+          legs: [{ sequence: 10, fixIdentifier: 'HH302', pathTerminator: 'CF' }],
+        },
+      ],
+    });
+    assert.equal(aiLegs[0].procedureName, 'LARIT 1T');
+
+    const aligned = alignJeppesenProcedureNames(aiLegs, legs);
+    const laritLegs = aligned.filter((leg) => leg.procedureName === 'LARIT 1T');
+    assert.equal(laritLegs.length, 4, 'Jeppesen LARI1T legs should be re-homed under the AI name LARIT 1T');
+    // 未被 AI 覆盖的程序保持解析器名字
+    assert.ok(aligned.some((leg) => leg.procedureName === 'BEKO 1X'));
+  });
+});
 
 describe('Jeppesen 424 text compare MVP', () => {
   it('parses 1E records and merges 2P distances', () => {
@@ -102,7 +204,8 @@ describe('Jeppesen 424 text compare MVP', () => {
           turnDirection: '',
           distanceNm: 2,
           altitudeValue: 1000,
-          altitudeUpperFt: 11000,
+          // 95-99 列的 11000 是过渡高度（机场级），不再计入腿段第二高度
+          altitudeUpperFt: undefined,
           courseDegMag: 160,
           recommendedNavaid: 'VJB',
           endOfProcedure: false,
@@ -166,6 +269,7 @@ describe('Jeppesen 424 text compare MVP', () => {
           distanceNm: leg.distanceNm,
           altitudeRaw: leg.altitudeRaw,
           courseDegMag: leg.courseDegMag,
+          thetaDegMag: leg.thetaDegMag,
           recommendedNavaid: leg.recommendedNavaid,
         })),
       [
@@ -177,6 +281,7 @@ describe('Jeppesen 424 text compare MVP', () => {
           distanceNm: 9,
           altitudeRaw: '+06000',
           courseDegMag: 350,
+          thetaDegMag: 270,
           recommendedNavaid: 'VJB',
         },
         {
@@ -187,6 +292,7 @@ describe('Jeppesen 424 text compare MVP', () => {
           distanceNm: 10,
           altitudeRaw: '+06000',
           courseDegMag: 333,
+          thetaDegMag: 270,
           recommendedNavaid: 'VJB',
         },
       ],
@@ -205,7 +311,8 @@ describe('Jeppesen 424 text compare MVP', () => {
     const entry = byKey.get('ADLOV 1E|010');
     assert.equal(entry?.altitudeSign, '-');
     assert.equal(entry?.altitudeValue, 6000);
-    assert.equal(entry?.altitudeUpperFt, 13000);
+    // 95-99 列的 13000 是过渡高度层，不计入腿段第二高度
+    assert.equal(entry?.altitudeUpperFt, undefined);
     assert.equal(entry?.holdingAtFix, true);
     assert.equal(entry?.fixSection, 'EA');
     assert.equal(entry?.courseDegMag, undefined);
@@ -215,6 +322,8 @@ describe('Jeppesen 424 text compare MVP', () => {
     assert.equal(arc?.pathTerminator, 'AF');
     assert.equal(arc?.turnDirection, 'L');
     assert.equal(arc?.courseDegMag, 16);
+    assert.equal(arc?.thetaDegMag, 340);
+    assert.equal(arc?.rhoNm, 11);
     assert.equal(arc?.fixSection, 'PC');
     assert.equal(arc?.recommendedNavaid, 'VJB');
 
@@ -223,12 +332,13 @@ describe('Jeppesen 424 text compare MVP', () => {
     assert.equal(final?.altitudeSign, '+');
   });
 
-  it('does not misread the second altitude as alt1 when alt1 is blank (OMKOM-style entry)', () => {
+  it('does not misread the transition altitude as leg altitude when alt1 is blank (OMKOM-style entry)', () => {
     const line = 'SSPAP WMKJWMEOMKO1E2RW16  010OMKOMWMEA1E       IF                                             13000       VJB   WMD    D   003662209';
     const [leg] = parseJeppesen424Text(line);
     assert.equal(leg.altitudeValue, undefined);
     assert.equal(leg.altitudeRaw, undefined);
-    assert.equal(leg.altitudeUpperFt, 13000);
+    // 95-99 列的 13000 是过渡高度层（FL130），既不是 alt1 也不是腿段第二高度
+    assert.equal(leg.altitudeUpperFt, undefined);
     assert.equal(leg.recommendedNavaid, 'VJB');
   });
 
@@ -517,7 +627,7 @@ describe('Jeppesen 424 text compare MVP', () => {
     );
   });
 
-  it('fills RNAV SID first CA Alt2 and Nav from chart transition altitude and VJB text', () => {
+  it('fills RNAV SID first CA recommended navaid from VJB chart text', () => {
     const understanding: ProcedureUnderstandingResult = {
       runway: 'RW16',
       packageType: 'SID',
@@ -559,7 +669,8 @@ describe('Jeppesen 424 text compare MVP', () => {
     assert.equal(first.pathTerminator, 'CA');
     assert.equal(first.fix, '');
     assert.equal(first.altitudeValue, 1000);
-    assert.equal(first.altitudeUpperFt, 11000);
+    // 过渡高度不再映射进腿段第二高度（424 第 95-99 列为机场级过渡高度）
+    assert.equal(first.altitudeUpperFt, undefined);
     assert.equal(first.recommendedNavaid, 'VJB');
   });
 

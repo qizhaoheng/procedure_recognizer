@@ -69,13 +69,13 @@ Holding patterns:
   `H` flag on the IF leg.
 
 Altitude constraints:
-- Preserve dual altitude constraints exactly. For example, a table or coded source such
-  as `-06000 13000` means altitudeValue/lower value 6000 with altitudeUpperFt=13000;
-  do not drop the second altitude.
 - Keep the altitude sign from the source (`+` for at-or-above, `-` for at-or-below).
   Do not rewrite an at-or-below entry fix as an at-or-above constraint.
-- If a row only gives `13000` with no sign, keep altitudeValue=13000 and leave the sign
-  empty/null.
+- The airport transition altitude / transition level (e.g. a chart box `TRANS LEVEL FL130`,
+  or the trailing `13000` in a coded source like `-06000 13000`) is airport-level information:
+  report it as a chartText but do NOT copy it into any leg's altitudeConstraint or upperFt.
+- `upperFt` is ONLY for genuine dual-altitude window constraints printed for the leg itself
+  (e.g. "between 4000 and 9000"): lower bound in altitudeFt/lowerFt, upper bound in upperFt.
 
 Recommended navaids / coded references:
 - Each tableLegs row has a `recommendedNavaid` field. Fill it on entry IF legs when the

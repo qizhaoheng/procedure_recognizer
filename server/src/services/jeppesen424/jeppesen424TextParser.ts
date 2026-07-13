@@ -55,6 +55,9 @@ interface PartialLeg {
   altitudeSign?: '+' | '-' | '';
   altitudeUpperFt?: number;
   courseDegMag?: number;
+  thetaDegMag?: number;
+  rhoNm?: number;
+  speedLimitKias?: number;
   holdingAtFix?: boolean;
   endOfProcedure?: boolean;
   fixSection?: string;
@@ -67,18 +70,19 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
 
   for (const sourceLine of text.split(/\r?\n/)) {
     const line = sourceLine.trim();
-    if (!line || !line.includes('SSPAP')) continue;
+    // 记录头 = S + 3位区域码 + P(机场section)，如 WMKJ 的 SSPAP、VHHH 的 SPACP
+    if (!line || !/^S[A-Z]{3}P\s/.test(line)) continue;
 
     const route = parseRoute(line);
     if (!route) continue;
-    const leg = parseLegRecord(line, route.routeKey);
+    const leg = parseLegRecord(line, route.routeText);
     if (!leg) continue;
 
-    const key = `${route.procedureName}|${route.runway}|${leg.sequence}`;
+    const key = `${route.routeCode}|${route.runway}|${leg.sequence}`;
     const current = merged.get(key) ?? {
       procedureName: route.procedureName,
       runway: route.runway,
-      routeKey: route.routeKey,
+      routeKey: route.routeCode,
       sequence: leg.sequence,
       fix: leg.fix,
       rawRecords: [],
@@ -98,6 +102,9 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       if (line.length >= 120) {
         current.altitudeUpperFt = extractSecondAltitude(line) ?? current.altitudeUpperFt;
         current.courseDegMag = extractCourse(line) ?? current.courseDegMag;
+        current.thetaDegMag = extractTheta(line) ?? current.thetaDegMag;
+        current.rhoNm = extractRho(line) ?? current.rhoNm;
+        current.speedLimitKias = extractSpeedLimit(line) ?? current.speedLimitKias;
         current.holdingAtFix = line[42] === 'H' || current.holdingAtFix;
         current.recommendedNavaid = extractRecommendedNavaid(line) ?? current.recommendedNavaid;
       }
@@ -128,6 +135,9 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       altitudeSign: item.altitudeSign,
       altitudeUpperFt: item.altitudeUpperFt,
       courseDegMag: item.courseDegMag,
+      thetaDegMag: item.thetaDegMag,
+      rhoNm: item.rhoNm,
+      speedLimitKias: item.speedLimitKias,
       holdingAtFix: item.holdingAtFix ?? false,
       endOfProcedure: item.endOfProcedure ?? false,
       fixSection: item.fixSection,
@@ -137,35 +147,47 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
     }));
 }
 
+// 路由段按固定列位解析（0 基）：机场 6-9 | ICAO 区域 10-11 | subsection 12（D=SID/E=STAR/F=进近）
+// | 路线代码 13-18 | 路线类型 19（RNAV SID 为 N、常规为数字）| 过渡跑道 20 起（RWxx[LRC]）。
 function parseRoute(line: string) {
-  const match = line.match(/\b(WMKJWM[DE]([A-Z0-9]{6})2?(RW\d{2}[A-Z]?))/);
-  if (!match) return undefined;
-  const routeKey = match[1];
-  const routeCode = match[2];
-  const procedureName = ROUTE_CODE_TO_PROCEDURE[routeCode] ?? procedureNameFromRouteCode(routeCode);
+  const airport = line.slice(6, 10);
+  const region = line.slice(10, 12);
+  const subsection = line[12] ?? '';
+  const routeCode = line.slice(13, 19).trim();
+  if (!/^[A-Z]{4}$/.test(airport) || !/^[A-Z]{2}$/.test(region)) return undefined;
+  if (!/^[DEF]$/.test(subsection)) return undefined;
+  if (!/^[A-Z0-9]{4,6}$/.test(routeCode)) return undefined;
+
+  // 个别导出缺少路线类型列，跑道直接从 19 列开始
+  const runwayStart = line[19] === 'R' && line[20] === 'W' ? 19 : 20;
+  const runwayMatch = line.slice(runwayStart, runwayStart + 6).match(/^RW\d{2}[A-Z]?/);
+  if (!runwayMatch) return undefined;
+
   return {
-    routeKey,
+    // routeText 是记录中的原文片段，供后续按位置截取腿段区
+    routeText: line.slice(6, runwayStart) + runwayMatch[0],
     routeCode,
-    runway: match[3],
-    procedureName,
+    runway: runwayMatch[0],
+    procedureName: ROUTE_CODE_TO_PROCEDURE[routeCode] ?? procedureNameFromRouteCode(routeCode),
   };
 }
 
-function parseLegRecord(line: string, routeKey: string) {
-  const afterRoute = line.slice(line.indexOf(routeKey) + routeKey.length);
+function parseLegRecord(line: string, routeText: string) {
+  const afterRoute = line.slice(line.indexOf(routeText) + routeText.length);
   const candidates = [afterRoute, line];
   const pathTerminatorPattern = PATH_TERMINATORS.join('|');
   for (const candidate of candidates) {
-    const match = candidate.match(/(\d{3})([A-Z0-9]{5})([A-Z0-9]{4})(1E+|2P)(?:\b|$)/);
+    // 续行号+航路点描述：1E / 1EE / 1EY（Y=飞越）等一律视为主记录，2P 为续行
+    const match = candidate.match(/(\d{3})([A-Z0-9]{5})([A-Z0-9]{4})(1[A-Z]{1,4}|2P)(?:\b|$)/);
     if (match) {
       return {
         sequence: match[1],
         fix: match[2],
         // 4 字符 = ICAO 区域(2) + section/subsection(2)，如 WMEA / WMPC
         fixSection: match[3].slice(2),
-        recordPart: match[4].startsWith('1E') ? '1E' as const : '2P' as const,
-        // 1EE = 航路点描述第二个 E，标记程序末段腿
-        endOfProcedure: match[4].startsWith('1EE'),
+        recordPart: match[4].startsWith('2P') ? '2P' as const : '1E' as const,
+        // 航路点描述第 2 字符为 E（如 1EE）标记程序末段腿
+        endOfProcedure: match[4].charAt(0) === '1' && match[4].charAt(2) === 'E',
         recordText: match[0],
       };
     }
@@ -217,18 +239,26 @@ function extractPathTerminator(line: string) {
 }
 
 function extractTurnDirection(line: string, recordText: string): 'L' | 'R' | '' | undefined {
+  // 全宽行转弯方向固定在第 44 列（0 基 43）；RNP 列紧随其后（如 R010RF），正则会漏
+  if (line.length >= 120) {
+    const turn = line[43];
+    return turn === 'L' || turn === 'R' ? turn : undefined;
+  }
   const afterRecord = line.slice(line.indexOf(recordText) + recordText.length);
   const match = afterRecord.match(/(?:^|\s)([LR])(?:\s|$)/);
   return match ? (match[1] as 'L' | 'R') : undefined;
 }
 
 function extractAltitude(line: string, recordText: string) {
-  // 全宽行按列位读取（符号 83 列、数值 85-89 列），避免把 95-99 列的第二高度误当 alt1
+  // 全宽行按列位读取：高度描述符 83 列（+/-/B），数值 85-89 列（支持 FLxxx 飞行高度层）
   if (line.length >= 120) {
-    const digits = positionalDigits(line, 84, 5);
-    if (digits === undefined) return undefined;
-    const sign = line[82] === '+' || line[82] === '-' ? line[82] : '';
-    return { raw: `${sign}${String(digits).padStart(5, '0')}`, value: digits };
+    const token = line.slice(84, 89).trim();
+    const value = parseAltitudeToken(token);
+    if (value === undefined) return undefined;
+    const desc = line[82];
+    const sign = desc === '+' || desc === '-' ? desc : '';
+    const rawPrefix = sign || (desc === 'B' ? 'B' : '');
+    return { raw: `${rawPrefix}${token}`, value };
   }
 
   const afterRecord = line.slice(line.indexOf(recordText) + recordText.length);
@@ -260,18 +290,46 @@ function extractCourse(line: string) {
   return course <= 360 ? course : undefined;
 }
 
-// 第二高度：第 95-99 列（0 基 94-98），如入航段的 13000。
-function extractSecondAltitude(line: string) {
-  const value = positionalDigits(line, 94, 5);
-  return value !== undefined && value >= 1000 && value <= 60000 ? value : undefined;
+function extractTheta(line: string) {
+  const value = positionalDigits(line, 62, 4);
+  if (value === undefined) return undefined;
+  const theta = value / 10;
+  return theta <= 360 ? theta : undefined;
 }
 
-// 推荐导航台：AF/CI 腿在第 51-54 列（0 基 50-53），IF 腿在第 107-110 列（0 基 106-109）。
+function extractRho(line: string) {
+  const value = positionalDigits(line, 66, 4);
+  if (value === undefined) return undefined;
+  return Number((value / 10).toFixed(1));
+}
+
+// 第二高度：第 90-94 列（0 基 89-93），仅 B 型（BETWEEN）等双高度约束才有。
+// 注意：第 95-99 列（0 基 94-98）是过渡高度/过渡高度层（如 WMKJ 13000、VHHH 09000），
+// 属机场级信息而非腿段约束，刻意不读。
+function extractSecondAltitude(line: string) {
+  const value = parseAltitudeToken(line.slice(89, 94).trim());
+  return value !== undefined && value >= 500 && value <= 60000 ? value : undefined;
+}
+
+// 速度限制：第 100-102 列（0 基 99-101），3 位 KIAS，如 205/210/230。
+function extractSpeedLimit(line: string) {
+  const value = positionalDigits(line, 99, 3);
+  return value !== undefined && value >= 100 && value <= 400 ? value : undefined;
+}
+
+function parseAltitudeToken(token: string) {
+  const flightLevel = token.match(/^FL(\d{2,3})$/);
+  if (flightLevel) return Number(flightLevel[1]) * 100;
+  return /^\d{4,5}$/.test(token) ? Number(token) : undefined;
+}
+
+// 推荐导航台：AF/CI/CF 腿在第 51-54 列（0 基 50-53）；
+// 中心 Fix（RF 弧心如 HH941、IF 参考台）在第 107-111 列（0 基 106-110，最长 5 字符）。
 function extractRecommendedNavaid(line: string) {
   const primary = line.slice(50, 54).trim();
   if (/^[A-Z]{2,4}$/.test(primary)) return primary;
-  const centerFix = line.slice(106, 110).trim();
-  if (/^[A-Z]{2,4}$/.test(centerFix)) return centerFix;
+  const centerFix = line.slice(106, 111).trim();
+  if (/^[A-Z][A-Z0-9]{1,4}$/.test(centerFix)) return centerFix;
   return undefined;
 }
 

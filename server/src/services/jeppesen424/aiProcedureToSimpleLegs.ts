@@ -1,4 +1,5 @@
 import type { ProcedureUnderstandingResult } from '../../types/procedure';
+import { cleanProcedureName } from './routeCode';
 import type { SimpleProcedureLeg } from './types';
 
 export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderstandingResult | undefined): SimpleProcedureLeg[] {
@@ -7,7 +8,6 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
   const isRnavStar = normalizedText(procedureUnderstanding.packageType) === 'STAR'
     && normalizedText(procedureUnderstanding.navigationType) === 'RNAV';
   const isSid = normalizedText(procedureUnderstanding.packageType) === 'SID';
-  const sidTransitionAltitudeFt = isSid ? transitionAltitudeFt(procedureUnderstanding) : undefined;
   const sidInitialNavaid = isSid ? sidInitialRecommendedNavaid(procedureUnderstanding) : undefined;
   const holdingFixes = new Set(
     (procedureUnderstanding.holdings ?? [])
@@ -21,7 +21,8 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
 
   return procedureUnderstanding.procedures.flatMap((procedure) => {
     const sourceProcedure = procedure as Record<string, unknown>;
-    const procedureName = normalizedText(
+    // 剥离尾部跑道后缀（如 "LARIT 1T RWY 07C" -> "LARIT 1T"），以便与 424 路线代码对齐
+    const procedureName = cleanProcedureName(
       sourceProcedure.procedureIdentifier
         ?? sourceProcedure.name
         ?? procedure.procedureName
@@ -44,8 +45,8 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         || (pathTerminator === 'AF' || pathTerminator === 'IF' ? arcCenter : undefined);
       const courseDegMag = optionalCourse(record.courseDegMag ?? record.courseDeg);
       const holdingAtFix = Boolean(record.holdingAtFix) || holdingFixes.has(fix);
-      const altitudeUpperFt = altitude.upper
-        ?? (isSidInitialNoFixCa({ isSid, fix, pathTerminator, sequenceValue, firstSequence }) ? sidTransitionAltitudeFt : undefined);
+      // 过渡高度（424 第 95-99 列）是机场级信息，不映射进腿段第二高度
+      const altitudeUpperFt = altitude.upper;
 
       return {
         procedureName,
@@ -61,6 +62,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         altitudeSign: altitude.sign,
         altitudeUpperFt,
         courseDegMag,
+        speedLimitKias: nonZeroNumberOrUndefined(record.speedLimitKias ?? record.speedLimit),
         holdingAtFix,
         endOfProcedure: Number.isFinite(sequenceValue) && sequenceValue === lastSequence,
         fixSection: inferredFixSection({ isSid, fix, sequenceValue, firstSequence, lastSequence }),
@@ -129,15 +131,6 @@ function isSidInitialNoFixCa(input: Pick<FixSectionInput, 'isSid' | 'fix' | 'seq
     && input.pathTerminator === 'CA'
     && Number.isFinite(input.sequenceValue)
     && input.sequenceValue === input.firstSequence;
-}
-
-function transitionAltitudeFt(understanding: ProcedureUnderstandingResult) {
-  for (const text of candidateTexts(understanding)) {
-    const normalized = text.replace(/\s+/g, ' ').toUpperCase();
-    const match = normalized.match(/TRANSITION\s+ALT(?:ITUDE)?[^0-9]{0,20}(\d{4,5})\s*(?:FT|FT ALT)?/);
-    if (match) return Number(match[1]);
-  }
-  return undefined;
 }
 
 function sidInitialRecommendedNavaid(understanding: ProcedureUnderstandingResult) {
@@ -240,13 +233,14 @@ function altitudeParts(value: unknown): AltitudeParts {
 
 function altitudeFromRaw(rawInput: string): AltitudeParts {
   const raw = rawInput.trim().toUpperCase();
-  const match = raw.match(/([+-]?)\s*(\d{3,5})(?:\s+(\d{3,5}))?/);
+  const match = raw.match(/([+-]?)\s*(\d{3,5})/);
   if (!match) return { raw };
+  // rawText 里跟在主高度后的第二个数字（如 "+01000 11000"）是机场过渡高度，
+  // 不是腿段第二高度——真正的 B 型双高度经 upperFt 字段传入。
   return {
     raw: `${match[1] || ''}${match[2]}`,
     value: Number(match[2]),
     sign: (match[1] as '+' | '-' | '') || '',
-    upper: match[3] && Number(match[3]) !== Number(match[2]) ? Number(match[3]) : undefined,
   };
 }
 
