@@ -39,6 +39,6 @@ SID-specific table rules:
 - CF means course to a fix or DME/radial-defined fix; preserve both course and terminating reference.
 - DF means direct to a fix; output the target fix and any printed distance.
 - TF means track between named fixes; avoid using TF for runway heading to altitude/DME instructions.
-- For DME-triggered legs, put the DME value and navaid ident in remarks, e.g. `5.7 DME VJB`.
+- For DME-triggered legs, put the DME value and navaid ident in remarks, e.g. `5.7 DME <VOR>`.
 - Fill recommendedNavaid when the row/chart references a navaid used for course, radial, DME, or
   climb-condition checking.

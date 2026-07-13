@@ -117,10 +117,12 @@ function groupFromStructure(structure: AipAdStructure) {
         group.groupingReason.push(`AD 2.24 item not matched to parsed page: ${item.chartNo}`);
         continue;
       }
-      if (mappedPages.length > 1) {
+      // 只有同一图号解析出多页才算重复；图面页 + 子页号翻页（…-SID-1 与 …-SID-1.1）是正常结构
+      const exactPages = state.chartNoPageMap.get(item.chartNo) ?? [];
+      if (exactPages.length > 1) {
         group.reviewRequired = true;
         group.groupingReason ||= [];
-        group.groupingReason.push(`duplicate parsed pages for ${item.chartNo}: ${mappedPages.map((page) => page.pageNo).join(', ')}`);
+        group.groupingReason.push(`duplicate parsed pages for ${item.chartNo}: ${exactPages.map((page) => page.pageNo).join(', ')}`);
       }
       for (const page of mappedPages) assignPageToPackage(group, page, item, 'matched by AD 2.24 chart index');
     }
@@ -340,12 +342,12 @@ function finalizePackage(group: ProcedureGroup, globalSupportPages: SupportPageR
   return group;
 }
 
-// 目录图号可能不含页序后缀（AD 2-VHHH-SID-BEKOL-A），而图页图号带后缀（...-A-1），按前缀归并
+// 目录图号可能不含页序后缀（AD 2-VHHH-SID-BEKOL-A），而图页图号带后缀（...-A-1），
+// 新加坡式翻页描述表用小数子页号（AD 2-WSSS-SID-1 的翻页是 ...-SID-1.1），都按前缀归并
 function lookupPagesForChartNo(map: Map<string, PdfPageAsset[]>, chartNo: string): PdfPageAsset[] {
   const collected = [...(map.get(chartNo) ?? [])];
-  const prefix = `${chartNo}-`;
   for (const [key, pages] of map) {
-    if (key.startsWith(prefix) && /^\d{1,2}$/.test(key.slice(prefix.length))) collected.push(...pages);
+    if (key !== chartNo && key.startsWith(chartNo) && /^[-.]\d{1,2}$/.test(key.slice(chartNo.length))) collected.push(...pages);
   }
   const seen = new Set<number>();
   return collected

@@ -7,13 +7,16 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
   let chartRole = detectChartRole(upper);
   let procedureCategory = detectProcedureCategory(upper);
   const navigationType = detectNavigationType(upper);
-  const aipPageNo = extractLikelyAipPageNo(normalized);
+  // 传原始文本保留换行：页脚图号独立成行的判定依赖行边界
+  const aipPageNo = extractLikelyAipPageNo(text);
 
   // 香港等 AIP 的图页往往没有可提取的标题文本，退而用字母段图号语义判定。
   // 图号明确指向 SID/STAR/IAC 图页时，优先于文本嗅探出的表格/最低标准角色：
   // 这类图页图面上常印有 OCA/MINIMA、TABULAR DESCRIPTION 等字样。
+  // 带小数子页号的翻页（如 -SID-1.1）是图的描述表页，表格角色不可被图号语义覆盖。
   const chartNoKind = classifyChartNoType(aipPageNo);
-  const overridableRoles: ChartRole[] = chartNoKind?.role === 'CHART'
+  const isSubPageChartNo = /\.\d{1,2}$/.test(aipPageNo ?? '');
+  const overridableRoles: ChartRole[] = chartNoKind?.role === 'CHART' && !isSubPageChartNo
     ? ['OTHER', 'UNKNOWN', 'MINIMA_TABLE', 'TABULAR_DESCRIPTION', 'WAYPOINT_COORDINATES']
     : ['OTHER', 'UNKNOWN'];
   if (chartNoKind && overridableRoles.includes(chartRole)) {

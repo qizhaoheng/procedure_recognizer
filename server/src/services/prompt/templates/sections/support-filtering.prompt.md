@@ -10,10 +10,10 @@ An object coming from supporting pages may have usedInProcedure=true ONLY when a
 4. The current geometry semantics need it as a center or reference.
 
 Examples:
-- In a DME ARC STAR, if VJB is the center of the "11 DME ARC", then VJB usedInProcedure=true.
-- If an NDB "JR" exists only in the AD 2.19 supporting page and does not appear on the current
-  chart or table, then JR usedInProcedure=false and supportOnly=true.
-- An ILS/LOC ident like "IJB" belongs to an ILS/LOC approach. When the current procedure is not
+- In a DME ARC STAR, the VOR/DME that is the center of the DME arc has usedInProcedure=true.
+- If an NDB exists only in the AD 2.19 supporting page and does not appear on the current
+  chart or table, that NDB has usedInProcedure=false and supportOnly=true.
+- An ILS/LOC ident belongs to an ILS/LOC approach. When the current procedure is not
   an ILS/LOC approach, it must NOT be treated as a primary procedure object.
 
 List EVERY candidate ident you considered from supporting pages in `supportObjects`:

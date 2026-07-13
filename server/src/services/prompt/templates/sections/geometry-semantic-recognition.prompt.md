@@ -53,8 +53,8 @@ SID-specific geometry rules:
   assigned heading. If the heading is assigned by ATC and not printed, set inboundTrackDeg=null and
   labelText to the exact note.
 - RADIAL: output every operational radial label, including cross-radials used as restrictions or
-  intercept targets. Set centerNavaid when printed or inferable from the label (for example VJB).
-- LABEL_BINDING: use this when a text label such as `5.7 DME VJB`, `MAX IAS 180 KT IN TURN`, or
+  intercept targets. Set centerNavaid when printed or inferable from the label.
+- LABEL_BINDING: use this when a text label such as `5.7 DME <VOR>`, `MAX IAS 180 KT IN TURN`, or
   `CLIMB GRADIENT 5.5%` belongs to a specific leg/turn rather than to a standalone fix.
 - MSA_SECTOR: report MSA rings/sectors separately from SID legs; do not turn MSA geometry into a
   procedure leg.

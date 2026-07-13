@@ -15,17 +15,18 @@ You MUST actively look for and identify:
 - altitude and speed constraints on the tracks
 - every text label that is bound to a geometry (report it as LABEL_BINDING / labelText)
 
-For a chart like WMKJ RWY16 11 DME ARC STAR, the expected key elements are:
-- "11 DME ARC", "13 DME"
-- VOR/DME "VJB" as arc center
-- EVERY radial label: each transition's entry radial (e.g. RDL016, RDL114, RDL236, RDL275),
-  any crossing/constraint radial on the arc (e.g. RDL295), and the final inbound radial
-  ("RDL340 / 160" — radial 340, inbound track 160)
-- lead radials "L-R332" and "L-R348"
-- every outer-DME turn-point tag (e.g. each printed "13D VJB")
-- procedure names like "ADLOV 1G", "OMKOM 1G", "PIMOK 1G", "EMTUV 1G"
+Enumerate the current chart's key elements against this checklist before answering:
+- the arc label (e.g. "11 DME ARC") and any outer DME distance label (e.g. "13 DME")
+- the VOR/DME ident acting as arc center
+- EVERY radial label: each transition's entry radial, any crossing/constraint radial on the arc,
+  and the final inbound radial pair ("RDLxxx / yyy" — radial xxx, inbound track yyy)
+- every lead radial ("L-Rxxx")
+- every outer-DME turn-point tag (e.g. each printed "13D <VOR>")
+- every procedure name and which track it labels
 Report each of them in chartTexts and derive the matching geometrySemantics entries
 (DME_ARC with centerNavaid and radiusNm, RADIAL with radialDeg and inboundTrackDeg, LEAD_RADIAL with radialDeg).
+A worked few-shot example follows this template in the prompt — use it to calibrate completeness,
+never as a source of values.
 
 Completeness invariants — verify BEFORE you answer:
 - chartTexts must contain EVERY printed label on the chart, one entry per printed instance —
@@ -43,7 +44,7 @@ Completeness invariants — verify BEFORE you answer:
 
 Strict scope rules:
 - Do NOT output navaids that are unrelated to the current procedure.
-- Do NOT treat idents that appear only in supporting pages (e.g. an NDB "JR" or an ILS/LOC "IJB" from AD 2.19) as procedure geometry, unless the current chart or table explicitly references them. An ILS/LOC ident belongs to an ILS/LOC approach, not to a DME ARC STAR. List such idents in supportObjects with usedInProcedure=false and supportOnly=true.
+- Do NOT treat idents that appear only in supporting pages (e.g. an NDB or an ILS/LOC ident listed only in AD 2.19) as procedure geometry, unless the current chart or table explicitly references them. An ILS/LOC ident belongs to an ILS/LOC approach, not to a DME ARC STAR. List such idents in supportObjects with usedInProcedure=false and supportOnly=true.
 - The VOR/DME used by the arc, radials, and lead radials IS part of the procedure: usedInProcedure=true.
 
 Focus on derivationMethod for DME ARC, radial, and lead radial values (e.g. "read from arc label", "derived from lead radial").
@@ -104,7 +105,7 @@ Altitude constraints — per transition, no reuse:
   information: report it as a chartText but do NOT copy it into any leg's altitudeConstraint
   or upperFt. `upperFt` is only for genuine dual-altitude window constraints of the leg itself.
 - Keep the sign. `-05000`, `+05000`, and `05000` are different constraints.
-- Do not propagate ADLOV's `+3200` to EMTUV/OMKOM/PIMOK. Re-read every transition row.
+- Do not propagate one transition's altitude constraint to the other transitions. Re-read every transition row.
 
 Course/radial coding:
 - CI legs require courseDeg equal to the inbound course for the entry radial.
@@ -113,7 +114,7 @@ Course/radial coding:
 - TF/IF legs should normally have courseDeg=null unless the table explicitly codes a course.
 
 recommendedNavaid (tableLegs field):
-- IF and AF legs reference the arc center VOR/DME (e.g. `VJB`) — fill `recommendedNavaid`
+- IF and AF legs reference the arc center VOR/DME — fill `recommendedNavaid`
   on those rows. TF/CI rows keep null unless the table explicitly prints a navaid.
 
 turnDirection rules:
@@ -130,7 +131,7 @@ page is present.
 ## Label Plan Mapping (DME ARC STAR)
 
 Every chartTexts label that is drawn on the main chart also gets ONE `labelPlan` entry:
-- Entry fix labels with altitude (e.g. `ADLOV\n6000`) → labelKind=FIX_NAME, anchorType=FIX,
+- Entry fix labels with altitude (e.g. `<FIX>\n6000`) → labelKind=FIX_NAME, anchorType=FIX,
   anchorDirection = the side of the fix with no track lines (or AUTO).
 - VOR/DME info box (ident/frequency) → labelKind=NAVAID_INFO, anchorType=NAVAID.
 - `11 DME ARC` → labelKind=DME_ARC, anchorType=DME_ARC (rides along the arc), one entry total,
@@ -138,10 +139,10 @@ Every chartTexts label that is drawn on the main chart also gets ONE `labelPlan`
 - `RDL-xxx` labels → labelKind=RADIAL, anchorType=RADIAL, anchorIdent=`RDLxxx`,
   placementAlongLine=END (radial labels sit at the outer end). The final radial pair
   (`RDL340 / 160°`) stays one entry with `\n` between the two lines.
-- Lead radials `L-R332` / `L-R348` → labelKind=LEAD_RADIAL, anchorType=RADIAL.
-- Outer DME turn-point tags (`13D VJB`) → labelKind=FIX_NAME, anchorType=FIX with the D-fix
+- Lead radials (`L-Rxxx`) → labelKind=LEAD_RADIAL, anchorType=RADIAL.
+- Outer DME turn-point tags (`13D <VOR>`) → labelKind=FIX_NAME, anchorType=FIX with the D-fix
   ident (e.g. `D016M`).
-- Procedure names (`ADLOV 1G`) → labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK,
+- Procedure names (`<FIX> 1G`) → labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK,
   placementAlongLine=START, sideOfLine matching the chart.
 
 ## Fixes and Coordinates — REQUIRED

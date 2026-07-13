@@ -150,7 +150,7 @@ function extractSupportFields(page: PdfPageAsset, supportType: SupportType) {
   if (supportType === 'RUNWAY_OPERATIONAL_DATA') {
     return {
       pageNo: page.pageNo,
-      declaredDistances: matches(compact, /\b(?:16|34)\s+(?:THRESHOLD|TWY\s+[A-Z])\s+\d+\s+\d+\s+\d+\s+(?:\d+|-)/gi),
+      declaredDistances: matches(compact, /\b\d{2}[LRC]?\s+(?:THRESHOLD|TWY\s+[A-Z])\s+\d+\s+\d+\s+\d+\s+(?:\d+|-)/gi),
       lighting: matches(compact, /\b(?:APPROACH LIGHTING|PAPI|RUNWAY LIGHTS?|RUNWAY END LIGHTS?|THR lights?|edge lights?)[^.;]{0,100}/gi),
       textSample: compact.slice(0, 1200),
     };
@@ -161,7 +161,7 @@ function extractSupportFields(page: PdfPageAsset, supportType: SupportType) {
       airspace: matches(compact, /\b(?:CTR|TMA)\b[^.;]{0,180}/gi),
       transitionAltitude: compact.match(/TRANSITION ALTITUDE[^0-9]*(\d+\s*FT|\d+)/i)?.[1],
       frequencies: matches(compact, /\b(?:APP|TWR|SMC|ATIS|RADAR|GROUND)\b[^.;\n]{0,100}?\d{3}\.\d{1,3}\s*MHz?/gi),
-      callsigns: matches(compact, /\b(?:JOHOR BAHRU|SENAI)[A-Z ]{0,40}\b(?:APPROACH|TOWER|GROUND|ATIS)?/gi),
+      callsigns: matches(compact, /\b[A-Z][A-Z ]{1,40}?\s(?:APPROACH|TOWER|GROUND|ATIS)\b/gi),
       textSample: compact.slice(0, 1200),
     };
   }
@@ -182,7 +182,7 @@ function extractSupportFields(page: PdfPageAsset, supportType: SupportType) {
       pageNo: page.pageNo,
       dmeArrivalProcedures: matches(compact, /DME Arrival Procedures[^.]*\./gi),
       radialTracks: matches(compact, /\bR-\d{3}\/\d{3}°|\b\d{3}°/g).slice(0, 30),
-      navaids: matches(compact, /\b(?:VJB|VOR|DME|NDB)\b/g),
+      navaids: matches(compact, /\b[A-Z]{2,3}\s+(?:VOR\/DME|VOR|DME|NDB)\b|\b(?:VOR\/DME|VOR|DME|NDB)\b(?:\s+[A-Z]{2,3}\b)?/g),
       minimumIfrAltitudes: matches(compact, /\b\d{4,5}\s*FT\b/gi),
       remarks: matches(compact, /(?:REMARKS|Note:)[^.;]{0,220}/gi),
       levelRestrictions: matches(compact, /\bcross[^.;]{0,120}\b\d{4,5}\s*FT[^.;]*/gi),
