@@ -14,17 +14,18 @@ import { buildAiInputPackage } from '../services/aiInputPackageBuilder';
 import { evaluateProcedureUnderstanding } from '../services/evaluation/procedureUnderstandingEvaluator';
 import { aiProcedureToSimpleLegs } from '../services/jeppesen424/aiProcedureToSimpleLegs';
 import { parseJeppesen424Text } from '../services/jeppesen424/jeppesen424TextParser';
-import { compareSimpleProcedureLegs } from '../services/jeppesen424/simpleProcedureComparator';
+import { alignJeppesenProcedureNames, compareSimpleProcedureLegs } from '../services/jeppesen424/simpleProcedureComparator';
 import { simpleLegsTo424Text } from '../services/jeppesen424/simpleLegsTo424Text';
 import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
 import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
 import { buildGeoJsonFromProcedureUnderstanding } from '../services/procedureUnderstandingGeojson';
+import { buildProcedureRenderPlan } from '../services/rendering/procedureRenderPlan';
 import { normalizeProcedureUnderstandingResult } from '../services/procedureUnderstandingNormalizer';
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
 import { getLlmRuntimeConfig } from '../services/llm/llmClient';
-import type { EvaluationResult, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
+import type { EvaluationResult, GeoJsonRenderMode, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
 import type { BuiltPrompt, PromptRunRecord } from '../services/prompt/promptTypes';
 
 const router = express.Router();
@@ -308,17 +309,38 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
 
 router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, next) => {
   try {
+    const requestedRenderMode = normalizeGeoJsonRenderMode(req.body?.renderMode);
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
       group.geojsonStatus = 'GENERATING';
       group.geojsonError = undefined;
+      if (requestedRenderMode) group.geojsonRenderMode = requestedRenderMode;
     });
 
     const task = await readTask(req.params.taskId);
     const group = findGroup(task.groups, req.params.packageId);
     const model = req.body?.model || process.env.LLM_MODEL || 'mock-procedure-recognizer';
     if (group.procedureUnderstanding) {
-      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group, task.pages);
+      const renderMode = requestedRenderMode ?? group.geojsonRenderMode ?? 'AUTO';
+      const renderPlan = buildProcedureRenderPlan(
+        group.procedureUnderstanding,
+        group,
+        group.jeppesen424Source?.parsedLegs ?? [],
+        renderMode,
+      );
+      if (renderMode === 'JEPPESEN_424' && renderPlan.source !== 'JEPPESEN_424') {
+        throw new Error(renderPlan.warnings.join(' ') || 'The package does not have complete matching Jeppesen 424 data.');
+      }
+      group.geojsonRenderMode = renderMode;
+      group.geojsonRenderSummary = {
+        requestedMode: renderPlan.requestedMode,
+        source: renderPlan.source,
+        canonicalProcedureCount: renderPlan.canonicalProcedureCount,
+        canonicalLegCount: renderPlan.canonicalLegCount,
+        aiProcedureCount: renderPlan.aiProcedureCount,
+        warnings: renderPlan.warnings,
+      };
+      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group, task.pages, { renderPlan });
       const validation = validateProcedureGeoJson(group.geojson, group);
       group.geojsonStatus = validation.valid ? 'GENERATED' : 'ERROR';
       group.geojsonGeneratedAt = validation.valid ? new Date().toISOString() : undefined;
@@ -364,6 +386,7 @@ router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, ne
       packageId,
       geojsonId: `geojson_${packageId}`,
       geojsonPreview: group.geojson,
+      renderSummary: group.geojsonRenderSummary,
       downloadUrl: `/api/procedure-tasks/${encodeURIComponent(task.taskId)}/packages/${encodeURIComponent(packageId)}/geojson/download`,
     });
   } catch (error) {
@@ -561,8 +584,11 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
       : [];
     const runway = normalizeRunway(req.body?.runway ?? group.runway ?? group.procedureUnderstanding.runway ?? '');
 
-    const parsedJeppesenLegs = filterSimpleLegs(parseJeppesen424Text(text), procedureFilter, runway);
-    const aiLegs = filterSimpleLegs(aiProcedureToSimpleLegs(group.procedureUnderstanding), procedureFilter, runway);
+    const allAiLegs = aiProcedureToSimpleLegs(group.procedureUnderstanding);
+    // 先用 424 路线代码把 Jeppesen 腿段对齐到 AI 程序名下，再做程序/跑道过滤
+    const alignedJeppesenLegs = alignJeppesenProcedureNames(allAiLegs, parseJeppesen424Text(text));
+    const parsedJeppesenLegs = filterSimpleLegs(alignedJeppesenLegs, procedureFilter, runway);
+    const aiLegs = filterSimpleLegs(allAiLegs, procedureFilter, runway);
     const procedureResults = compareSimpleProcedureLegs(aiLegs, parsedJeppesenLegs);
 
     const totalLegs = procedureResults.reduce((sum, result) => sum + result.totalLegs, 0);
@@ -579,6 +605,23 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
     const overallScore = totalLegs
       ? Math.round((procedureResults.reduce((sum, result) => sum + result.score * result.totalLegs, 0) / totalLegs) * 10) / 10
       : 0;
+
+    const importedAt = new Date().toISOString();
+    const procedureCount = new Set(parsedJeppesenLegs.map((leg) => `${leg.procedureName}|${leg.runway}`)).size;
+    group.jeppesen424Source = {
+      text,
+      parsedLegs: parsedJeppesenLegs,
+      importedAt,
+      procedureCount,
+      legCount: parsedJeppesenLegs.length,
+    };
+    group.geojsonRenderMode = group.geojsonRenderMode ?? 'AUTO';
+    group.geojson = undefined;
+    group.geojsonStatus = 'NOT_GENERATED';
+    group.geojsonGeneratedAt = undefined;
+    group.geojsonError = undefined;
+    group.geojsonRenderSummary = undefined;
+    await saveTask(task);
 
     res.json({
       ok: true,
@@ -598,6 +641,12 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
       procedureResults,
       parsedJeppesenLegs,
       aiLegs,
+      renderSource: {
+        importedAt,
+        procedureCount,
+        legCount: parsedJeppesenLegs.length,
+        defaultRenderMode: 'AUTO',
+      },
     });
   } catch (error) {
     next(error);
@@ -715,12 +764,17 @@ async function markRecognitionCancelled(taskId: string, packageId: string) {
 }
 
 function filterSimpleLegs<T extends { procedureName: string; runway: string }>(legs: T[], procedureFilter: string[], runway: string) {
-  const allowedProcedures = new Set(procedureFilter);
   return legs.filter((leg) => {
-    if (allowedProcedures.size && !allowedProcedures.has(normalizeCompareText(leg.procedureName))) return false;
+    if (procedureFilter.length && !procedureMatchesFilter(leg.procedureName, procedureFilter)) return false;
     if (runway && normalizeRunway(leg.runway) !== runway) return false;
     return true;
   });
+}
+
+// 分组名与 AI 程序名粒度不同（如分组 "LARIT" vs AI "LARIT 1T"），前缀相容即视为命中
+function procedureMatchesFilter(procedureName: string, filters: string[]) {
+  const name = normalizeCompareText(procedureName);
+  return filters.some((filter) => name === filter || name.startsWith(`${filter} `) || filter.startsWith(`${name} `));
 }
 
 function normalizeCompareText(value: unknown) {
@@ -746,6 +800,11 @@ function geojsonFileName(group: ProcedureGroup) {
 
 function asciiFileName(fileName: string) {
   return fileName.replace(/[^\x20-\x7E]+/g, '').trim() || 'procedure.geojson';
+}
+
+function normalizeGeoJsonRenderMode(value: unknown): GeoJsonRenderMode | undefined {
+  const mode = String(value ?? '').toUpperCase();
+  return mode === 'AUTO' || mode === 'JEPPESEN_424' || mode === 'AI' ? mode : undefined;
 }
 
 async function loadGoldenCase(fileName: string) {

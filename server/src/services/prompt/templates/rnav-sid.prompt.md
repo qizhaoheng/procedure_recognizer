@@ -20,15 +20,13 @@ SID-specific reading rules:
 - If the plan view prints a runway-alignment label such as `160 deg 1000`, read it as "track/course 160
   until 1000 ft before turning". Preserve `1000` as the CA altitude constraint and include the same
   text in geometrySemantics as RUNWAY_ALIGNMENT.
-- If the first CA row contains an altitude pair such as `+01000 11000`, output
-  `altitudeConstraint.rawText="+01000 11000"`, `altitudeFt=1000`, `lowerFt=null`, and
-  `upperFt=11000`. Do not move `11000` to notes; it is the second altitude field used by the
-  Jeppesen 424 comparison.
-- If the table row only shows the CA altitude (`+01000`) but the chart header box says
-  `TRANSITION ALTITUDE 11000FT`, still encode the first CA leg as
-  `altitudeConstraint.rawText="+01000 11000"` with `upperFt=11000`. The transition altitude is
-  global chart information, but Jeppesen 424 carries it as Alt2 on the first no-fix CA leg for
-  each SID procedure.
+- The airport TRANSITION ALTITUDE (header box like `TRANSITION ALTITUDE 11000FT`) is
+  airport-level information: report it as a chartText, but do NOT copy it into any leg's
+  altitudeConstraint or upperFt. A number printed next to a leg altitude in a coded source
+  (e.g. the `11000` in `+01000 11000`) is that same transition altitude — ignore it at leg level.
+- `upperFt` is ONLY for genuine dual-altitude window constraints printed for the leg itself
+  (e.g. "between 4000 and 9000" / `9000B4000`): put the lower bound in altitudeFt/lowerFt and
+  the upper bound in upperFt.
 - If the first CA row references a navaid such as `VJB` for DME/course checking, put
   `recommendedNavaid="VJB"` on that CA leg only.
 - For WMKJ RNAV SID charts, the `MSA 25 NM VJB` box and the aeronautical data tabulation identify

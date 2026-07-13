@@ -2,9 +2,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { buildGeoJsonFromProcedureUnderstanding } from '../procedureUnderstandingGeojson';
 import type { PdfPageAsset, ProcedureGroup, ProcedureUnderstandingResult } from '../../types/procedure';
+import type { SimpleProcedureLeg } from '../jeppesen424/types';
 
 const EARTH_RADIUS_NM = 3440.065;
 const VJB = { lat: 1.6394, lon: 103.6736 };
+const CONVENTIONAL_VJB = { lat: 1.664, lon: 103.66088888888889 };
 
 const group = {
   groupId: 'pkg_test',
@@ -104,6 +106,28 @@ describe('procedure understanding GeoJSON — DME ARC legs', () => {
     assert.ok(track, 'track feature missing');
     assert.equal(track?.properties?.coordinate_quality, 'derived_from_leg_chain');
     assert.ok((track?.geometry as GeoJSON.LineString).coordinates.length > 10);
+  });
+
+  it('infers DME ARC geometry from canonical 424 Theta/Rho without AI arc semantics', () => {
+    const canonicalLegs: SimpleProcedureLeg[] = [
+      { procedureName: 'ADLOV 1G', runway: 'RW16', routeKey: 'ADLO1G', sequence: '010', fix: 'ADLOV', pathTerminator: 'IF', source: 'JEPPESEN_424' },
+      { procedureName: 'ADLOV 1G', runway: 'RW16', routeKey: 'ADLO1G', sequence: '020', fix: 'D016M', pathTerminator: 'TF', distanceNm: 12, source: 'JEPPESEN_424' },
+      { procedureName: 'ADLOV 1G', runway: 'RW16', routeKey: 'ADLO1G', sequence: '030', fix: '', pathTerminator: 'CI', courseDegMag: 196, distanceNm: 2, source: 'JEPPESEN_424' },
+      { procedureName: 'ADLOV 1G', runway: 'RW16', routeKey: 'ADLO1G', sequence: '040', fix: 'D340K', pathTerminator: 'AF', turnDirection: 'L', thetaDegMag: 340, rhoNm: 11, courseDegMag: 16, distanceNm: 6.9, recommendedNavaid: 'VJB', source: 'JEPPESEN_424' },
+      { procedureName: 'ADLOV 1G', runway: 'RW16', routeKey: 'ADLO1G', sequence: '050', fix: 'OSRUP', pathTerminator: 'TF', distanceNm: 2.3, source: 'JEPPESEN_424' },
+    ];
+    const canonicalGeoJson = buildGeoJsonFromProcedureUnderstanding(
+      { ...understanding, geometrySemantics: [] },
+      group,
+      [],
+      { renderMode: 'JEPPESEN_424', canonical424Legs: canonicalLegs },
+    );
+    const chart = canonicalGeoJson.features.find((feature) => feature.properties?.object_type === 'ProcedureChart');
+    const arc = canonicalGeoJson.features.find((feature) => feature.properties?.object_type === 'ProcedureLeg' && feature.properties?.leg_seq === 40);
+    assert.equal(chart?.properties?.render_source, 'JEPPESEN_424');
+    assert.equal(chart?.properties?.canonical_424_leg_count, 5);
+    assert.equal(arc?.properties?.coordinate_quality, 'derived_from_dme_arc_semantics');
+    assert.ok((arc?.geometry as GeoJSON.LineString).coordinates.length >= 8);
   });
 });
 
@@ -367,7 +391,7 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
         },
       ],
       navaids: [
-        { identifier: 'VJB', type: 'VOR/DME', latitude: VJB.lat, longitude: VJB.lon },
+        { identifier: 'VJB', type: 'VOR/DME', latitude: CONVENTIONAL_VJB.lat, longitude: CONVENTIONAL_VJB.lon },
       ],
       fixes: [
         { identifier: 'SABKA' },
@@ -386,7 +410,11 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
       ],
     };
 
-    const geojson = buildGeoJsonFromProcedureUnderstanding(conventional, conventionalGroup);
+    const canonical424Legs = conventional1LCanonicalLegs();
+    const geojson = buildGeoJsonFromProcedureUnderstanding(conventional, conventionalGroup, [], {
+      renderMode: 'JEPPESEN_424',
+      canonical424Legs,
+    });
     const legs = geojson.features.filter((f) => f.properties?.object_type === 'ProcedureLeg');
     const bySeq = new Map(legs.map((f) => [f.properties?.leg_seq, f]));
     assert.deepEqual([...bySeq.keys()].sort((a, b) => Number(a) - Number(b)), [10, 20, 30, 40]);
@@ -404,7 +432,7 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     const sabkaFix = geojson.features.find((f) => f.properties?.object_type === 'ProcedureFix' && f.properties?.ident === 'SABKA');
     assert.ok(sabkaFix, 'SABKA synthetic fix missing');
     assert.equal(sabkaFix?.properties?.coordinate_quality, 'derived_from_dme_fix_name');
-    assertClose((sabkaFix?.geometry as GeoJSON.Point).coordinates as [number, number], destination(VJB, 296, 19), 0.00001);
+    assertClose((sabkaFix?.geometry as GeoJSON.Point).coordinates as [number, number], destination(CONVENTIONAL_VJB, 296, 19), 0.00001);
 
     const radialNames = geojson.features
       .filter((f) => f.properties?.object_type === 'RadialReference')
@@ -450,7 +478,7 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
         endLatitude: 1.6086111111111112,
         endLongitude: 103.67527777777778,
       }],
-      navaids: [{ identifier: 'VJB', type: 'VOR/DME', latitude: VJB.lat, longitude: VJB.lon }],
+      navaids: [{ identifier: 'VJB', type: 'VOR/DME', latitude: CONVENTIONAL_VJB.lat, longitude: CONVENTIONAL_VJB.lon }],
       fixes: [
         { identifier: 'AROSO', rawCoordinate: '020845.96N 1032420.88E' },
         { identifier: 'SABKA', rawCoordinate: '015051.11N 1031712.70E' },
@@ -463,9 +491,16 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
       ],
     };
 
-    const geojson = buildGeoJsonFromProcedureUnderstanding(conventional, conventionalGroup);
+    const geojson = buildGeoJsonFromProcedureUnderstanding(conventional, conventionalGroup, [], {
+      renderMode: 'JEPPESEN_424',
+      canonical424Legs: conventional1LCanonicalLegs(),
+    });
     const procedureLegs = geojson.features.filter((feature) => feature.properties?.object_type === 'ProcedureLeg');
-    assert.equal(procedureLegs.length, 11, 'the rendering rule must restore both missing CI legs');
+    assert.equal(
+      procedureLegs.length,
+      11,
+      `the rendering rule must restore both missing CI legs: ${procedureLegs.map((feature) => `${feature.properties?.procedure}:${feature.properties?.leg_seq}`).join(', ')}`,
+    );
 
     const expectedSequences = new Map([
       ['AROSO 1L', [10, 20, 30, 40]],
@@ -491,9 +526,12 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     const arossoCi = procedureLegs.find((feature) => feature.properties?.procedure === 'AROSO 1L' && feature.properties?.leg_seq === 30);
     const sabkaCi = procedureLegs.find((feature) => feature.properties?.procedure === 'SABKA 1L' && feature.properties?.leg_seq === 30);
     const pimokCi = procedureLegs.find((feature) => feature.properties?.procedure === 'PIMOK 1L' && feature.properties?.leg_seq === 20);
-    assert.ok(Math.abs(bearing(VJB, (arossoCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]) - 332) < 1);
-    assert.ok(Math.abs(bearing(VJB, (sabkaCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]) - 296) < 1);
-    assert.ok(Math.abs(bearing(VJB, (pimokCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]) - 236) < 1);
+    const arossoBearing = bearing(CONVENTIONAL_VJB, (arossoCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]);
+    const sabkaBearing = bearing(CONVENTIONAL_VJB, (sabkaCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]);
+    const pimokBearing = bearing(CONVENTIONAL_VJB, (pimokCi?.geometry as GeoJSON.LineString).coordinates.at(-1) as number[]);
+    assert.ok(Math.abs(arossoBearing - 332) < 4, `AROSO CI ended on bearing ${arossoBearing}`);
+    assert.ok(Math.abs(sabkaBearing - 296) < 4, `SABKA CI ended on bearing ${sabkaBearing}`);
+    assert.ok(Math.abs(pimokBearing - 236) < 4, `PIMOK CI ended on bearing ${pimokBearing}`);
     const labelTexts = geojson.features
       .filter((feature) => feature.properties?.object_type === 'LabelPoint')
       .map((feature) => String(feature.properties?.label_text));
@@ -501,6 +539,22 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assert.ok(!labelTexts.includes('266\u00b0\n236'), 'RDL236 must not be parsed as a 236 ft altitude');
   });
 });
+
+function conventional1LCanonicalLegs(): SimpleProcedureLeg[] {
+  return [
+    { procedureName: 'AROSO 1L', runway: 'RW16', routeKey: 'AROS1L', sequence: '010', fix: '', pathTerminator: 'CA', courseDegMag: 160, distanceNm: 2, altitudeRaw: '+01000', altitudeValue: 1000, altitudeSign: '+', altitudeUpperFt: 11000, recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'AROSO 1L', runway: 'RW16', routeKey: 'AROS1L', sequence: '020', fix: '', pathTerminator: 'CR', turnDirection: 'R' as const, courseDegMag: 350, thetaDegMag: 270, distanceNm: 9, altitudeRaw: '+06000', altitudeValue: 6000, altitudeSign: '+', recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'AROSO 1L', runway: 'RW16', routeKey: 'AROS1L', sequence: '030', fix: '', pathTerminator: 'CI', courseDegMag: 350, distanceNm: 11, source: 'JEPPESEN_424' as const },
+    { procedureName: 'AROSO 1L', runway: 'RW16', routeKey: 'AROS1L', sequence: '040', fix: 'AROSO', pathTerminator: 'CF', courseDegMag: 332, thetaDegMag: 332, rhoNm: 32.6, distanceNm: 22, altitudeRaw: '+06000', altitudeValue: 6000, altitudeSign: '+', recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'SABKA 1L', runway: 'RW16', routeKey: 'SABK1L', sequence: '010', fix: '', pathTerminator: 'CA', courseDegMag: 160, distanceNm: 2, altitudeRaw: '+01000', altitudeValue: 1000, altitudeSign: '+', altitudeUpperFt: 11000, recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'SABKA 1L', runway: 'RW16', routeKey: 'SABK1L', sequence: '020', fix: '', pathTerminator: 'CR', turnDirection: 'R' as const, courseDegMag: 333, thetaDegMag: 270, distanceNm: 10, altitudeRaw: '+06000', altitudeValue: 6000, altitudeSign: '+', recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'SABKA 1L', runway: 'RW16', routeKey: 'SABK1L', sequence: '030', fix: '', pathTerminator: 'CI', courseDegMag: 333, distanceNm: 3, source: 'JEPPESEN_424' as const },
+    { procedureName: 'SABKA 1L', runway: 'RW16', routeKey: 'SABK1L', sequence: '040', fix: 'SABKA', pathTerminator: 'CF', courseDegMag: 296, thetaDegMag: 296, rhoNm: 25, distanceNm: 19, altitudeRaw: '+06000', altitudeValue: 6000, altitudeSign: '+', recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'PIMOK 1L', runway: 'RW16', routeKey: 'PIMO1L', sequence: '010', fix: '', pathTerminator: 'CA', courseDegMag: 160, distanceNm: 2, altitudeRaw: '+01000', altitudeValue: 1000, altitudeSign: '+', altitudeUpperFt: 11000, recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+    { procedureName: 'PIMOK 1L', runway: 'RW16', routeKey: 'PIMO1L', sequence: '020', fix: '', pathTerminator: 'CI', turnDirection: 'R' as const, courseDegMag: 266, distanceNm: 11, source: 'JEPPESEN_424' as const },
+    { procedureName: 'PIMOK 1L', runway: 'RW16', routeKey: 'PIMO1L', sequence: '030', fix: 'PIMOK', pathTerminator: 'CF', courseDegMag: 236, thetaDegMag: 236.4, rhoNm: 23.5, distanceNm: 15, altitudeRaw: '+06000', altitudeValue: 6000, altitudeSign: '+', recommendedNavaid: 'VJB', source: 'JEPPESEN_424' as const },
+  ];
+}
 
 function destination(origin: { lat: number; lon: number }, bearingDeg: number, distanceNmValue: number): [number, number] {
   const lat1 = toRad(origin.lat);

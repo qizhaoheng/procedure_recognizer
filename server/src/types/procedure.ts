@@ -159,6 +159,9 @@ export interface ProcedureGroup {
   procedureUnderstanding?: ProcedureUnderstandingResult;
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;
+  jeppesen424Source?: Jeppesen424PackageSource;
+  geojsonRenderMode?: GeoJsonRenderMode;
+  geojsonRenderSummary?: GeoJsonRenderSummary;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'ERROR';
   geojsonGeneratedAt?: string;
@@ -166,6 +169,26 @@ export interface ProcedureGroup {
   reviewRequired?: boolean;
   /** 人工标记的识别问题类型，用于后续 Prompt 打磨 */
   recognitionIssueTags?: string[];
+}
+
+export type GeoJsonRenderMode = 'AUTO' | 'JEPPESEN_424' | 'AI';
+export type GeoJsonRenderSource = 'JEPPESEN_424' | 'HYBRID' | 'AI';
+
+export interface Jeppesen424PackageSource {
+  text: string;
+  parsedLegs: import('../services/jeppesen424/types').SimpleProcedureLeg[];
+  importedAt: string;
+  procedureCount: number;
+  legCount: number;
+}
+
+export interface GeoJsonRenderSummary {
+  requestedMode: GeoJsonRenderMode;
+  source: GeoJsonRenderSource;
+  canonicalProcedureCount: number;
+  canonicalLegCount: number;
+  aiProcedureCount: number;
+  warnings: string[];
 }
 
 export interface AipAdStructure {

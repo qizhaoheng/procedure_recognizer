@@ -1,22 +1,38 @@
+import { deriveRouteCode } from './routeCode';
 import type { FieldCompareResult, LegCompareResult, ProcedureCompareResult, SimpleProcedureLeg } from './types';
 
 const DISTANCE_TOLERANCE_NM = 0.1;
 const COURSE_TOLERANCE_DEG = 1;
 
 const FIELD_WEIGHTS = {
-  fix: 24,
-  pathTerminator: 19,
-  distanceNm: 14,
+  fix: 23,
+  pathTerminator: 18,
+  distanceNm: 13,
   altitudeValue: 10,
   courseDegMag: 10,
   altitudeSign: 5,
   altitudeUpperFt: 5,
   turnDirection: 5,
   recommendedNavaid: 3,
+  speedLimitKias: 3,
   fixSection: 2,
   holdingAtFix: 2,
   endOfProcedure: 1,
 };
+
+// AI 程序名与 424 记录名写法常不一致（跑道后缀、5 字母 Fix 截断），
+// 用 424 路线代码（parser 已存入 leg.routeKey）把 Jeppesen 腿段改挂到 AI 的程序名下。
+export function alignJeppesenProcedureNames(aiLegs: SimpleProcedureLeg[], jeppesenLegs: SimpleProcedureLeg[]): SimpleProcedureLeg[] {
+  const codeToAiName = new Map<string, string>();
+  for (const leg of aiLegs) {
+    const code = deriveRouteCode(leg.procedureName);
+    if (code && !codeToAiName.has(code)) codeToAiName.set(code, leg.procedureName);
+  }
+  return jeppesenLegs.map((leg) => {
+    const aiName = leg.routeKey ? codeToAiName.get(leg.routeKey.trim().toUpperCase()) : undefined;
+    return aiName && aiName !== leg.procedureName ? { ...leg, procedureName: aiName } : leg;
+  });
+}
 
 export function compareSimpleProcedureLegs(aiLegs: SimpleProcedureLeg[], jeppesenLegs: SimpleProcedureLeg[]): ProcedureCompareResult[] {
   const procedureKeys = new Set<string>();
@@ -67,6 +83,7 @@ function compareLeg(sequence: string, ai: SimpleProcedureLeg | undefined, jeppes
     compareField('courseDegMag', ai.courseDegMag, jeppesen.courseDegMag, courseMatches(ai, jeppesen), 'WARNING'),
     // 推荐导航台只在 IF/AF 腿上要求（本例为弧心 VJB）
     compareField('recommendedNavaid', ai.recommendedNavaid ?? '', jeppesen.recommendedNavaid ?? '', navaidMatches(ai, jeppesen), 'WARNING'),
+    compareField('speedLimitKias', ai.speedLimitKias, jeppesen.speedLimitKias, sameOptionalNumber(ai.speedLimitKias, jeppesen.speedLimitKias), 'WARNING'),
     compareField('fixSection', ai.fixSection ?? '', jeppesen.fixSection ?? '', sameOptionalText(ai.fixSection, jeppesen.fixSection), 'WARNING'),
     compareField('holdingAtFix', ai.holdingAtFix ?? false, jeppesen.holdingAtFix ?? false, (ai.holdingAtFix ?? false) === (jeppesen.holdingAtFix ?? false), 'WARNING'),
     compareField('endOfProcedure', ai.endOfProcedure ?? false, jeppesen.endOfProcedure ?? false, (ai.endOfProcedure ?? false) === (jeppesen.endOfProcedure ?? false), 'WARNING'),

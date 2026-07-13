@@ -25,6 +25,7 @@ import type {
   AiInputPage,
   BuiltPromptPreview,
   EvaluationResult,
+  GeoJsonRenderMode,
   Jeppesen424CompareResponse,
   LegCompareResult,
   PackageType,
@@ -151,6 +152,13 @@ const selectedGroupPages = computed(() => {
   return task.value.pages.filter((page) => pageNos.has(page.pageNo));
 });
 const hasGeoJson = computed(() => Boolean(selectedGroup.value?.geojson));
+const selectedGeoJsonRenderMode = computed<GeoJsonRenderMode>({
+  get: () => selectedGroup.value?.geojsonRenderMode ?? 'AUTO',
+  set: (mode) => {
+    if (selectedGroup.value) selectedGroup.value.geojsonRenderMode = mode;
+  },
+});
+const geojsonRenderSummary = computed(() => selectedGroup.value?.geojsonRenderSummary);
 
 const supportingPageCount = computed(() => {
   const group = selectedGroup.value;
@@ -930,7 +938,7 @@ async function compareJeppesen424() {
   jeppesenCompareBusy.value = true;
   error.value = '';
   try {
-    jeppesenCompareResult.value = await requestJson<Jeppesen424CompareResponse>(
+    const compareResult = await requestJson<Jeppesen424CompareResponse>(
       `/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/jeppesen424/compare`,
       {
         method: 'POST',
@@ -942,6 +950,20 @@ async function compareJeppesen424() {
         }),
       },
     );
+    jeppesenCompareResult.value = compareResult;
+    if (compareResult.renderSource) {
+      selectedGroup.value.jeppesen424Source = {
+        text: jeppesenText.value,
+        parsedLegs: compareResult.parsedJeppesenLegs,
+        importedAt: compareResult.renderSource.importedAt,
+        procedureCount: compareResult.renderSource.procedureCount,
+        legCount: compareResult.renderSource.legCount,
+      };
+      selectedGroup.value.geojsonRenderMode = 'AUTO';
+      selectedGroup.value.geojson = undefined;
+      selectedGroup.value.geojsonStatus = 'NOT_GENERATED';
+      selectedGroup.value.geojsonRenderSummary = undefined;
+    }
     message.value = 'Jeppesen 424 compare completed';
   } catch (compareError) {
     error.value = toErrorMessage(compareError);
@@ -1022,6 +1044,7 @@ function analysisLegSummary(leg?: SimpleProcedureLeg) {
     `alt=${analysisValue(leg.altitudeRaw)}`,
     `alt2=${analysisValue(leg.altitudeUpperFt)}`,
     `nav=${analysisValue(leg.recommendedNavaid)}`,
+    `spd=${analysisValue(leg.speedLimitKias)}`,
     `标记=${legMarkers(leg)}`,
   ];
   return parts.join(' ');
@@ -1082,7 +1105,7 @@ async function generateGeoJson() {
     await requestJson(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/generate-geojson`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'geojson' }),
+      body: JSON.stringify({ mode: 'geojson', renderMode: selectedGeoJsonRenderMode.value }),
     });
     await refreshTask(false);
     mapResetCounter.value += 1;
@@ -2034,6 +2057,20 @@ function isCancelledError(value: unknown) {
             <aside class="preview-side">
               <section class="block">
                 <h2>GeoJSON 状态</h2>
+                <label class="field-label" for="geojson-render-mode">渲染模式</label>
+                <select id="geojson-render-mode" v-model="selectedGeoJsonRenderMode">
+                  <option value="AUTO">自动：424 优先</option>
+                  <option value="JEPPESEN_424" :disabled="!selectedGroup.jeppesen424Source">仅 Jeppesen 424</option>
+                  <option value="AI">仅 AI 识别结果</option>
+                </select>
+                <div v-if="selectedGroup.jeppesen424Source" class="manifest-grid compact-manifest">
+                  <span>424 程序</span><strong>{{ selectedGroup.jeppesen424Source.procedureCount }}</strong>
+                  <span>424 腿段</span><strong>{{ selectedGroup.jeppesen424Source.legCount }}</strong>
+                </div>
+                <div v-if="geojsonRenderSummary" class="manifest-grid compact-manifest">
+                  <span>实际来源</span><strong>{{ geojsonRenderSummary.source }}</strong>
+                  <span>424 渲染腿段</span><strong>{{ geojsonRenderSummary.canonicalLegCount }}</strong>
+                </div>
                 <div class="run-status" :class="geojsonDisplayStatus === 'GENERATED' ? 'completed' : geojsonDisplayStatus === 'ERROR' ? 'error' : 'running'">
                   <strong>{{ geojsonDisplayStatus }}</strong>
                   <span v-if="selectedGroup.geojsonError">{{ selectedGroup.geojsonError }}</span>
@@ -2173,6 +2210,8 @@ function isCancelledError(value: unknown) {
                       <th>424 Crs</th>
                       <th>AI Nav</th>
                       <th>424 Nav</th>
+                      <th>AI Spd</th>
+                      <th>424 Spd</th>
                       <th>AI 标记</th>
                       <th>424 标记</th>
                       <th>Score</th>
@@ -2197,6 +2236,8 @@ function isCancelledError(value: unknown) {
                       <td>{{ valueText(leg.jeppesen?.courseDegMag) }}</td>
                       <td>{{ leg.ai?.recommendedNavaid || '-' }}</td>
                       <td>{{ leg.jeppesen?.recommendedNavaid || '-' }}</td>
+                      <td>{{ valueText(leg.ai?.speedLimitKias) }}</td>
+                      <td>{{ valueText(leg.jeppesen?.speedLimitKias) }}</td>
                       <td>{{ legMarkers(leg.ai) }}</td>
                       <td>{{ legMarkers(leg.jeppesen) }}</td>
                       <td>{{ compareScoreText(leg.score) }}</td>

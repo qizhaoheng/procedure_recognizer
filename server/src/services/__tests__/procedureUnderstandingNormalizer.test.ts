@@ -181,7 +181,7 @@ describe('procedure understanding normalizer — DME ARC leg fallback', () => {
   });
 });
 
-describe('procedure understanding normalizer — conventional SID 1L fallback', () => {
+describe('procedure understanding normalizer - canonical rendering separation', () => {
   const sidGroup = {
     groupId: 'sid_1l',
     packageId: 'sid_1l',
@@ -234,48 +234,18 @@ describe('procedure understanding normalizer — conventional SID 1L fallback', 
   const result = normalizeProcedureUnderstandingResult(modelOutput, sidGroup, aiInputPackage) as ProcedureUnderstandingResult;
   const byName = new Map((result.procedures ?? []).map((p) => [p.procedureName, p]));
 
-  it('synthesizes CA/CI/CF for PIMOK 1L from chart semantics', () => {
+  it('does not synthesize PIMOK legs into the AI recognition result', () => {
     const legs = byName.get('PIMOK 1L')?.legs ?? [];
-    assert.deepEqual(
-      legs.map((leg) => [leg.sequence, leg.pathTerminator, leg.fixIdentifier, leg.courseDegMag, leg.distanceNm, leg.turnDirection]),
-      [
-        [10, 'CA', null, 160, 2, null],
-        [20, 'CI', null, 266, 11, 'R'],
-        [30, 'CF', 'PIMOK', 236, 15, null],
-      ],
-    );
-    const firstAltitude = legs[0].altitudeConstraint as Record<string, unknown>;
-    assert.equal(firstAltitude.altitudeFt, 1000);
-    assert.equal(firstAltitude.upperFt, 11000);
-    assert.equal(legs[2].recommendedNavaid, 'VJB');
+    assert.deepEqual(legs, []);
   });
 
-  it('synthesizes CR/CI/CF for SABKA and AROSO 1L', () => {
-    assert.deepEqual(
-      byName.get('SABKA 1L')?.legs?.map((leg) => [leg.sequence, leg.pathTerminator, leg.fixIdentifier, leg.courseDegMag, leg.distanceNm]),
-      [
-        [10, 'CA', null, 160, 2],
-        [20, 'CR', null, 333, 10],
-        [30, 'CI', null, 333, 3],
-        [40, 'CF', 'SABKA', 296, 19],
-      ],
-    );
-    assert.deepEqual(
-      byName.get('AROSO 1L')?.legs?.map((leg) => [leg.sequence, leg.pathTerminator, leg.fixIdentifier, leg.courseDegMag, leg.distanceNm]),
-      [
-        [10, 'CA', null, 160, 2],
-        [20, 'CR', null, 350, 9],
-        [30, 'CI', null, 350, 11],
-        [40, 'CF', 'AROSO', 332, 22],
-      ],
-    );
+  it('does not synthesize SABKA or AROSO legs into the AI recognition result', () => {
+    assert.deepEqual(byName.get('SABKA 1L')?.legs, []);
+    assert.deepEqual(byName.get('AROSO 1L')?.legs, []);
   });
 
-  it('marks the fallback as reviewRequired with synthesized derivation', () => {
-    assert.equal(result.reviewRequired, true);
-    for (const procedure of result.procedures ?? []) {
-      assert.ok((procedure.legs ?? []).every((leg) => String((leg as Record<string, unknown>).derivationMethod).includes('conventional SID')));
-      assert.ok((procedure.legs ?? []).every((leg) => leg.reviewRequired === true));
-    }
+  it('keeps comparison input independent from the 424 rendering layer', () => {
+    assert.equal(result.reviewRequired, false);
+    assert.ok((result.procedures ?? []).every((procedure) => (procedure.legs ?? []).length === 0));
   });
 });

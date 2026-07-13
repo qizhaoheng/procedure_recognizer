@@ -101,7 +101,8 @@ describe('Jeppesen 424 export', () => {
     assert.equal(entry.holdingAtFix, true);
     assert.equal(entry.altitudeSign, '-');
     assert.equal(entry.altitudeValue, 6000);
-    assert.equal(entry.altitudeUpperFt, 13000);
+    // rawText 里跟随的 13000 是过渡高度层，不再作为腿段第二高度导出/解析
+    assert.equal(entry.altitudeUpperFt, undefined);
     assert.equal(entry.recommendedNavaid, 'VJB');
     assert.equal(final.turnDirection, '');
   });
