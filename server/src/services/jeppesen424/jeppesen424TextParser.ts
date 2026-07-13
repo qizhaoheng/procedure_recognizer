@@ -39,7 +39,7 @@ export const ROUTE_CODE_TO_PROCEDURE: Record<string, string> = {
   PIMO1G: 'PIMOK 1G',
 };
 
-const PATH_TERMINATORS = ['IF', 'TF', 'CA', 'CI', 'CR', 'AF', 'CF', 'DF', 'RF', 'HM', 'HF', 'HA'];
+const PATH_TERMINATORS = ['IF', 'TF', 'CA', 'CI', 'CR', 'AF', 'CF', 'DF', 'RF', 'FM', 'FA', 'FC', 'FD', 'VM', 'VA', 'VI', 'VD', 'VR', 'PI', 'HM', 'HF', 'HA'];
 
 interface PartialLeg {
   procedureName: string;
@@ -173,6 +173,27 @@ function parseRoute(line: string) {
 }
 
 function parseLegRecord(line: string, routeText: string) {
+  // 全宽行（132 列）按列位解析：序号 27-29 | Fix 30-34（导航台型短 Fix 空格补齐，如 "PU   "）
+  // | 区域+section 35-38 | 续行号 39 | 航路点描述 40-43。3E 等规划续行不参与腿段合并。
+  if (line.length >= 120) {
+    const sequence = line.slice(26, 29);
+    if (!/^\d{3}$/.test(sequence)) return undefined;
+    const continuation = line[38];
+    const base = {
+      sequence,
+      fix: line.slice(29, 34).trim(),
+      fixSection: line.slice(36, 38).trim() || undefined,
+      recordText: line.slice(26, 43),
+    };
+    if (continuation === '2' && line[39] === 'P') {
+      return { ...base, recordPart: '2P' as const, endOfProcedure: false };
+    }
+    if (continuation === '1') {
+      return { ...base, recordPart: '1E' as const, endOfProcedure: line[40] === 'E' };
+    }
+    return undefined;
+  }
+
   const afterRoute = line.slice(line.indexOf(routeText) + routeText.length);
   const candidates = [afterRoute, line];
   const pathTerminatorPattern = PATH_TERMINATORS.join('|');
@@ -228,6 +249,11 @@ function procedureNameFromRouteCode(routeCode: string) {
 }
 
 function extractPathTerminator(line: string) {
+  // 全宽行 PT 固定在第 48-49 列（0 基 47-48）
+  if (line.length >= 120) {
+    const token = line.slice(47, 49);
+    return /^[A-Z]{2}$/.test(token) ? token : undefined;
+  }
   const terms = PATH_TERMINATORS.join('|');
   const spaced = line.match(new RegExp(`(?:^|[^A-Z])(${terms})(?:[^A-Z]|$)`));
   if (spaced) return spaced[1];
@@ -339,6 +365,11 @@ function positionalDigits(line: string, start: number, length: number) {
 }
 
 function extractDistance(line: string, recordText: string) {
+  // 全宽行 2P 距离固定在第 75-78 列（0 基 74-77），×10
+  if (line.length >= 120) {
+    const value = positionalDigits(line, 74, 4);
+    return value === undefined ? undefined : Number((value / 10).toFixed(1));
+  }
   const afterRecord = line.slice(line.indexOf(recordText) + recordText.length);
   const match = [...afterRecord.matchAll(/\b(\d{4})\b/g)].at(-1);
   if (!match) return undefined;

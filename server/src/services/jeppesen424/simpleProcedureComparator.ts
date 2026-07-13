@@ -5,7 +5,7 @@ const DISTANCE_TOLERANCE_NM = 0.1;
 const COURSE_TOLERANCE_DEG = 1;
 
 const FIELD_WEIGHTS = {
-  fix: 23,
+  fix: 25,
   pathTerminator: 18,
   distanceNm: 13,
   altitudeValue: 10,
@@ -15,23 +15,39 @@ const FIELD_WEIGHTS = {
   turnDirection: 5,
   recommendedNavaid: 3,
   speedLimitKias: 3,
-  fixSection: 2,
   holdingAtFix: 2,
   endOfProcedure: 1,
 };
 
 // AI 程序名与 424 记录名写法常不一致（跑道后缀、5 字母 Fix 截断），
 // 用 424 路线代码（parser 已存入 leg.routeKey）把 Jeppesen 腿段改挂到 AI 的程序名下。
+// 跑道同理：424 用 RW02B（B=全部平行跑道）而 AI 用 RW02L/02C/02R，
+// 路线代码匹配且跑道号一致时，直接采用 AI 侧跑道，保证过滤与对齐键一致。
 export function alignJeppesenProcedureNames(aiLegs: SimpleProcedureLeg[], jeppesenLegs: SimpleProcedureLeg[]): SimpleProcedureLeg[] {
-  const codeToAiName = new Map<string, string>();
+  const codeToAi = new Map<string, { procedureName: string; runway: string }>();
   for (const leg of aiLegs) {
     const code = deriveRouteCode(leg.procedureName);
-    if (code && !codeToAiName.has(code)) codeToAiName.set(code, leg.procedureName);
+    if (code && !codeToAi.has(code)) codeToAi.set(code, { procedureName: leg.procedureName, runway: leg.runway });
   }
   return jeppesenLegs.map((leg) => {
-    const aiName = leg.routeKey ? codeToAiName.get(leg.routeKey.trim().toUpperCase()) : undefined;
-    return aiName && aiName !== leg.procedureName ? { ...leg, procedureName: aiName } : leg;
+    const ai = leg.routeKey ? codeToAi.get(leg.routeKey.trim().toUpperCase()) : undefined;
+    if (!ai) return leg;
+    return {
+      ...leg,
+      procedureName: ai.procedureName,
+      runway: runwayNumbersOverlap(leg.runway, ai.runway) ? ai.runway : leg.runway,
+    };
   });
+}
+
+function runwayNumbersOverlap(a: string, b: string) {
+  const numbersA = runwayNumbers(a);
+  const numbersB = runwayNumbers(b);
+  return numbersA.some((value) => numbersB.includes(value));
+}
+
+function runwayNumbers(value: string) {
+  return [...String(value ?? '').matchAll(/(\d{2})/g)].map((match) => match[1]);
 }
 
 export function compareSimpleProcedureLegs(aiLegs: SimpleProcedureLeg[], jeppesenLegs: SimpleProcedureLeg[]): ProcedureCompareResult[] {
@@ -84,7 +100,8 @@ function compareLeg(sequence: string, ai: SimpleProcedureLeg | undefined, jeppes
     // 推荐导航台只在 IF/AF 腿上要求（本例为弧心 VJB）
     compareField('recommendedNavaid', ai.recommendedNavaid ?? '', jeppesen.recommendedNavaid ?? '', navaidMatches(ai, jeppesen), 'WARNING'),
     compareField('speedLimitKias', ai.speedLimitKias, jeppesen.speedLimitKias, sameOptionalNumber(ai.speedLimitKias, jeppesen.speedLimitKias), 'WARNING'),
-    compareField('fixSection', ai.fixSection ?? '', jeppesen.fixSection ?? '', sameOptionalText(ai.fixSection, jeppesen.fixSection), 'WARNING'),
+    // fixSection 不计分：AI 侧是启发式推断（首腿 EA），而 424 中途航路点也可为 EA（如 WSSS 的 BOBAG），
+    // 计分只会把我们自己的猜测误记成模型差异。表格“标记”列仍展示两侧取值。
     compareField('holdingAtFix', ai.holdingAtFix ?? false, jeppesen.holdingAtFix ?? false, (ai.holdingAtFix ?? false) === (jeppesen.holdingAtFix ?? false), 'WARNING'),
     compareField('endOfProcedure', ai.endOfProcedure ?? false, jeppesen.endOfProcedure ?? false, (ai.endOfProcedure ?? false) === (jeppesen.endOfProcedure ?? false), 'WARNING'),
   ];
