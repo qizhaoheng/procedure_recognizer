@@ -959,10 +959,14 @@ async function compareJeppesen424() {
         procedureCount: compareResult.renderSource.procedureCount,
         legCount: compareResult.renderSource.legCount,
       };
-      selectedGroup.value.geojsonRenderMode = 'AUTO';
-      selectedGroup.value.geojson = undefined;
-      selectedGroup.value.geojsonStatus = 'NOT_GENERATED';
-      selectedGroup.value.geojsonRenderSummary = undefined;
+      // 服务端已用新导入的 424 腿段就地重建 GeoJSON，直接应用，预览不再回到“待处理”
+      selectedGroup.value.geojsonRenderMode = compareResult.geojsonRenderMode ?? 'AUTO';
+      if (compareResult.geojson) {
+        selectedGroup.value.geojson = compareResult.geojson;
+        selectedGroup.value.geojsonStatus = compareResult.geojsonStatus ?? 'GENERATED';
+        selectedGroup.value.geojsonGeneratedAt = compareResult.geojsonGeneratedAt;
+        selectedGroup.value.geojsonRenderSummary = compareResult.geojsonRenderSummary;
+      }
     }
     message.value = 'Jeppesen 424 compare completed';
   } catch (compareError) {
