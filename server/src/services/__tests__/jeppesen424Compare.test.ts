@@ -154,6 +154,85 @@ describe('Jeppesen 424 multi-airport parsing (VHHH RNAV SID)', () => {
   });
 });
 
+// WSSS（新加坡）RNAV STAR 真实记录：跑道组 RW02B（B=全部平行跑道）、
+// 中途 EA 航路点（BOBAG/SAMKO）、导航台型短 Fix（PU/SJ + 1V 描述）
+const wsssStarSampleText = [
+  'SSPAP WSSSWSEARAM1A2RW02B 010ARAMAWMEA1E       IF                                             13000250    VTK  AWSD   GD   103012108',
+  'SSPAP WSSSWSEARAM1A2RW02B 010ARAMAWMEA2P                                                                                   103022013',
+  'SSPAP WSSSWSEARAM1A2RW02B 010ARAMAWMEA3E                    E0000P                                                    GD   103032013',
+  'SSPAP WSSSWSEARAM1A2RW02B 020BOBAGWIEA1E  H    TF                                 + 10000          220                GD   103042403',
+  'SSPAP WSSSWSEARAM1A2RW02B 020BOBAGWIEA2P                                  0410                                             103052403',
+  'SSPAP WSSSWSEARAM1A2RW02B 030BOKIPWSPC1E       TF                                 + 06000                             GD   103062303',
+  'SSPAP WSSSWSEARAM1A2RW02B 030BOKIPWSPC2P                                  0140                                             103072303',
+  'SSPAP WSSSWSEARAM1A2RW02B 040SAMKOWIEA1EE H    TF                                 + 04000          190                GD   103082403',
+  'SSPAP WSSSWSEARAM1A2RW02B 040SAMKOWIEA2P                                  0090                                             103092403',
+  'SSPAP WSSSWSELEBA2A2RW02B 020PU   WSD 1V       TF                                 + 07000                             GD   104162013',
+  'SSPAP WSSSWSELEBA2A2RW02B 020PU   WSD 2P                                  0350                                             104172013',
+].join('\n');
+
+describe('Jeppesen 424 WSSS parsing and runway-group alignment', () => {
+  const legs = parseJeppesen424Text(wsssStarSampleText);
+  const byKey = new Map(legs.map((leg) => [`${leg.routeKey}|${leg.sequence}`, leg]));
+
+  it('parses the ARAM1A transition with runway group RW02B', () => {
+    const arama = legs.filter((leg) => leg.routeKey === 'ARAM1A');
+    assert.equal(arama.length, 4);
+    assert.equal(arama[0].runway, 'RW02B');
+    const bobag = byKey.get('ARAM1A|020');
+    assert.equal(bobag?.holdingAtFix, true);
+    assert.equal(bobag?.altitudeValue, 10000);
+    assert.equal(bobag?.speedLimitKias, 220);
+    assert.equal(bobag?.distanceNm, 41);
+    assert.equal(bobag?.fixSection, 'EA');
+    const samko = byKey.get('ARAM1A|040');
+    assert.equal(samko?.endOfProcedure, true);
+    assert.equal(samko?.holdingAtFix, true);
+  });
+
+  it('parses navaid-type short fixes (PU + 1V descriptor)', () => {
+    const pu = byKey.get('LEBA2A|020');
+    assert.equal(pu?.fix, 'PU');
+    assert.equal(pu?.pathTerminator, 'TF');
+    assert.equal(pu?.altitudeValue, 7000);
+    assert.equal(pu?.distanceNm, 35);
+  });
+
+  it('adopts the AI runway for matched route codes so RW02B joins RW02L/02C/02R', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'WSSS',
+      runway: 'RWY02L/02C/02R',
+      packageType: 'STAR',
+      navigationType: 'RNAV',
+      procedures: [
+        {
+          procedureName: 'ARAMA 1A',
+          runway: 'RWY02L/02C/02R',
+          legs: [
+            { sequence: 10, fixIdentifier: 'ARAMA', pathTerminator: 'IF' },
+            { sequence: 20, fixIdentifier: 'BOBAG', pathTerminator: 'TF', distanceNm: 41, courseDegMag: 147, altitudeConstraint: { rawText: '+10000', altitudeFt: 10000 }, holdingAtFix: true },
+            { sequence: 30, fixIdentifier: 'BOKIP', pathTerminator: 'TF', distanceNm: 14, courseDegMag: 82, altitudeConstraint: { rawText: '+6000', altitudeFt: 6000 } },
+            { sequence: 40, fixIdentifier: 'SAMKO', pathTerminator: 'TF', distanceNm: 9, courseDegMag: 82, altitudeConstraint: { rawText: '+4000', altitudeFt: 4000 }, holdingAtFix: true },
+          ],
+        },
+      ],
+    });
+
+    const aligned = alignJeppesenProcedureNames(aiLegs, legs);
+    const arama = aligned.filter((leg) => leg.procedureName === 'ARAMA 1A');
+    assert.equal(arama.length, 4);
+    assert.equal(arama[0].runway, aiLegs[0].runway, 'aligned legs should adopt the AI runway string');
+    // 未匹配到 AI 的程序（LEBA2A）保留 424 原始跑道
+    assert.ok(aligned.some((leg) => leg.routeKey === 'LEBA2A' && leg.runway === 'RW02B'));
+
+    const [result] = compareSimpleProcedureLegs(aiLegs, arama);
+    assert.equal(result.procedureName, 'ARAMA 1A');
+    assert.equal(result.totalLegs, 4);
+    assert.equal(result.legResults.filter((leg) => leg.status === 'MISSING_AI' || leg.status === 'MISSING_JEPPESEN').length, 0);
+    // 真实差异只剩速度/导航台这类 AI 未识别字段，不应再有整腿缺失
+    assert.ok(result.score > 80, `expected joined comparison, got score ${result.score}`);
+  });
+});
+
 describe('Jeppesen 424 text compare MVP', () => {
   it('parses 1E records and merges 2P distances', () => {
     const legs = parseJeppesen424Text(sampleText);
