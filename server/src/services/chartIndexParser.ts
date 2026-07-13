@@ -1,9 +1,12 @@
 import type { ChartIndexItem, NavigationType, PackageType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
 
-const CHART_NO_PATTERN = /A\s*D\s*2\s*-\s*([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z])\s*-\s*(\d{1,2})\s*-\s*(\d{1,2}(?:\s+\d(?!\d))?)/i;
-// 香港等 AIP 的字母段图号，如 AD 2-VHHH-SID-BEKOL-A / AD 2-VHHH-IAC-04A / AD 2-VHHH-AC-DEP
-const LETTERED_CHART_NO_PATTERN = /AD\s*2\s*-\s*([A-Z]{4})\s*-\s*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*)/;
+// AD 与 2 之间允许连字符：新加坡等 AIP 写作 AD-2-WSSS-…
+const CHART_NO_PATTERN = /A\s*D\s*-?\s*2\s*-\s*([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z])\s*-\s*(\d{1,2})\s*-\s*(\d{1,2}(?:\s+\d(?!\d))?)/i;
+// 香港等 AIP 的字母段图号，如 AD 2-VHHH-SID-BEKOL-A / AD 2-VHHH-IAC-04A / AD 2-VHHH-AC-DEP；
+// 新加坡式带小数子页号，如 AD-2-WSSS-SID-1.1（图的翻页描述表）
+const LETTERED_CHART_NO_PATTERN = /AD\s*-?\s*2\s*-\s*([A-Z]{4})\s*-\s*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*(?:\.\d{1,2})?)/;
 const LETTERED_CHART_NO_PATTERN_GLOBAL = new RegExp(LETTERED_CHART_NO_PATTERN.source, 'g');
+const LETTERED_CHART_NO_LINE_PATTERN = new RegExp(`^${LETTERED_CHART_NO_PATTERN.source}$`);
 const PROGRAM_CHART_PATTERN = /STANDARD\s+DEPARTURE\s+CHART|STANDARD\s+ARRIVAL\s+CHART|INSTRUMENT\s+APPROACH\s+CHART/i;
 
 export function normalizeChartNo(raw?: string | null): string | undefined {
@@ -56,8 +59,14 @@ export function extractLikelyAipPageNo(raw?: string | null): string | undefined 
   // 窗口取大一些避免截断图号，但要求匹配起点在前 100 字符内。
   const head = raw.slice(0, 300);
   const match = head.toUpperCase().match(LETTERED_CHART_NO_PATTERN);
-  if (!match || (match.index ?? 0) >= 100) return undefined;
-  return `AD 2-${match[1]}-${match[2]}`;
+  if (match && (match.index ?? 0) < 100) return `AD 2-${match[1]}-${match[2]}`;
+  // 新加坡等 AIP 的图号印在图页页脚，文本层顺序不定可能落在中段；
+  // 但页脚图号独立成行，整行精确匹配可避免正文引用（引用总是嵌在语句行内）误配
+  for (const line of raw.split(/\r?\n/)) {
+    const lineMatch = line.trim().toUpperCase().match(LETTERED_CHART_NO_LINE_PATTERN);
+    if (lineMatch) return `AD 2-${lineMatch[1]}-${lineMatch[2]}`;
+  }
+  return undefined;
 }
 
 export function parseChartIndexFromPages(chartIndexPages: PdfPageAsset[]): ChartIndexItem[] {
@@ -112,6 +121,7 @@ function parseLetteredChartIndex(text: string): ChartIndexItem[] {
 function isIndexBoilerplateLine(line: string) {
   const upper = line.toUpperCase();
   if (/^AIP\b/.test(upper)) return true;
+  if (/^©/.test(upper)) return true;
   if (/^CIVIL AVIATION/.test(upper)) return true;
   if (/^HONG KONG$/.test(upper)) return true;
   if (/^AMENDMENT\b/.test(upper)) return true;
@@ -304,6 +314,11 @@ function stripProcedureChartWords(value: string) {
 function detectProcedureNames(text: string, navigationType: NavigationType) {
   const names = uniqueMatches(text, /\b[A-Z]{5}\s*\d[A-Z]\b/g).map(normalizeProcedureName);
   if (names.length) return names;
+  // 新加坡式图名以程序号收尾：RNAV (GNSS) SID - RWY 02C - VMR 6A（VOR 台名可短于 5 字母）
+  const trailing = text.split(/\s+-\s+/).pop()?.trim().toUpperCase();
+  if (trailing && !/^RWY/.test(trailing) && /^[A-Z]{2,5}\s?\d{1,2}[A-Z]$/.test(trailing)) {
+    return [normalizeProcedureName(trailing)];
+  }
   if (navigationType === 'RADAR') {
     const radar = text.match(/\bRADAR\s+([A-Z0-9 ]+?DEPARTURE|[A-Z0-9 ]+?ARRIVAL)\b/i)?.[1];
     return radar ? [normalizeProcedureName(radar)] : [];

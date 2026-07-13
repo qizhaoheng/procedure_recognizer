@@ -9,15 +9,15 @@ Classification — decide what each text is anchored to:
 - Node labels (`anchorType=FIX` or `NAVAID`): fix names, printed roles like `(IAF)`/`(IF)`,
   fix altitude labels, navaid ident/frequency boxes. Set `anchorIdent` to the fix/navaid ident.
   Combine text lines that the chart stacks at one node into ONE entry using `\n`
-  (e.g. `UDOSU (IAF)\n3000`). Never create two labelPlan entries for the same node.
+  (e.g. `<FIX> (IAF)\n3000`). Never create two labelPlan entries for the same node.
 - Segment labels (`anchorType=LEG`): course/distance text such as `072° 13.4` belongs to a leg,
   not to a waypoint. Set `procedureName` + `legSequence` (and `anchorIdent` to the leg's ending
   fix when known). These read along the leg, so use `placementAlongLine` and `sideOfLine`.
-- Track labels (`anchorType=PROCEDURE_TRACK`): procedure names like `EMTUV 1E` ride along the
+- Track labels (`anchorType=PROCEDURE_TRACK`): procedure names like `<FIX> 1E` ride along the
   procedure track. Airway labels printed before the entry fix (`W534`, `A224`) are
   `labelKind=NOTE` with `placementAlongLine=START`.
 - Arc / radial labels (`anchorType=DME_ARC` / `RADIAL`): texts like `11 DME ARC` or
-  `RDL-340 VJB / 160°` follow the arc or radial line. For RADIAL set `anchorIdent` to the
+  `RDL-340 <VOR> / 160°` follow the arc or radial line. For RADIAL set `anchorIdent` to the
   radial label ident (e.g. `RDL340`).
 
 Placement — put the text where a pilot expects it:

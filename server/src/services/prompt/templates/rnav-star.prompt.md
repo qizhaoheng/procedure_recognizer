@@ -24,35 +24,35 @@ RNAV chart labels:
 - Airway labels such as `W534`, `A224`, and `W401` describe the route before entering the
   STAR. Preserve them in `chartTexts` as chart-visible text, but do not attach them to
   `tableLegs[].remarks` and do not treat them as STAR leg names.
-- Procedure names such as `EMTUV 1E`, `PIMOK 1E`, `OMKOM 1E`, and `ADLOV 1E` are labels
+- Procedure names (fix name + designator, e.g. `<FIX> 1E`) are labels
   on the procedure track, not fix names. Do not append them to fix labels.
 - Course/distance text such as `072° 13.4` or `070° 6.0` describes the leg track and leg
   length. Put the numeric course and distance in `tableLegs[].courseDeg` and
   `tableLegs[].distanceNm`, and the corresponding `procedures[].legs[].courseDegMag` and
   `distanceNm`. Do not attach course/distance text to the waypoint label.
 - Fix labels should contain only the fix identifier, any printed role such as `(IAF)` or
-  `(IF)`, and any printed altitude. If the chart prints `EMTUV 6000`, output that as a fix
+  `(IF)`, and any printed altitude. If the chart prints `<FIX> 6000`, output that as a fix
   altitude label; do not add `(IF)` unless `(IF)` is actually printed.
 - Fix-label altitudes must be read from the chart label itself, not inferred from the next
-  leg's altitude constraint. If the chart label says `UDOSU (IAF) 3000`, preserve `3000`
+  leg's altitude constraint. If the chart label says `<FIX> (IAF) 3000`, preserve `3000`
   even if a nearby table leg has a different altitude constraint.
 - For shared segments, duplicate the leg in every related procedure but preserve the common
-  fix/course/distance labels. Example: EMTUV 1E and PIMOK 1E may share `UDOSU -> OSRUP`,
-  while ADLOV 1E and OMKOM 1E may share `GOVNU -> OSRUP`.
-- Capture final common inbound labels such as `OSRUP (IF) 2000 / 160°`. If the final inbound
+  fix/course/distance labels. Example: two arrivals may share the segment from a common
+  intermediate fix to the final inbound fix while other arrivals share a different one.
+- Capture final common inbound labels such as `<FIX> (IF) 2000 / 160°`. If the final inbound
   course is printed on the chart, include it in `chartTexts` and mention it in the relevant
   final-leg `remarks`.
 
 Label plan mapping (RNAV STAR):
-- Fix labels (`UDOSU (IAF) 3000`) → one `labelPlan` entry per fix: labelKind=FIX_NAME,
+- Fix labels (`<FIX> (IAF) 3000`) → one `labelPlan` entry per fix: labelKind=FIX_NAME,
   anchorType=FIX, text with `\n` between name/role line and altitude line.
 - Course/distance (`072° 13.4`) → labelKind=COURSE_DISTANCE, anchorType=LEG with
   procedureName + legSequence, placementAlongLine=MIDDLE, sideOfLine matching the chart.
-- Procedure names (`EMTUV 1E`) → labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK,
+- Procedure names (`<FIX> 1E`) → labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK,
   placementAlongLine=START.
 - Airway labels (`W534`, `A224`) → labelKind=NOTE, anchorType=PROCEDURE_TRACK,
   placementAlongLine=START (they describe the route before the entry fix).
-- Final inbound labels (`OSRUP (IF) 2000 / 160°`) → split: the fix part anchors to the fix,
+- Final inbound labels (`<FIX> (IF) 2000 / 160°`) → split: the fix part anchors to the fix,
   the course part (`160°`) anchors to the final leg as COURSE_DISTANCE.
 
 Holding patterns:
@@ -80,8 +80,8 @@ Altitude constraints:
 Recommended navaids / coded references:
 - Each tableLegs row has a `recommendedNavaid` field. Fill it on entry IF legs when the
   source explicitly references a VOR/DME for the procedure:
-  - a chart note such as "VJB VOR/DME REQUIRED" applies to the whole procedure — put that
-    navaid identifier (e.g. `VJB`) into `recommendedNavaid` of every entry IF leg;
+  - a chart note such as "<VOR> VOR/DME REQUIRED" applies to the whole procedure — put that
+    navaid identifier into `recommendedNavaid` of every entry IF leg;
   - a table row or 424-like coding that prints a navaid on the leg also counts.
 - Do not invent a recommended navaid from unrelated nearby labels. Leave it null on legs
   where nothing is referenced (typically all TF legs).
@@ -92,5 +92,5 @@ Guardrails:
   states the turn; do NOT infer L/R from how the drawn track bends at a waypoint.
   Legs coded from straight table rows keep turnDirection=null.
 - For RNAV STAR TF legs, `turnDirection` is normally null. Never put L/R on a final TF leg
-  such as OSRUP just because the drawn polyline bends into the waypoint.
+  just because the drawn polyline bends into the waypoint.
 - If chart images conflict with tabular descriptions, preserve the conflict in warnings and set reviewRequired=true.

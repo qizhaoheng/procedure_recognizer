@@ -29,8 +29,9 @@ export interface PageHeaderMetadata {
 export function parsePageHeader(page: PdfPageAsset): PageHeaderMetadata {
   const text = page.ocrText || page.textLayerText || '';
   const normalized = text.replace(/\s+/g, ' ').trim();
-  // 全文兜底只允许数字段图号：字母段图号在正文中常作为引用出现，任意位置匹配会误配
-  const aipPageNo = extractLikelyAipPageNo(normalized) || normalizeChartNo(page.aipPageNo) || normalizeNumericChartNo(normalized);
+  // 传原始文本保留换行（页脚图号独立成行）；字母段图号在正文中常作为引用出现，
+  // 任意位置的松散匹配会误配，只有整行匹配或页首匹配才可信
+  const aipPageNo = extractLikelyAipPageNo(text) || normalizeChartNo(page.aipPageNo) || normalizeNumericChartNo(normalized);
   const airportIcao = aipPageNo?.match(/AD\s*2-([A-Z]{4})-/i)?.[1];
   const chartTitle = page.chartTitle || detectChartTitle(text);
   const source = [chartTitle, normalized.slice(0, 900)].filter(Boolean).join(' ');

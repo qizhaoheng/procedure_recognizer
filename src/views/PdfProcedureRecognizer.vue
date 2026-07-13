@@ -2134,7 +2134,7 @@ function isCancelledError(value: unknown) {
             <div class="panel-head">
               <div>
                 <h2>粘贴 Jeppesen 424 静态文本</h2>
-                <p class="hint">MVP 只解析包含 SSPAP 的 WMKJ RWY16 STAR 记录，并按 procedure / runway / sequence 与当前 AI 结果对比。</p>
+                <p class="hint">支持任意机场的 SID / STAR / 进近全宽 424 记录（如 WMKJ 的 SSPAP、VHHH 的 SPACP），按 424 路线代码与当前 AI 程序对齐，逐腿对比 13 个字段。</p>
               </div>
               <button type="button" class="primary" :disabled="jeppesenCompareBusy || !jeppesenText.trim() || !procedureUnderstanding" @click="compareJeppesen424">
                 <RefreshCw :size="15" /> 开始对比
