@@ -553,6 +553,12 @@ export interface Jeppesen424CompareResponse {
     legCount: number;
     defaultRenderMode: 'AUTO';
   };
+  // 对比后服务端就地重建的 GeoJSON（预览无需重新点“生成”）
+  geojson?: ProcedureGroup['geojson'];
+  geojsonStatus?: ProcedureGroup['geojsonStatus'];
+  geojsonRenderMode?: ProcedureGroup['geojsonRenderMode'];
+  geojsonRenderSummary?: ProcedureGroup['geojsonRenderSummary'];
+  geojsonGeneratedAt?: string;
 }
 
 export interface AiRequestPreview {

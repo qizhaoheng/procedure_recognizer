@@ -616,11 +616,31 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
       legCount: parsedJeppesenLegs.length,
     };
     group.geojsonRenderMode = group.geojsonRenderMode ?? 'AUTO';
-    group.geojson = undefined;
-    group.geojsonStatus = 'NOT_GENERATED';
-    group.geojsonGeneratedAt = undefined;
-    group.geojsonError = undefined;
-    group.geojsonRenderSummary = undefined;
+    // 用新导入的 424 腿段就地重建 GeoJSON，预览保持可用（不清空回“待处理”）
+    try {
+      const renderPlan = buildProcedureRenderPlan(
+        group.procedureUnderstanding,
+        group,
+        parsedJeppesenLegs,
+        group.geojsonRenderMode,
+      );
+      group.geojsonRenderSummary = {
+        requestedMode: renderPlan.requestedMode,
+        source: renderPlan.source,
+        canonicalProcedureCount: renderPlan.canonicalProcedureCount,
+        canonicalLegCount: renderPlan.canonicalLegCount,
+        aiProcedureCount: renderPlan.aiProcedureCount,
+        warnings: renderPlan.warnings,
+      };
+      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group, task.pages, { renderPlan });
+      const geojsonValidation = validateProcedureGeoJson(group.geojson, group);
+      group.geojsonStatus = geojsonValidation.valid ? 'GENERATED' : 'ERROR';
+      group.geojsonGeneratedAt = geojsonValidation.valid ? new Date().toISOString() : undefined;
+      group.geojsonError = geojsonValidation.valid ? undefined : geojsonValidation.errors.join('; ');
+    } catch (renderError) {
+      // 重建失败时保留原有预览，只记录错误
+      group.geojsonError = renderError instanceof Error ? renderError.message : String(renderError);
+    }
     await saveTask(task);
 
     res.json({
@@ -647,6 +667,11 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
         legCount: parsedJeppesenLegs.length,
         defaultRenderMode: 'AUTO',
       },
+      geojson: group.geojson,
+      geojsonStatus: group.geojsonStatus,
+      geojsonRenderMode: group.geojsonRenderMode,
+      geojsonRenderSummary: group.geojsonRenderSummary,
+      geojsonGeneratedAt: group.geojsonGeneratedAt,
     });
   } catch (error) {
     next(error);
