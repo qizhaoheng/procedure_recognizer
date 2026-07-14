@@ -19,6 +19,7 @@ const pdfPreview = ref<{
   documentId: string;
   fileName: string;
   pageNumber: number;
+  mode: "document" | "page";
 }>();
 const packageFeedback = ref<Record<string, { state: string; message: string }>>(
   {},
@@ -56,6 +57,11 @@ const showingResult = computed(
 const pdfPreviewUrl = computed(() =>
   pdfPreview.value
     ? `/api/agent/tasks/${id}/documents/${pdfPreview.value.documentId}/file#page=${pdfPreview.value.pageNumber}`
+    : "",
+);
+const pageImageUrl = computed(() =>
+  pdfPreview.value
+    ? `/api/agent/tasks/${id}/documents/${pdfPreview.value.documentId}/pages/${pdfPreview.value.pageNumber}/image`
     : "",
 );
 const groupedPages = computed(() => {
@@ -229,7 +235,20 @@ async function loadResult(packageId: string) {
   }
 }
 function openPdf(documentId: string, pageNumber: number) {
-  pdfPreview.value = { documentId, fileName: docName(documentId), pageNumber };
+  pdfPreview.value = {
+    documentId,
+    fileName: docName(documentId),
+    pageNumber,
+    mode: "document",
+  };
+}
+function openPage(documentId: string, pageNumber: number) {
+  pdfPreview.value = {
+    documentId,
+    fileName: docName(documentId),
+    pageNumber,
+    mode: "page",
+  };
 }
 function fixName(fixId?: string) {
   return (
@@ -441,7 +460,13 @@ function msg(e: unknown) {
             </button>
             <div class="page-chips">
               <span v-for="page in pages" :key="page.pageNumber">
-                P{{ page.pageNumber }} · {{ page.pageRole }}
+                <button
+                  class="page-open"
+                  :title="`仅预览第 ${page.pageNumber} 页`"
+                  @click="openPage(docId, page.pageNumber)"
+                >
+                  P{{ page.pageNumber }} · {{ page.pageRole }}
+                </button>
                 <button aria-label="移除页面" @click="removePage(page)">
                   ×
                 </button>
@@ -475,6 +500,28 @@ function msg(e: unknown) {
           </div>
         </template>
         <section v-else class="inline-result">
+          <div class="result-sources">
+            <div
+              v-for="[docId, pages] in groupedPages"
+              :key="docId"
+              class="result-source-doc"
+            >
+              <button class="pdf-link" @click="openPdf(docId, pages[0]?.pageNumber || 1)">
+                <span>PDF</span>{{ docName(docId) }}
+              </button>
+              <div class="page-chips">
+                <span v-for="page in pages" :key="page.pageNumber">
+                  <button
+                    class="page-open"
+                    :title="`仅预览第 ${page.pageNumber} 页`"
+                    @click="openPage(docId, page.pageNumber)"
+                  >
+                    P{{ page.pageNumber }} · {{ page.pageRole }}
+                  </button>
+                </span>
+              </div>
+            </div>
+          </div>
           <div v-if="resultLoading" class="result-loading">
             <span class="mini-spinner"></span>正在加载识别结果…
           </div>
@@ -587,11 +634,25 @@ function msg(e: unknown) {
         <header>
           <div>
             <b>{{ pdfPreview.fileName }}</b
-            ><span>从 P{{ pdfPreview.pageNumber }} 开始预览</span>
+            ><span>{{
+              pdfPreview.mode === "page"
+                ? `仅预览第 ${pdfPreview.pageNumber} 页`
+                : `从 P${pdfPreview.pageNumber} 开始预览`
+            }}</span>
           </div>
           <button @click="pdfPreview = undefined">关闭</button>
         </header>
-        <iframe :src="pdfPreviewUrl" :title="pdfPreview.fileName"></iframe>
+        <div v-if="pdfPreview.mode === 'page'" class="page-image">
+          <img
+            :src="pageImageUrl"
+            :alt="`${pdfPreview.fileName} 第 ${pdfPreview.pageNumber} 页`"
+          />
+        </div>
+        <iframe
+          v-else
+          :src="pdfPreviewUrl"
+          :title="pdfPreview.fileName"
+        ></iframe>
       </article>
     </div>
   </main>
@@ -918,6 +979,27 @@ button:disabled {
   padding: 0 0 0 5px;
   cursor: pointer;
 }
+.page-chips .page-open {
+  color: #174ea6;
+  padding: 0;
+  font-size: inherit;
+}
+.page-chips .page-open:hover {
+  text-decoration: underline;
+}
+.result-sources {
+  flex: 0 0 auto;
+  margin-bottom: 8px;
+}
+.result-source-doc {
+  padding: 9px 12px;
+  background: #f5f8fb;
+  border-radius: 9px;
+  margin-bottom: 6px;
+}
+.result-source-doc .page-chips {
+  margin-top: 7px;
+}
 .add select,
 .info input,
 .info select {
@@ -1121,5 +1203,17 @@ button:disabled {
   flex: 1;
   width: 100%;
   border: 0;
+}
+.pdf-modal .page-image {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: #eef2f6;
+  padding: 14px;
+}
+.pdf-modal .page-image img {
+  display: block;
+  width: 100%;
+  box-shadow: 0 3px 16px #102a4326;
 }
 </style>
