@@ -11,6 +11,7 @@ describe('ARINC route-code derivation from chart titles', () => {
     assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE'), 'VAMOS4');
     assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE RWY16R'), 'VAMOS4');
     assert.equal(deriveRouteCode('TIARA TWO A DEPARTURE'), 'TIAR2A');
+    assert.equal(deriveRouteCode('RNAV EGOBA TWO CHARLIE DEPARTURE'), 'EGOB2C');
     assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE / DRAKY TRANSITION'), 'VAMOS4');
     assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE / TATEYAMA TRANSITION'), 'VAMOS4');
     assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE RWY34L/RWY34R'), 'VAMOS4');

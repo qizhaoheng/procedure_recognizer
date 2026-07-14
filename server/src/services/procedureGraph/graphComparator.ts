@@ -595,6 +595,17 @@ function compareDistance(ai: ProcedureGraphLeg, jeppesen: ProcedureGraphLeg, pat
       `${pathTerminator} legs have no fixed endpoint; the Jeppesen 2P value is not an AIP published distance.`,
     );
   }
+  // A DF leg's endpoint may be published while its along-track distance is not.
+  // Treat an absent AIP distance as non-comparable even when a supplier's 2P
+  // continuation was omitted during graph normalization.
+  if (pathTerminator === 'DF' && aiPublished == null) {
+    return uncomparableField(
+      'distanceNm',
+      null,
+      jeppesenVendor,
+      'AIP does not publish a distance for this DF leg; any Jeppesen extension is vendor-only.',
+    );
+  }
   if (aiPublished == null && jeppesenVendor != null) {
     return uncomparableField(
       'distanceNm',

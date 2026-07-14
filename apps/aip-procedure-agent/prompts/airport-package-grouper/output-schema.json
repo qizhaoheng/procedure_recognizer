@@ -1,0 +1,9 @@
+{
+  "type":"object","additionalProperties":false,"required":["airport","packages","unassignedPages","warnings","decisionSummary"],
+  "properties":{
+    "airport":{"type":"object","additionalProperties":false,"required":["icao","name","country"],"properties":{"icao":{"type":"string"},"name":{"type":"string"},"country":{"type":["string","null"]}}},
+    "packages":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["procedureKey","procedureCategory","procedureName","runways","navigationType","sources","sharedSources","groupingConfidence","groupingReason","warnings"],"properties":{"procedureKey":{"type":"string"},"procedureCategory":{"type":"string","enum":["SID","STAR","APPROACH"]},"procedureName":{"type":"string"},"runways":{"type":"array","items":{"type":"string"}},"navigationType":{"type":["string","null"]},"sources":{"type":"array","items":{"$ref":"#/$defs/source"}},"sharedSources":{"type":"array","items":{"$ref":"#/$defs/source"}},"groupingConfidence":{"type":"number"},"groupingReason":{"type":"string"},"warnings":{"type":"array","items":{"type":"string"}}}}},
+    "unassignedPages":{"type":"array","items":{"type":"object","additionalProperties":false,"required":["documentId","pageNumber","reason"],"properties":{"documentId":{"type":"string"},"pageNumber":{"type":"integer"},"reason":{"type":"string"}}}},"warnings":{"type":"array","items":{"type":"string"}},"decisionSummary":{"type":"string"}
+  },
+  "$defs":{"source":{"type":"object","additionalProperties":false,"required":["documentId","fileName","pages","roles"],"properties":{"documentId":{"type":"string"},"fileName":{"type":"string"},"pages":{"type":"array","items":{"type":"integer"}},"roles":{"type":"array","items":{"type":"string","enum":["PROCEDURE_CHART","PROCEDURE_TABLE","WAYPOINT_COORDINATE_TABLE","RUNWAY_DATA","NAVAID_DATA","GENERAL_NOTES","PROFILE_VIEW","MINIMA_TABLE","PROCEDURE_INDEX","RELATED"]}}}}}
+}
