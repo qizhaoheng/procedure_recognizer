@@ -1,7 +1,10 @@
 import type { ChartRole, NavigationType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
 import { classifyChartNoType, extractLikelyAipPageNo } from './chartIndexParser';
+import { assessPdfTextLayer } from './pdfTextDecoder';
 
 export function classifyPage(pageNo: number, text: string): PdfPageAsset {
+  const textAssessment = assessPdfTextLayer(text);
+  text = textAssessment.text;
   const normalized = text.replace(/\s+/g, ' ').trim();
   const upper = normalized.toUpperCase();
   let chartRole = detectChartRole(upper);
@@ -36,6 +39,8 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
     aipPageNo,
     textLayerText: text,
     ocrText: text,
+    textLayerQuality: textAssessment.quality,
+    textLayerWarnings: textAssessment.warnings,
     chartRole,
     procedureCategory,
     navigationType,
@@ -43,14 +48,15 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
     chartTitle,
     procedureNames,
     confidence,
-    reviewRequired: confidence < 0.72 || chartRole === 'UNKNOWN' || procedureCategory === 'UNKNOWN',
+    reviewRequired: confidence < 0.72 || chartRole === 'UNKNOWN' || procedureCategory === 'UNKNOWN' || textAssessment.quality === 'SUSPECT',
   };
 }
 
 function detectChartRole(upper: string): ChartRole {
   if (!upper.trim()) return 'BLANK';
   if (/INTENTIONALLY\s+(?:LEFT\s+)?BLANK/.test(upper)) return 'BLANK';
-  if (upper.includes('CHARTS RELATED TO AN AERODROME')) return 'CHART_INDEX';
+  // 韩国等 AIP 写作 CHARTS RELATED TO THE AERODROME
+  if (/CHARTS RELATED TO (?:AN|THE) AERODROME/.test(upper)) return 'CHART_INDEX';
   if (upper.includes('TABULAR DESCRIPTION')) return 'TABULAR_DESCRIPTION';
   if (upper.includes('WAYPOINT COORDINATES') || upper.includes('AERONAUTICAL DATA TABULATION')) return 'WAYPOINT_COORDINATES';
   if (/AD\s*2\.?\s*(12|18|19|20|21|22|23)\b/.test(upper)) return 'SUPPORT';

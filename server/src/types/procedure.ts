@@ -80,6 +80,12 @@ export interface SupportingInfoSummary {
   sourcePages: SupportingInfoRefs;
 }
 
+export interface TaskSourceFile {
+  fileName: string;
+  startPageNo: number;
+  pageCount: number;
+}
+
 export interface ProcedureTask {
   taskId: string;
   fileName: string;
@@ -90,6 +96,8 @@ export interface ProcedureTask {
   createdAt: string;
   updatedAt: string;
   error?: string;
+  // 日/韩式 AIP 一个机场拆成多份 PDF，上传时合并为单文件；此处保留原始文件与页码区间的映射
+  sourceFiles?: TaskSourceFile[];
 }
 
 export interface PdfPageAsset {
@@ -101,6 +109,8 @@ export interface PdfPageAsset {
   sourceHeightPt?: number;
   textLayerText?: string;
   ocrText?: string;
+  textLayerQuality?: 'USABLE' | 'DECODED' | 'SUSPECT' | 'EMPTY';
+  textLayerWarnings?: string[];
   chartRole: ChartRole;
   procedureCategory: ProcedureCategory;
   navigationType: NavigationType;
@@ -116,6 +126,8 @@ export interface PdfPageAsset {
   headerMatchedPackageId?: string;
   matchedPackageId?: string;
   groupingReason?: string[];
+  // 多文件合并任务里该页来自哪个原始文件（日式 AIP 文件名承载 AD 2.24 小节结构）
+  sourceFileName?: string;
 }
 
 export interface ProcedureGroup {
@@ -528,6 +540,8 @@ export interface ProcedureUnderstandingResult {
 export interface ProcedureUnderstandingProcedure {
   procedureName?: string | null;
   runway?: string | null;
+  /** Named enroute transition for a runway-independent route branch. */
+  transitionName?: string | null;
   navigationSpec?: string | null;
   legs?: Array<Record<string, unknown>>;
   sourceEvidenceIds?: string[];

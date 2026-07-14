@@ -187,6 +187,41 @@ describe('Jeppesen 424 export', () => {
     assert.match(exported, /WMKJWMEMABI2A2RW16  010MABIX/);
   });
 
+  it('exports and reparses named enroute transitions as route-type 3 records', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'RJTT',
+      packageType: 'SID',
+      procedures: [{
+        procedureName: 'VAMOS FOUR DEPARTURE',
+        runway: null,
+        transitionName: 'DRAKY',
+        legs: [
+          { sequence: 10, fixIdentifier: 'VAMOS', pathTerminator: 'IF', altitudeConstraint: { rawText: '+09000', altitudeFt: 9000 } },
+          { sequence: 15, fixIdentifier: 'DRAKY', pathTerminator: 'TF', distanceNm: 22.2 },
+        ],
+      }],
+    });
+    const exported = simpleLegsTo424Text(aiLegs, { airportIcao: 'RJTT' });
+    assert.match(exported, /RJTTRJEVAMOS43DRAKY 010VAMOS/);
+    const reparsed = parseJeppesen424Text(exported);
+    assert.equal(reparsed.length, 2);
+    assert.ok(reparsed.every((leg) => leg.transitionName === 'DRAKY' && leg.runway === ''));
+  });
+
+  it('encodes same-number parallel runway lists as the ARINC B runway group', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'RJTT',
+      procedures: [{
+        procedureName: 'VAMOS FOUR DEPARTURE RWY34L/RWY34R',
+        runway: 'RWY34L/RWY34R',
+        legs: [{ sequence: 10, pathTerminator: 'VA', courseDegMag: 338, altitudeConstraint: { rawText: '+00700', altitudeFt: 700 } }],
+      }],
+    });
+    assert.equal(aiLegs[0].runway, 'RW34B');
+    const exported = simpleLegsTo424Text(aiLegs, { airportIcao: 'RJTT' });
+    assert.match(exported, /VAMOS42RW34B/);
+  });
+
   it('rejects legs it cannot encode with a descriptive error', () => {
     const aiLegs = aiProcedureToSimpleLegs({
       airportIcao: 'WMKJ',

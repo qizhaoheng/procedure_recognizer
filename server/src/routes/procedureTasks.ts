@@ -21,11 +21,11 @@ import { savePromptRunRecord } from '../services/prompt/promptRunStore';
 import { buildAiRequestPreview } from '../services/promptBuilder';
 import { buildGeoJsonFromProcedureUnderstanding } from '../services/procedureUnderstandingGeojson';
 import { buildProcedureRenderPlan } from '../services/rendering/procedureRenderPlan';
-import { normalizeProcedureUnderstandingResult } from '../services/procedureUnderstandingNormalizer';
+import { airportIcaoFromGroup, normalizeProcedureUnderstandingResult } from '../services/procedureUnderstandingNormalizer';
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
 import { getLlmRuntimeConfig } from '../services/llm/llmClient';
-import type { EvaluationResult, GeoJsonRenderMode, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
+import type { AiInputPackage, EvaluationResult, GeoJsonRenderMode, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
 import type { BuiltPrompt, PromptRunRecord } from '../services/prompt/promptTypes';
 
 const router = express.Router();
@@ -57,15 +57,55 @@ router.get('/', async (_req, res, next) => {
   }
 });
 
-router.post('/upload', upload.single('file'), async (req, res, next) => {
+const uploadFields = upload.fields([
+  { name: 'file', maxCount: 1 },
+  { name: 'files', maxCount: 300 },
+]);
+
+router.post('/upload', uploadFields, async (req, res, next) => {
   try {
-    if (!req.file) return res.status(400).json({ error: '缺少 PDF 文件。' });
-    const task = await createTask(req.file.originalname, req.file.path);
-    return res.json({ taskId: task.taskId, fileName: task.fileName, status: task.status });
+    const bucket = (req.files ?? {}) as Record<string, Express.Multer.File[]>;
+    const files = [...(bucket.file ?? []), ...(bucket.files ?? [])];
+    if (!files.length) return res.status(400).json({ error: '缺少 PDF 文件。' });
+
+    if (files.length === 1) {
+      const task = await createTask(files[0].originalname, files[0].path);
+      return res.json({ taskId: task.taskId, fileName: task.fileName, status: task.status });
+    }
+
+    // 日/韩式 AIP 一个机场拆成多份 PDF：按文件名自然序合并成单文件，下游管线保持"一任务一 PDF"
+    const merged = await mergeUploadedPdfFiles(files);
+    const task = await createTask(merged.fileName, merged.filePath, merged.sourceFiles);
+    return res.json({ taskId: task.taskId, fileName: task.fileName, status: task.status, sourceFiles: task.sourceFiles });
   } catch (error) {
     return next(error);
   }
 });
+
+async function mergeUploadedPdfFiles(files: Express.Multer.File[]) {
+  const ordered = [...files].sort((a, b) =>
+    a.originalname.localeCompare(b.originalname, 'en', { numeric: true, sensitivity: 'base' }),
+  );
+  const mergedDoc = await PDFDocument.create();
+  const sourceFiles: Array<{ fileName: string; startPageNo: number; pageCount: number }> = [];
+
+  for (const file of ordered) {
+    const source = await PDFDocument.load(await fs.readFile(file.path), { ignoreEncryption: true });
+    const copied = await mergedDoc.copyPages(source, source.getPageIndices());
+    sourceFiles.push({
+      fileName: file.originalname,
+      startPageNo: mergedDoc.getPageCount() + 1,
+      pageCount: copied.length,
+    });
+    for (const page of copied) mergedDoc.addPage(page);
+  }
+
+  const fileName = `${ordered[0].originalname.replace(/\.pdf$/i, '')} 等${ordered.length}个文件（合并）.pdf`;
+  const filePath = path.join(getUploadDir(), `${Date.now()}-merged-${ordered.length}files.pdf`);
+  await fs.writeFile(filePath, await mergedDoc.save());
+  for (const file of ordered) await fs.unlink(file.path).catch(() => undefined);
+  return { fileName, filePath, sourceFiles };
+}
 
 router.post('/:taskId/parse', async (req, res, next) => {
   try {
@@ -430,13 +470,14 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
   const runKey = recognitionRunKey(req.params.taskId, req.params.packageId);
   activeRecognitionRuns.get(runKey)?.abort(new Error('Superseded by a new recognition run.'));
   const abortController = new AbortController();
+  const mergeWithExisting = req.body?.mergeWithExisting === true;
   activeRecognitionRuns.set(runKey, abortController);
   try {
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
       group.status = 'AI_RUNNING';
       group.aiResponse = undefined;
-      group.procedureUnderstanding = undefined;
+      if (!mergeWithExisting) group.procedureUnderstanding = undefined;
       group.visionRunRecord = undefined;
       group.recognitionEvaluation = undefined;
       // 旧识别结果对应的 GeoJSON 已失效，避免预览显示陈旧轨迹
@@ -452,7 +493,16 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
     const group = findGroup(task.groups, req.params.packageId);
     const packageId = group.packageId || group.groupId;
     model = String(req.body?.model || getLlmRuntimeConfig().model);
-    const aiInputPackage = buildAiInputPackage(group, task.pages, model);
+    const fullAiInputPackage = buildAiInputPackage(group, task.pages, model);
+    const requestedPageNos = Array.isArray(req.body?.pageNos)
+      ? req.body.pageNos.map(Number).filter((value: number) => Number.isInteger(value) && value > 0)
+      : [];
+    const aiInputPackage = requestedPageNos.length
+      ? subsetAiInputPackage(fullAiInputPackage, requestedPageNos)
+      : fullAiInputPackage;
+    if (!aiInputPackage.includedImages.length) {
+      throw new Error(`指定页批次没有可发送的图像：${requestedPageNos.join(', ')}`);
+    }
     builtPrompt = await buildProcedurePrompt({
       taskId: task.taskId,
       packageId,
@@ -477,7 +527,10 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       createdAt: new Date().toISOString(),
     };
     group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model, abortController.signal);
-    group.aiResponse.parsedJson = normalizeProcedureUnderstandingResult(group.aiResponse.parsedJson, group, aiInputPackage);
+    const normalizedResult = normalizeProcedureUnderstandingResult(group.aiResponse.parsedJson, group, aiInputPackage) as ProcedureUnderstandingResult;
+    group.aiResponse.parsedJson = mergeWithExisting && group.procedureUnderstanding
+      ? mergeProcedureUnderstandingResults(group.procedureUnderstanding, normalizedResult)
+      : normalizedResult;
     const completedAt = new Date().toISOString();
     const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson, builtPrompt.responseSchema);
     const validationErrorMessage = validationResult.schemaValid ? undefined : schemaValidationMessage(validationResult.errors);
@@ -694,7 +747,7 @@ router.get('/:taskId/packages/:packageId/jeppesen424/export', async (req, res, n
     let text: string;
     try {
       text = simpleLegsTo424Text(aiLegs, {
-        airportIcao: group.procedureUnderstanding.airportIcao ?? undefined,
+        airportIcao: group.procedureUnderstanding.airportIcao ?? airportIcaoFromGroup(group) ?? undefined,
         holdingFixes,
       });
     } catch (error) {
@@ -810,6 +863,232 @@ function normalizeRunway(value: unknown) {
   const text = normalizeCompareText(value).replace(/\s+/g, '').replace(/^RWY/, 'RW');
   if (!text) return '';
   return text.startsWith('RW') ? text : `RW${text}`;
+}
+
+function subsetAiInputPackage(input: AiInputPackage, pageNos: number[]): AiInputPackage {
+  const allowed = new Set(pageNos);
+  return {
+    ...input,
+    corePages: input.corePages.filter((page) => allowed.has(page.pageNo)),
+    includedImages: input.includedImages.filter((page) => allowed.has(page.pageNo)),
+  };
+}
+
+export function mergeProcedureUnderstandingResults(
+  existing: ProcedureUnderstandingResult,
+  incomingValue: ProcedureUnderstandingResult,
+): ProcedureUnderstandingResult {
+  const incoming = namespaceCollidingEvidence(existing, incomingValue);
+  const classification = {
+    ...(existing.procedureClassification ?? {}),
+    ...(incoming.procedureClassification ?? {}),
+    procedureNames: uniqueStrings([
+      ...(existing.procedureClassification?.procedureNames ?? []),
+      ...(incoming.procedureClassification?.procedureNames ?? []),
+    ]),
+  };
+  return {
+    ...existing,
+    ...incoming,
+    airportIcao: incoming.airportIcao ?? existing.airportIcao,
+    airportName: incoming.airportName ?? existing.airportName,
+    packageType: incoming.packageType ?? existing.packageType,
+    procedureCategory: incoming.procedureCategory ?? existing.procedureCategory,
+    navigationType: incoming.navigationType ?? existing.navigationType,
+    runway: incoming.runway ?? existing.runway,
+    procedureClassification: classification,
+    procedures: normalizeMergedProcedureVariants(removeLowConfidencePlaceholders(
+      mergeByKey(existing.procedures ?? [], incoming.procedures ?? [], procedureIdentity),
+    )),
+    tableLegs: removeCoveredTableLegVariants(
+      mergeByKey(existing.tableLegs ?? [], incoming.tableLegs ?? [], tableLegIdentity),
+    ),
+    fixes: mergeRecordsByKey(existing.fixes ?? [], incoming.fixes ?? [], (item) => normalizedKey(item.identifier ?? item.fixIdentifier)),
+    navaids: mergeRecordsByKey(existing.navaids ?? [], incoming.navaids ?? [], (item) => normalizedKey(item.identifier ?? item.ident)),
+    runways: mergeRecordsByKey(existing.runways ?? [], incoming.runways ?? [], (item) => normalizedKey(item.identifier ?? item.runway)),
+    chartTexts: mergeDistinct(existing.chartTexts ?? [], incoming.chartTexts ?? []),
+    geometrySemantics: mergeDistinct(existing.geometrySemantics ?? [], incoming.geometrySemantics ?? []),
+    labelPlan: mergeDistinct(existing.labelPlan ?? [], incoming.labelPlan ?? []),
+    supportObjects: mergeDistinct(existing.supportObjects ?? [], incoming.supportObjects ?? []),
+    communications: mergeDistinct(existing.communications ?? [], incoming.communications ?? []),
+    holdings: mergeDistinct(existing.holdings ?? [], incoming.holdings ?? []),
+    msa: mergeDistinct(existing.msa ?? [], incoming.msa ?? []),
+    sourceEvidence: mergeByKey(existing.sourceEvidence ?? [], incoming.sourceEvidence ?? [], (item) => normalizedKey(item.id)),
+    warnings: mergeDistinct(existing.warnings ?? [], incoming.warnings ?? []),
+    confidence: averageDefined(existing.confidence, incoming.confidence),
+    reviewRequired: Boolean(existing.reviewRequired || incoming.reviewRequired),
+  };
+}
+
+function namespaceCollidingEvidence(
+  existing: ProcedureUnderstandingResult,
+  incoming: ProcedureUnderstandingResult,
+): ProcedureUnderstandingResult {
+  const used = new Set((existing.sourceEvidence ?? []).map((item) => String(item.id ?? '')));
+  const replacements = new Map<string, string>();
+  let index = 1;
+  for (const item of incoming.sourceEvidence ?? []) {
+    const id = String(item.id ?? '');
+    if (!id || !used.has(id)) continue;
+    let replacement = `batch_${index}_${id}`;
+    while (used.has(replacement)) replacement = `batch_${++index}_${id}`;
+    replacements.set(id, replacement);
+    used.add(replacement);
+    index += 1;
+  }
+  if (!replacements.size) return incoming;
+  const rewrite = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(rewrite);
+    if (!value || typeof value !== 'object') return value;
+    const output: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+      if (key === 'id' && typeof child === 'string' && replacements.has(child)) {
+        output[key] = replacements.get(child);
+      } else if ((key === 'sourceEvidenceId' || key === 'evidenceId') && typeof child === 'string') {
+        output[key] = replacements.get(child) ?? child;
+      } else if (key === 'sourceEvidenceIds' && Array.isArray(child)) {
+        output[key] = child.map((id) => replacements.get(String(id)) ?? id);
+      } else {
+        output[key] = rewrite(child);
+      }
+    }
+    return output;
+  };
+  return rewrite(incoming) as ProcedureUnderstandingResult;
+}
+
+function procedureIdentity(item: Record<string, unknown>) {
+  return [
+    procedureFamilyKey(item.procedureName),
+    runwayVariantKey(item.runway),
+    transitionVariantKey(item.transitionName),
+  ].join('|');
+}
+
+function removeLowConfidencePlaceholders<T extends { legs?: unknown[]; confidence?: number }>(procedures: T[]) {
+  if (!procedures.some((item) => (item.legs?.length ?? 0) > 0)) return procedures;
+  return procedures.filter((item) => (item.legs?.length ?? 0) > 0 || Number(item.confidence ?? 0) > 0.5);
+}
+
+function normalizeMergedProcedureVariants<T extends Record<string, unknown>>(procedures: T[]) {
+  const normalized = procedures.map((item) => ({
+    ...item,
+    transitionName: typeof item.transitionName === 'string'
+      ? item.transitionName.replace(/\s+TRANSITION$/i, '').trim()
+      : item.transitionName,
+  } as T));
+  const coveredSingles = new Set<string>();
+  for (const item of normalized) {
+    const runway = runwayVariantKey(item.runway);
+    if (!runway.includes('/')) continue;
+    const family = procedureFamilyKey(item.procedureName);
+    for (const member of runway.split('/').filter(Boolean)) {
+      coveredSingles.add(`${family}|${member}`);
+    }
+  }
+  return normalized.filter((item) => {
+    const runway = runwayVariantKey(item.runway);
+    if (!runway || runway.includes('/')) return true;
+    return !coveredSingles.has(`${procedureFamilyKey(item.procedureName)}|${runway}`);
+  });
+}
+
+function tableLegIdentity(item: Record<string, unknown>) {
+  const name = normalizedKey(item.procedureName);
+  return [
+    procedureFamilyKey(name),
+    runwayVariantKey(runwayFromProcedureName(name)),
+    transitionFromProcedureName(name),
+    item.sequence,
+  ].map(normalizedKey).join('|');
+}
+
+function removeCoveredTableLegVariants<T extends Record<string, unknown>>(legs: T[]) {
+  const coveredSingles = new Set<string>();
+  for (const leg of legs) {
+    const name = normalizedKey(leg.procedureName);
+    const runway = runwayVariantKey(runwayFromProcedureName(name));
+    if (!runway.includes('/')) continue;
+    const family = procedureFamilyKey(name);
+    for (const member of runway.split('/').filter(Boolean)) coveredSingles.add(`${family}|${member}`);
+  }
+  return legs.filter((leg) => {
+    const name = normalizedKey(leg.procedureName);
+    const runway = runwayVariantKey(runwayFromProcedureName(name));
+    if (!runway || runway.includes('/')) return true;
+    return !coveredSingles.has(`${procedureFamilyKey(name)}|${runway}`);
+  });
+}
+
+function procedureFamilyKey(value: unknown) {
+  return normalizedKey(value)
+    .replace(/\s*\/\s*[A-Z0-9 -]+\s+TRANSITION$/, '')
+    .replace(/\s+RWY?\s*\d{2}[LRCB]?(?:\s*\/\s*(?:RWY?\s*)?\d{2}[LRCB]?)*$/, '')
+    .replace(/\s+(?:DEPARTURE|ARRIVAL)$/, '')
+    .trim();
+}
+
+function runwayFromProcedureName(value: string) {
+  return value.match(/RWY?\s*\d{2}[LRCB]?(?:\s*\/\s*(?:RWY?\s*)?\d{2}[LRCB]?)*$/)?.[0] ?? '';
+}
+
+function transitionFromProcedureName(value: string) {
+  return value.match(/\/\s*([A-Z0-9 -]+)\s+TRANSITION$/)?.[1]?.trim().slice(0, 5) ?? '';
+}
+
+function runwayVariantKey(value: unknown) {
+  return normalizedKey(value).replace(/\s+/g, '').replace(/RWY?/g, '');
+}
+
+function transitionVariantKey(value: unknown) {
+  return normalizedKey(value).slice(0, 5);
+}
+
+function mergeByKey<T>(existing: T[], incoming: T[], keyOf: (item: T) => string) {
+  const merged = new Map<string, T>();
+  for (const item of existing) merged.set(keyOf(item), item);
+  for (const item of incoming) merged.set(keyOf(item), item);
+  return [...merged.values()];
+}
+
+function mergeRecordsByKey<T extends Record<string, unknown>>(
+  existing: T[],
+  incoming: T[],
+  keyOf: (item: T) => string,
+) {
+  const merged = new Map<string, T>();
+  for (const item of existing) merged.set(keyOf(item), item);
+  for (const item of incoming) {
+    const key = keyOf(item);
+    const previous = merged.get(key);
+    if (!previous) {
+      merged.set(key, item);
+      continue;
+    }
+    const nonNullIncoming = Object.fromEntries(
+      Object.entries(item).filter(([, value]) => value !== null && value !== undefined && value !== ''),
+    );
+    merged.set(key, { ...previous, ...nonNullIncoming } as T);
+  }
+  return [...merged.values()];
+}
+
+function mergeDistinct<T>(existing: T[], incoming: T[]) {
+  return mergeByKey(existing, incoming, (item) => JSON.stringify(item));
+}
+
+function normalizedKey(value: unknown) {
+  return String(value ?? '').trim().toUpperCase();
+}
+
+function uniqueStrings(values: string[]) {
+  return [...new Set(values.map((value) => String(value).trim()).filter(Boolean))];
+}
+
+function averageDefined(a: number | undefined, b: number | undefined) {
+  if (a === undefined) return b;
+  if (b === undefined) return a;
+  return (a + b) / 2;
 }
 
 function groupBaseName(group: ProcedureGroup) {

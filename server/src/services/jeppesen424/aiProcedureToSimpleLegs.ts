@@ -28,7 +28,12 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         ?? procedure.procedureName
         ?? '',
     );
-    const runway = normalizeRunway(procedure.runway ?? procedureUnderstanding.runway ?? '');
+    // ARINC 424 transition qualifiers are five characters; retain the full
+    // printed name in ProcedureUnderstanding, but use its canonical qualifier here.
+    const transitionName = normalizedText(procedure.transitionName ?? '').slice(0, 5) || undefined;
+    const runway = transitionName
+      ? ''
+      : normalizeRunway(procedure.runway ?? procedureUnderstanding.runway ?? '');
     const legs = procedure.legs ?? [];
     const sequences = legs.map((leg) => Number((leg as Record<string, unknown>).sequence)).filter(Number.isFinite);
     const firstSequence = sequences.length ? Math.min(...sequences) : undefined;
@@ -51,6 +56,7 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
       return {
         procedureName,
         runway,
+        transitionName,
         routeKey: '',
         sequence: normalizeSequence(record.sequence),
         fix,
@@ -83,9 +89,13 @@ function normalizeSequence(value: unknown) {
 }
 
 function normalizeRunway(value: unknown) {
-  const text = normalizedText(value).replace(/\s+/g, '').replace(/^RWY/, 'RW');
+  const text = normalizedText(value).replace(/\s+/g, '').replace(/RWY/g, 'RW');
   if (!text) return '';
-  return text.startsWith('RW') ? text : `RW${text}`;
+  const normalized = text.startsWith('RW') ? text : `RW${text}`;
+  const members = normalized.split('/').map((member) => member.replace(/^RW/, ''));
+  const runwayNumbers = [...new Set(members.map((member) => member.match(/^\d{2}/)?.[0]).filter(Boolean))];
+  if (members.length > 1 && runwayNumbers.length === 1) return `RW${runwayNumbers[0]}B`;
+  return normalized;
 }
 
 function normalizedText(value: unknown) {

@@ -1,5 +1,5 @@
 import type { AipAdStructure, ChartIndexItem, PdfPageAsset, ProcedureGroup, SupportPageRef } from '../types/procedure';
-import { buildNormalizedGroupKey, normalizeChartNo } from './chartIndexParser';
+import { buildNormalizedGroupKey, classifyChartNoType, normalizeChartNo } from './chartIndexParser';
 import { extractAipAdStructure } from './documentStructureExtractor';
 import { pageHeaderToIndexItem, parsePageHeader } from './pageHeaderParser';
 import { detectSupportType, refsForPackage } from './supportingInfoExtractor';
@@ -198,7 +198,12 @@ function stageTwoHeaderCompletion(state: GroupingState, packagesByKey: Map<strin
     const item = pageHeaderToIndexItem(page);
     if (!item || !isProgramPackage(item)) continue;
 
-    const key = buildNormalizedGroupKey(item);
+    // 日本式 AIP 没有可解析的 AD 2.24 目录，但每页页脚图号（AD 2-RJTT-SID-27）唯一标识一张图；
+    // 部分页文本层乱码导致程序名缺失，标题派生键会把不相关的图并成一包，此时图号是唯一可靠分组键
+    const chartNoKind = classifyChartNoType(item.chartNo);
+    const sourceFileKey = splitAipSourceFileKey(state, page, item);
+    const useChartNoAsKey = !sourceFileKey && !state.structure.chartIndexItems.length && chartNoKind?.role === 'CHART';
+    const key = sourceFileKey || (useChartNoAsKey ? item.chartNo : buildNormalizedGroupKey(item));
     let group = packagesByKey.get(key);
     if (!group) {
       group = createPackageFromItem(item, key, packagesByKey.size + 1, 'PAGE_HEADER_RULE', 0.72);
@@ -211,6 +216,27 @@ function stageTwoHeaderCompletion(state: GroupingState, packagesByKey: Map<strin
   }
 }
 
+/**
+ * Some eAIPs publish one procedure family as one AD 2.24 source PDF containing
+ * chart, narrative, coding and waypoint pages with different footer numbers.
+ * The source-document boundary is stronger evidence than treating every footer
+ * as an unrelated procedure. Numeric chart books (for example one SID book with
+ * many procedures) do not enter this path.
+ */
+function splitAipSourceFileKey(state: GroupingState, page: PdfPageAsset, item: ChartIndexItem) {
+  if (state.structure.chartIndexItems.length || !page.sourceFileName) return undefined;
+  if (!/^AD 2-[A-Z]{4}-(?:SID|STAR|IAC)-\d+$/i.test(item.chartNo)) return undefined;
+
+  const programTypes = new Set(
+    state.structure.pages
+      .filter((candidate) => candidate.sourceFileName === page.sourceFileName && candidate.chartRole === 'CHART')
+      .map((candidate) => pageHeaderToIndexItem(candidate)?.packageType)
+      .filter((type): type is 'SID' | 'STAR' | 'APPROACH' => type === 'SID' || type === 'STAR' || type === 'APPROACH'),
+  );
+  if (programTypes.size !== 1 || !programTypes.has(item.packageType as 'SID' | 'STAR' | 'APPROACH')) return undefined;
+  return `SOURCE_FILE:${page.sourceFileName.toUpperCase()}`;
+}
+
 function stageThreeSequentialCompletion(state: GroupingState, packages: ProcedureGroup[]) {
   const pagesByNo = new Map(state.structure.pages.map((page) => [page.pageNo, page]));
   for (const group of packages) {
@@ -220,7 +246,10 @@ function stageThreeSequentialCompletion(state: GroupingState, packages: Procedur
 
     for (let offset = 1; offset <= 3; offset += 1) {
       const page = pagesByNo.get(seedPageNo + offset);
-      if (!page || page.matchedPackageId || shouldNeverCreatePackage(page)) continue;
+      if (!page || page.matchedPackageId) continue;
+      // These pages may never be appended to a procedure package. Tabular,
+      // coordinate and minima roles are intentionally handled immediately below.
+      if (['BLANK', 'CHART_INDEX', 'SUPPORT'].includes(page.chartRole)) continue;
       if (!['TABULAR_DESCRIPTION', 'WAYPOINT_COORDINATES', 'MINIMA_TABLE'].includes(page.chartRole)) continue;
       if (!isCompatibleSequentialPage(group, seedPage, page)) continue;
 
@@ -367,7 +396,10 @@ function groupItemsByKey(items: ChartIndexItem[]) {
 
 function shouldNeverCreatePackage(page: PdfPageAsset) {
   if (['BLANK', 'CHART_INDEX', 'TABULAR_DESCRIPTION', 'WAYPOINT_COORDINATES', 'MINIMA_TABLE'].includes(page.chartRole)) return true;
-  if (detectSupportType(page)) return true;
+  // Procedure charts often contain words such as OBSTACLE, TMA or FLIGHT PROCEDURES.
+  // Those are chart annotations, not evidence that the whole page is support material.
+  // Page classification plus an explicit ICAO procedure-chart title are stronger signals.
+  if (page.chartRole !== 'CHART' && detectSupportType(page)) return true;
   const text = `${page.chartTitle || ''} ${page.ocrText || page.textLayerText || ''}`.toUpperCase();
   if (/AERODROME HELIPORT CHART|AERODROME CHART|AIRCRAFT PARKING|GROUND MOVEMENT|PARKING\/DOCKING|OBSTACLE CHART|ATC SURVEILLANCE|HOLDING AREAS|TMA|CTR/.test(text)) return true;
   return false;
@@ -396,6 +428,13 @@ function isCompatibleSequentialPage(group: ProcedureGroup, seedPage: PdfPageAsse
 }
 
 function isSequentialChartNo(seedChartNo: string, candidateChartNo: string) {
+  // 韩国式"图 + 官方编码表"成对：图面页 AD 2-RKSI-28，编码表页 AD 2-RKSI-28-1，
+  // 子页号是父图号加短数字后缀（与新加坡式小数子页号同构）
+  const normalizedSeed = normalizeChartNo(seedChartNo) || seedChartNo;
+  const normalizedCandidate = normalizeChartNo(candidateChartNo) || candidateChartNo;
+  if (normalizedCandidate.startsWith(normalizedSeed) && /^[-.]\d{1,2}$/.test(normalizedCandidate.slice(normalizedSeed.length))) {
+    return true;
+  }
   const seed = parseChartNoParts(seedChartNo);
   const candidate = parseChartNoParts(candidateChartNo);
   if (!seed || !candidate) return false;

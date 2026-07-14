@@ -44,6 +44,7 @@ const PATH_TERMINATORS = ['IF', 'TF', 'CA', 'CI', 'CR', 'AF', 'CF', 'DF', 'RF', 
 interface PartialLeg {
   procedureName: string;
   runway: string;
+  transitionName?: string;
   routeKey: string;
   sequence: string;
   fix: string;
@@ -78,10 +79,11 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
     const leg = parseLegRecord(line, route.routeText);
     if (!leg) continue;
 
-    const key = `${route.routeCode}|${route.runway}|${leg.sequence}`;
+    const key = `${route.routeCode}|${route.runway}|${route.transitionName ?? ''}|${leg.sequence}`;
     const current = merged.get(key) ?? {
       procedureName: route.procedureName,
       runway: route.runway,
+      transitionName: route.transitionName,
       routeKey: route.routeCode,
       sequence: leg.sequence,
       fix: leg.fix,
@@ -124,6 +126,7 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
     .map((item) => ({
       procedureName: item.procedureName,
       runway: item.runway,
+      transitionName: item.transitionName,
       routeKey: item.routeKey,
       sequence: item.sequence,
       fix: item.fix,
@@ -158,16 +161,23 @@ function parseRoute(line: string) {
   if (!/^[DEF]$/.test(subsection)) return undefined;
   if (!/^[A-Z0-9]{4,6}$/.test(routeCode)) return undefined;
 
-  // 个别导出缺少路线类型列，跑道直接从 19 列开始
+  // Runway branches carry RWxx; route-type 3 records carry a named enroute
+  // transition in the same qualifier field (for example a five-letter fix).
   const runwayStart = line[19] === 'R' && line[20] === 'W' ? 19 : 20;
   const runwayMatch = line.slice(runwayStart, runwayStart + 6).match(/^RW\d{2}[A-Z]?/);
-  if (!runwayMatch) return undefined;
+  const transitionName = !runwayMatch && line[19] === '3'
+    ? line.slice(20, 25).trim()
+    : '';
+  if (!runwayMatch && !/^[A-Z0-9]{2,5}$/.test(transitionName)) return undefined;
+  const qualifier = runwayMatch?.[0] ?? transitionName;
+  const qualifierStart = runwayMatch ? runwayStart : 20;
 
   return {
     // routeText 是记录中的原文片段，供后续按位置截取腿段区
-    routeText: line.slice(6, runwayStart) + runwayMatch[0],
+    routeText: line.slice(6, qualifierStart) + qualifier,
     routeCode,
-    runway: runwayMatch[0],
+    runway: runwayMatch?.[0] ?? '',
+    transitionName: transitionName || undefined,
     procedureName: ROUTE_CODE_TO_PROCEDURE[routeCode] ?? procedureNameFromRouteCode(routeCode),
   };
 }

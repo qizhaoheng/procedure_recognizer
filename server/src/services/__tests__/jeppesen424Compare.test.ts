@@ -3,7 +3,20 @@ import { describe, it } from 'node:test';
 import { aiProcedureToSimpleLegs } from '../jeppesen424/aiProcedureToSimpleLegs';
 import { parseJeppesen424Text } from '../jeppesen424/jeppesen424TextParser';
 import { alignJeppesenProcedureNames, compareSimpleProcedureLegs } from '../jeppesen424/simpleProcedureComparator';
+import { deriveRouteCode } from '../jeppesen424/routeCode';
 import type { ProcedureUnderstandingResult } from '../../types/procedure';
+
+describe('ARINC route-code derivation from chart titles', () => {
+  it('converts spelled-out numeric designators without airport-specific mappings', () => {
+    assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE'), 'VAMOS4');
+    assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE RWY16R'), 'VAMOS4');
+    assert.equal(deriveRouteCode('TIARA TWO A DEPARTURE'), 'TIAR2A');
+    assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE / DRAKY TRANSITION'), 'VAMOS4');
+    assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE / TATEYAMA TRANSITION'), 'VAMOS4');
+    assert.equal(deriveRouteCode('VAMOS FOUR DEPARTURE RWY34L/RWY34R'), 'VAMOS4');
+    assert.equal(deriveRouteCode('LARIT 1T RWY 07C'), 'LARI1T');
+  });
+});
 
 const sampleText = [
   'SSPAP WMKJWMEADLO1E2RW16010ADLOVWMEA1E       IF                    +06000',
@@ -26,6 +39,86 @@ const sidSampleText = [
   'SSPAP WMKJWMDADLO1J2RW16  040ADLOVWMEA1EE      TF                                 + 06000                              D   001642209',
   'SSPAP WMKJWMDADLO1J2RW16  040ADLOVWMEA2P                                  0238                                             001652209',
 ].join('\n');
+
+const namedTransitionSampleText = [
+  'SPACP RJTTRJDVAMOS43DRAKY 010VAMOSRJPC1E       IF                                 + 09000     14000                    D   590322411',
+  'SPACP RJTTRJDVAMOS43DRAKY 010VAMOSRJPC2P                                                                                   590332411',
+  'SPACP RJTTRJDVAMOS43DRAKY 015DRAKYRJPC1E       TF                                                                      D   590352411',
+  'SPACP RJTTRJDVAMOS43DRAKY 015DRAKYRJPC2P                                  0222                                             590362411',
+  'SPACP RJTTRJDVAMOS43DRAKY 020XAC  RJD 1VE      TF                                                                      D   590372411',
+  'SPACP RJTTRJDVAMOS43DRAKY 020XAC  RJD 2P                                  0119                                             590382411',
+].join('\n');
+
+describe('ARINC named enroute transitions', () => {
+  it('parses route-type 3 transition records instead of discarding them as non-runway records', () => {
+    const legs = parseJeppesen424Text(namedTransitionSampleText);
+    assert.equal(legs.length, 3);
+    assert.ok(legs.every((leg) => leg.routeKey === 'VAMOS4'));
+    assert.ok(legs.every((leg) => leg.runway === '' && leg.transitionName === 'DRAKY'));
+    assert.deepEqual(legs.map((leg) => [leg.sequence, leg.fix, leg.pathTerminator, leg.distanceNm]), [
+      ['010', 'VAMOS', 'IF', undefined],
+      ['015', 'DRAKY', 'TF', 22.2],
+      ['020', 'XAC', 'TF', 11.9],
+    ]);
+  });
+
+  it('aligns a recognized named transition independently from runway branches', () => {
+    const aiLegs = aiProcedureToSimpleLegs({
+      airportIcao: 'RJTT',
+      packageType: 'SID',
+      runway: 'RWY16R',
+      procedures: [{
+        procedureName: 'VAMOS FOUR DEPARTURE',
+        runway: null,
+        transitionName: 'DRAKY',
+        legs: [
+          { sequence: 10, fixIdentifier: 'VAMOS', pathTerminator: 'IF', altitudeConstraint: { rawText: '+09000', altitudeFt: 9000 } },
+          { sequence: 15, fixIdentifier: 'DRAKY', pathTerminator: 'TF', distanceNm: 22.2 },
+          { sequence: 20, fixIdentifier: 'XAC', pathTerminator: 'TF', distanceNm: 11.9 },
+        ],
+      }],
+    });
+    const aligned = alignJeppesenProcedureNames(aiLegs, parseJeppesen424Text(namedTransitionSampleText));
+    const [result] = compareSimpleProcedureLegs(aiLegs, aligned);
+    assert.equal(result.transitionName, 'DRAKY');
+    assert.equal(result.runway, '');
+    assert.equal(result.totalLegs, 3);
+    assert.equal(result.matchedLegs, 3);
+  });
+});
+
+describe('parallel-runway variant alignment', () => {
+  it('does not merge left and right runway variants merely because their runway number matches', () => {
+    const ai = [{
+      procedureName: 'VAMOS FOUR DEPARTURE', runway: 'RW16R', routeKey: '', sequence: '010', fix: '',
+      pathTerminator: 'VA', source: 'AI' as const,
+    }];
+    const jeppesen = [
+      { ...ai[0], runway: 'RW16L', routeKey: 'VAMOS4', source: 'JEPPESEN_424' as const },
+      { ...ai[0], runway: 'RW16R', routeKey: 'VAMOS4', source: 'JEPPESEN_424' as const },
+    ];
+    const aligned = alignJeppesenProcedureNames(ai, jeppesen);
+    assert.equal(aligned[0].runway, 'RW16L');
+    assert.equal(aligned[1].runway, 'RW16R');
+  });
+});
+
+describe('semantic leg alignment across sequence-number schemes', () => {
+  it('pairs the same ordered fix when AIP and 424 use different sequence values', () => {
+    const ai = [
+      { procedureName: 'VAMOS FOUR DEPARTURE', runway: 'RW16R', routeKey: '', sequence: '010', fix: '', pathTerminator: 'VA', source: 'AI' as const },
+      { procedureName: 'VAMOS FOUR DEPARTURE', runway: 'RW16R', routeKey: '', sequence: '020', fix: 'T6R11', pathTerminator: 'DF', source: 'AI' as const },
+      { procedureName: 'VAMOS FOUR DEPARTURE', runway: 'RW16R', routeKey: '', sequence: '030', fix: 'VAMOS', pathTerminator: 'TF', source: 'AI' as const },
+    ];
+    const jeppesen = ai.map((leg) => ({ ...leg, routeKey: 'VAMOS4', source: 'JEPPESEN_424' as const }));
+    jeppesen[2].sequence = '070';
+    const [result] = compareSimpleProcedureLegs(ai, jeppesen);
+    assert.equal(result.totalLegs, 3);
+    assert.equal(result.matchedLegs, 3);
+    assert.equal(result.legResults[2].ai?.sequence, '030');
+    assert.equal(result.legResults[2].jeppesen?.sequence, '070');
+  });
+});
 
 const conventionalSid1LSampleText = [
   'SSPAP WMKJWMDAROS1L2RW16  010         1        CA                     1600        + 01000     11000       VJB   WMD   DG   002062209',

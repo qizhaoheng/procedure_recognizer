@@ -302,6 +302,7 @@
       "properties": {
         "procedureName": { "type": ["string", "null"] },
         "runway": { "type": ["string", "null"] },
+        "transitionName": { "type": ["string", "null"] },
         "navigationSpec": { "type": ["string", "null"] },
         "legs": {
           "type": "array",

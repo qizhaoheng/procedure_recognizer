@@ -5,6 +5,7 @@ export type CompareSeverity = 'INFO' | 'WARNING' | 'ERROR';
 export interface SimpleProcedureLeg {
   procedureName: string;
   runway: string;
+  transitionName?: string;
   routeKey: string;
   sequence: string;
   fix: string;
@@ -40,6 +41,7 @@ export interface SimpleProcedureLeg {
 export interface ProcedureCompareResult {
   procedureName: string;
   runway: string;
+  transitionName?: string;
   totalLegs: number;
   matchedLegs: number;
   partialLegs: number;
