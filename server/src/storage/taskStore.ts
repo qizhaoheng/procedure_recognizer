@@ -52,6 +52,34 @@ export async function listTasks(): Promise<ProcedureTask[]> {
   return tasks.filter(Boolean).sort((a, b) => b!.createdAt.localeCompare(a!.createdAt)) as ProcedureTask[];
 }
 
+export async function recoverInterruptedRecognitionTasks() {
+  const tasks = await listTasks();
+  let recoveredTaskCount = 0;
+  let recoveredGroupCount = 0;
+  for (const task of tasks) {
+    const interruptedGroups = task.groups.filter((group) => group.status === 'AI_RUNNING');
+    if (!interruptedGroups.length) continue;
+    const recoveredAt = new Date().toISOString();
+    for (const group of interruptedGroups) {
+      const message = group.recognitionStartedAt
+        ? `AI 识别在服务重启前未完成（开始于 ${group.recognitionStartedAt}），请重新发送识别。`
+        : 'AI 识别因服务重启而中断，请重新发送识别。';
+      group.status = 'ERROR';
+      group.aiResponse = {
+        rawText: message,
+        errors: [message],
+        createdAt: recoveredAt,
+      };
+    }
+    task.status = 'ERROR';
+    task.error = `已恢复 ${interruptedGroups.length} 个因服务重启而中断的 AI 识别任务，请重新发送识别。`;
+    await saveTask(task);
+    recoveredTaskCount += 1;
+    recoveredGroupCount += interruptedGroups.length;
+  }
+  return { recoveredTaskCount, recoveredGroupCount };
+}
+
 export async function readTask(taskId: string): Promise<ProcedureTask> {
   const filePath = path.join(getTaskDir(taskId), 'task.json');
   const text = await fs.readFile(filePath, 'utf-8');
@@ -60,8 +88,24 @@ export async function readTask(taskId: string): Promise<ProcedureTask> {
 
 export async function saveTask(task: ProcedureTask): Promise<ProcedureTask> {
   task.updatedAt = new Date().toISOString();
-  await fs.mkdir(getTaskDir(task.taskId), { recursive: true });
-  await fs.writeFile(path.join(getTaskDir(task.taskId), 'task.json'), JSON.stringify(task, null, 2), 'utf-8');
+  const taskDir = getTaskDir(task.taskId);
+  const taskPath = path.join(taskDir, 'task.json');
+  const temporaryPath = path.join(
+    taskDir,
+    `.task-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.tmp`,
+  );
+  await fs.mkdir(taskDir, { recursive: true });
+
+  // A parsed task can be tens of megabytes. Writing task.json in place exposes a
+  // truncated file to polling readers and makes JSON.parse fail intermittently.
+  // Write the complete snapshot first, then publish it with one rename.
+  try {
+    await fs.writeFile(temporaryPath, JSON.stringify(task, null, 2), 'utf-8');
+    await fs.rename(temporaryPath, taskPath);
+  } catch (error) {
+    await fs.unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
   return task;
 }
 

@@ -494,6 +494,7 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
       group.status = 'AI_RUNNING';
+      group.recognitionStartedAt = startedAt;
       group.aiResponse = undefined;
       if (!mergeWithExisting) group.procedureUnderstanding = undefined;
       group.visionRunRecord = undefined;

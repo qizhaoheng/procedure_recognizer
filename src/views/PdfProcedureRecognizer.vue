@@ -745,7 +745,8 @@ async function startParse() {
 
   try {
     await requestJson(`/api/procedure-tasks/${task.value.taskId}/parse`, { method: 'POST' });
-    await refreshTask();
+    task.value.status = 'PARSING';
+    message.value = 'PDF 正在解析';
     startPolling();
   } catch (parseError) {
     error.value = toErrorMessage(parseError);
@@ -756,10 +757,11 @@ async function startParse() {
 
 function startPolling() {
   stopPolling();
-  pollTimer = window.setInterval(async () => {
+  if (!task.value || task.value.status !== 'PARSING') return;
+  pollTimer = window.setTimeout(async () => {
     if (!task.value) return;
     await refreshTask(false);
-    if (task.value.status !== 'PARSING') stopPolling();
+    if (task.value.status === 'PARSING') startPolling();
   }, 1200);
 }
 
@@ -1386,6 +1388,22 @@ function pageNosText(pageNos: number[]) {
   return pageNos.length ? pageNos.join(', ') : '-';
 }
 
+function groupOptionLabel(group: ProcedureGroup, index: number) {
+  const rawName = String(group.packageName || group.groupName || '').replace(/[\u0000-\u001f\u007f]+/g, ' ').replace(/\s+/g, ' ').trim();
+  const procedureName = group.procedureNames
+    .map((name) => String(name).replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join(' / ');
+  const preferredName = rawName.length <= 72
+    ? rawName
+    : procedureName && procedureName.length <= 72
+      ? procedureName
+      : `${rawName.slice(0, 48).trimEnd()}…`;
+  const identity = preferredName || group.chartNo || `未命名程序包 ${index + 1}`;
+  const metadata = [group.packageType, group.runway, `P${pageRangeText(allGroupPages(group))}`].filter(Boolean).join(' / ');
+  return `${index + 1}. ${identity}${metadata ? ` / ${metadata}` : ''}`;
+}
+
 function pageRangeText(pageNos: number[] | undefined) {
   if (!pageNos?.length) return '-';
   const sorted = [...pageNos].sort((a, b) => a - b);
@@ -1717,14 +1735,23 @@ async function loadPdfDocument(taskId: string) {
 
 async function requestJson<T>(url: string, init?: RequestInit): Promise<T> {
   const response = await fetch(url, init);
+  const responseText = await response.text();
+  let payload: any;
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      throw new Error(`服务器返回了不完整的响应（${response.status} ${response.statusText}），请稍后重试`);
+    }
+  }
   if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    const requestError = new Error(payload.error || `${response.status} ${response.statusText}`) as Error & { errorType?: string; status?: number };
-    requestError.errorType = payload.errorType;
+    const requestError = new Error(payload?.error || `${response.status} ${response.statusText}`) as Error & { errorType?: string; status?: number };
+    requestError.errorType = payload?.errorType;
     requestError.status = response.status;
     throw requestError;
   }
-  return response.json() as Promise<T>;
+  if (!responseText) throw new Error(`服务器返回了空响应（${response.status} ${response.statusText}）`);
+  return payload as T;
 }
 
 function downloadJson(data: unknown, fileName: string) {
@@ -1820,8 +1847,8 @@ function isCancelledError(value: unknown) {
             <label class="group-picker">
               分组
               <select v-model="selectedGroupId" :disabled="!task?.groups.length" @change="handleSelectedGroupChanged">
-                <option v-for="group in task?.groups" :key="group.groupId" :value="group.groupId">
-                  {{ group.packageName || group.groupName }} / {{ group.packageType || '-' }} / {{ group.runway || '-' }}
+                <option v-for="(group, index) in task?.groups" :key="group.groupId" :value="group.groupId">
+                  {{ groupOptionLabel(group, index) }}
                 </option>
               </select>
             </label>
@@ -3010,6 +3037,10 @@ button.ghost {
   align-items: start;
 }
 
+.grouping-layout > * {
+  min-width: 0;
+}
+
 .panel-head {
   display: flex;
   align-items: center;
@@ -3537,6 +3568,8 @@ label.wide {
 input,
 select {
   width: 100%;
+  max-width: 100%;
+  min-width: 0;
   min-height: 32px;
   border: 1px solid #cbd5e1;
   border-radius: 7px;
@@ -3544,6 +3577,11 @@ select {
   color: #172033;
   padding: 0 9px;
   font: inherit;
+}
+
+option {
+  background: #fff;
+  color: #172033;
 }
 
 em {

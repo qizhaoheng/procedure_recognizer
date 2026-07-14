@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
+import { validateProcedureGeoJson } from '../geojsonValidator';
 import { buildGeoJsonFromProcedureUnderstanding } from '../procedureUnderstandingGeojson';
 import type { PdfPageAsset, ProcedureGroup, ProcedureUnderstandingResult } from '../../types/procedure';
 import type { SimpleProcedureLeg } from '../jeppesen424/types';
@@ -382,13 +383,7 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
       runway: 'RWY16R',
       navigationType: 'RNAV',
       fixes: [{ identifier: 'T6R11' }, { identifier: 'VAMOS' }],
-      sourceEvidence: [{
-        id: 'compact_coordinates',
-        pageNo: 16,
-        evidenceType: 'COORDINATES',
-        fieldName: 'waypoint_coordinates',
-        rawText: 'T6R11 352552.5N / 1395137.2E; VAMOS 351215.5N / 1394543.6E',
-      }],
+      sourceEvidence: [],
       procedures: [{
         procedureName: 'VAMOS FOUR DEPARTURE RWY16R',
         runway: 'RWY16R',
@@ -413,6 +408,26 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assertClose((vamos?.geometry as GeoJSON.Point).coordinates as [number, number], [139.7621111111111, 35.20430555555556], 0.00001);
     const tf = geojson.features.find((feature) => feature.properties?.object_type === 'ProcedureLeg' && feature.properties?.leg_seq === 30);
     assert.ok(tf?.geometry, 'compact coordinate fixes should produce renderable TF geometry');
+  });
+
+  it('accepts an explicitly reviewed ProcedureLeg with a missing fix coordinate as semantic GeoJSON', () => {
+    const validation = validateProcedureGeoJson({
+      type: 'FeatureCollection',
+      features: [{
+        type: 'Feature',
+        geometry: null,
+        properties: {
+          object_type: 'ProcedureLeg',
+          procedure: 'VAMOS FOUR DEPARTURE',
+          leg_seq: 20,
+          path_terminator: 'DF',
+          geometry_status: 'MISSING_FIX_COORDINATE',
+          coordinate_quality: 'missing_fix_coordinate',
+          review_required: true,
+        },
+      }],
+    });
+    assert.equal(validation.valid, true, validation.errors.join('; '));
   });
 
   it('renders conventional SID CR/CI/CF legs from charted VOR radial intercepts', () => {

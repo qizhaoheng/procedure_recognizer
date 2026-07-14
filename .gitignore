@@ -4,3 +4,4 @@ server/data/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
+机场/

@@ -53,7 +53,11 @@ export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGrou
       warnings.push(`feature[${index}] source_page=${props.source_page} is outside core/supporting pages.`);
     }
 
-    if (!feature.geometry && !semanticNullGeometryTypes.has(objectType)) {
+    const isExplicitMissingLegGeometry = objectType === 'ProcedureLeg'
+      && props.geometry_status === 'MISSING_FIX_COORDINATE'
+      && props.coordinate_quality === 'missing_fix_coordinate'
+      && props.review_required === true;
+    if (!feature.geometry && !semanticNullGeometryTypes.has(objectType) && !isExplicitMissingLegGeometry) {
       errors.push(`feature[${index}] geometry is null but ${objectType || 'UNKNOWN'} is not an allowed semantic object.`);
     }
     if (feature.geometry && !isGeometry(feature.geometry)) {
