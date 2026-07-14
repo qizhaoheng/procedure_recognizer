@@ -170,6 +170,8 @@ export interface ProcedureGroup {
   tableCandidates?: TableCandidate[];
   aiRequest?: AiRequestRecord;
   aiResponse?: AiResponseRecord;
+  /** Persisted before the model request starts so interrupted server runs can be recovered. */
+  recognitionStartedAt?: string;
   procedureUnderstanding?: ProcedureUnderstandingResult;
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;

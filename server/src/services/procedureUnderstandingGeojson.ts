@@ -1450,19 +1450,22 @@ function coordinateForIdent(text: string, ident: string) {
   const index = text.indexOf(ident);
   if (index < 0) return undefined;
   const segment = text.slice(index + ident.length, index + ident.length + 120);
-  const compact = segment.match(/\b(\d{6}(?:\.\d+)?)\s*([NS])\s*\/?\s*(\d{7}(?:\.\d+)?)\s*([EW])\b/i);
+  const compactPattern = /\b(\d{6}(?:\.\d+)?)\s*([NS])\s*\/?\s*(\d{7}(?:\.\d+)?)\s*([EW])\b/gi;
+  const compact = segment.match(compactPattern);
   if (compact) {
-    const latitude = compactDmsValueToDecimal(compact[1], 2);
-    const longitude = compactDmsValueToDecimal(compact[3], 3);
-    if (latitude !== undefined && longitude !== undefined) {
-      const lat = compact[2].toUpperCase() === 'S' ? -latitude : latitude;
-      const lon = compact[4].toUpperCase() === 'W' ? -longitude : longitude;
-      return {
-        lat,
-        lon,
-        raw: `${compact[1]}${compact[2].toUpperCase()} ${compact[3]}${compact[4].toUpperCase()}`,
-      };
-    }
+    const parsed = compactCoordinate(compact[0]);
+    if (parsed) return parsed;
+  }
+
+  // Some AIP PDF tables are extracted column-by-column, so the coordinate can
+  // precede its waypoint identifier (for example: two coordinate rows followed
+  // by T6R11). In that layout the nearest preceding coordinate belongs to ident.
+  const preceding = text.slice(Math.max(0, index - 160), index);
+  const precedingMatches = [...preceding.matchAll(compactPattern)];
+  const precedingCompact = precedingMatches.at(-1)?.[0];
+  if (precedingCompact) {
+    const parsed = compactCoordinate(precedingCompact);
+    if (parsed) return parsed;
   }
   const numbers = [...segment.matchAll(/\d+(?:\.\d+)?/g)].map((match) => match[0]);
   if (numbers.length < 6) return undefined;
@@ -1483,6 +1486,21 @@ function coordinateForIdent(text: string, ident: string) {
     lat,
     lon,
     raw: `${latDegText.padStart(2, '0')}${latMinText.padStart(2, '0')}${formatSeconds(latSecText)}N ${lonDegText.padStart(3, '0')}${lonMinText.padStart(2, '0')}${formatSeconds(lonSecText)}E`,
+  };
+}
+
+function compactCoordinate(value: string) {
+  const match = value.match(/\b(\d{6}(?:\.\d+)?)\s*([NS])\s*\/?\s*(\d{7}(?:\.\d+)?)\s*([EW])\b/i);
+  if (!match) return undefined;
+  const latitude = compactDmsValueToDecimal(match[1], 2);
+  const longitude = compactDmsValueToDecimal(match[3], 3);
+  if (latitude === undefined || longitude === undefined) return undefined;
+  const lat = match[2].toUpperCase() === 'S' ? -latitude : latitude;
+  const lon = match[4].toUpperCase() === 'W' ? -longitude : longitude;
+  return {
+    lat,
+    lon,
+    raw: `${match[1]}${match[2].toUpperCase()} ${match[3]}${match[4].toUpperCase()}`,
   };
 }
 
