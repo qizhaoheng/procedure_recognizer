@@ -24,13 +24,21 @@ const FIELD_WEIGHTS = {
 // 跑道同理：424 用 RW02B（B=全部平行跑道）而 AI 用 RW02L/02C/02R，
 // 路线代码匹配且跑道号一致时，直接采用 AI 侧跑道，保证过滤与对齐键一致。
 export function alignJeppesenProcedureNames(aiLegs: SimpleProcedureLeg[], jeppesenLegs: SimpleProcedureLeg[]): SimpleProcedureLeg[] {
-  const codeToAi = new Map<string, { procedureName: string; runway: string }>();
+  const codeToAi = new Map<string, Array<{ procedureName: string; runway: string; transitionName?: string }>>();
   for (const leg of aiLegs) {
     const code = deriveRouteCode(leg.procedureName);
-    if (code && !codeToAi.has(code)) codeToAi.set(code, { procedureName: leg.procedureName, runway: leg.runway });
+    if (!code) continue;
+    const variants = codeToAi.get(code) ?? [];
+    if (!variants.some((item) => item.procedureName === leg.procedureName
+      && item.runway === leg.runway
+      && item.transitionName === leg.transitionName)) {
+      variants.push({ procedureName: leg.procedureName, runway: leg.runway, transitionName: leg.transitionName });
+    }
+    codeToAi.set(code, variants);
   }
   return jeppesenLegs.map((leg) => {
-    const ai = leg.routeKey ? codeToAi.get(leg.routeKey.trim().toUpperCase()) : undefined;
+    const variants = leg.routeKey ? codeToAi.get(leg.routeKey.trim().toUpperCase()) ?? [] : [];
+    const ai = findAiRouteVariant(leg, variants);
     if (!ai) return leg;
     return {
       ...leg,
@@ -57,17 +65,18 @@ export function compareSimpleProcedureLegs(aiLegs: SimpleProcedureLeg[], jeppese
   }
 
   return [...procedureKeys].sort().map((key) => {
-    const [procedureName, runway] = key.split('|');
-    const aiBySequence = bySequence(aiLegs.filter((leg) => procedureKey(leg) === key));
-    const jeppesenBySequence = bySequence(jeppesenLegs.filter((leg) => procedureKey(leg) === key));
-    const sequences = [...new Set([...aiBySequence.keys(), ...jeppesenBySequence.keys()])].sort((a, b) => Number(a) - Number(b));
-    const legResults = sequences.map((sequence) => compareLeg(sequence, aiBySequence.get(sequence), jeppesenBySequence.get(sequence)));
+    const [procedureName, runway, transitionName = ''] = key.split('|');
+    const aiProcedureLegs = sortLegs(aiLegs.filter((leg) => procedureKey(leg) === key));
+    const jeppesenProcedureLegs = sortLegs(jeppesenLegs.filter((leg) => procedureKey(leg) === key));
+    const legResults = alignProcedureLegs(aiProcedureLegs, jeppesenProcedureLegs)
+      .map(({ ai, jeppesen }) => compareLeg(ai?.sequence ?? jeppesen?.sequence ?? '', ai, jeppesen));
     const matchedLegs = legResults.filter((result) => result.status === 'MATCH').length;
     const partialLegs = legResults.filter((result) => result.status === 'PARTIAL').length;
     const mismatchedLegs = legResults.filter((result) => result.status === 'MISMATCH').length;
     return {
       procedureName,
       runway,
+      transitionName: transitionName || undefined,
       totalLegs: legResults.length,
       matchedLegs,
       partialLegs,
@@ -136,11 +145,103 @@ function scoreFields(fieldResults: FieldCompareResult[]) {
 }
 
 function procedureKey(leg: SimpleProcedureLeg) {
-  return `${leg.procedureName}|${leg.runway}`;
+  return `${leg.procedureName}|${leg.runway}|${leg.transitionName ?? ''}`;
 }
 
-function bySequence(legs: SimpleProcedureLeg[]) {
-  return new Map(legs.map((leg) => [leg.sequence, leg]));
+function findAiRouteVariant(
+  jeppesen: Pick<SimpleProcedureLeg, 'runway' | 'transitionName'>,
+  variants: Array<{ procedureName: string; runway: string; transitionName?: string }>,
+) {
+  if (jeppesen.transitionName) {
+    const transition = jeppesen.transitionName.trim().toUpperCase();
+    return variants.find((item) => item.transitionName?.trim().toUpperCase() === transition);
+  }
+  const jeppRunway = normalizedRunway(jeppesen.runway);
+  const exact = variants.find((item) => !item.transitionName && normalizedRunway(item.runway) === jeppRunway);
+  if (exact) return exact;
+  return variants.find((item) => !item.transitionName && runwayGroupCompatible(jeppesen.runway, item.runway));
+}
+
+function runwayGroupCompatible(a: string, b: string) {
+  const left = normalizedRunway(a);
+  const right = normalizedRunway(b);
+  const hasGroupMarker = /B$/.test(left) || /B$/.test(right)
+    || runwayNumbers(left).length > 1 || runwayNumbers(right).length > 1;
+  return hasGroupMarker && runwayNumbersOverlap(left, right);
+}
+
+function normalizedRunway(value: string) {
+  return value.trim().toUpperCase().replace(/^RWY/, 'RW').replace(/\s+/g, '');
+}
+
+function sortLegs(legs: SimpleProcedureLeg[]) {
+  return [...legs].sort((a, b) => Number(a.sequence) - Number(b.sequence));
+}
+
+// AIP tables and vendor 424 datasets may assign different sequence numbers to
+// the same ordered leg (for example 030 versus 070). Align by route order and
+// leg semantics; sequence equality is only a tie-breaker.
+function alignProcedureLegs(ai: SimpleProcedureLeg[], jeppesen: SimpleProcedureLeg[]) {
+  const rows = ai.length + 1;
+  const cols = jeppesen.length + 1;
+  const score = Array.from({ length: rows }, () => new Array<number>(cols).fill(0));
+  const move = Array.from({ length: rows }, () => new Array<'PAIR' | 'AI' | 'JEPP'>(cols).fill('PAIR'));
+  const gapPenalty = -2;
+  for (let i = 1; i < rows; i += 1) {
+    score[i][0] = i * gapPenalty;
+    move[i][0] = 'AI';
+  }
+  for (let j = 1; j < cols; j += 1) {
+    score[0][j] = j * gapPenalty;
+    move[0][j] = 'JEPP';
+  }
+  for (let i = 1; i < rows; i += 1) {
+    for (let j = 1; j < cols; j += 1) {
+      const pair = score[i - 1][j - 1] + legAlignmentScore(ai[i - 1], jeppesen[j - 1]);
+      const skipAi = score[i - 1][j] + gapPenalty;
+      const skipJepp = score[i][j - 1] + gapPenalty;
+      if (pair >= skipAi && pair >= skipJepp) {
+        score[i][j] = pair;
+        move[i][j] = 'PAIR';
+      } else if (skipAi >= skipJepp) {
+        score[i][j] = skipAi;
+        move[i][j] = 'AI';
+      } else {
+        score[i][j] = skipJepp;
+        move[i][j] = 'JEPP';
+      }
+    }
+  }
+
+  const aligned: Array<{ ai?: SimpleProcedureLeg; jeppesen?: SimpleProcedureLeg }> = [];
+  let i = ai.length;
+  let j = jeppesen.length;
+  while (i > 0 || j > 0) {
+    const selected = move[i][j];
+    if (i > 0 && j > 0 && selected === 'PAIR') {
+      aligned.push({ ai: ai[i - 1], jeppesen: jeppesen[j - 1] });
+      i -= 1;
+      j -= 1;
+    } else if (i > 0 && (j === 0 || selected === 'AI')) {
+      aligned.push({ ai: ai[i - 1] });
+      i -= 1;
+    } else {
+      aligned.push({ jeppesen: jeppesen[j - 1] });
+      j -= 1;
+    }
+  }
+  return aligned.reverse();
+}
+
+function legAlignmentScore(ai: SimpleProcedureLeg, jeppesen: SimpleProcedureLeg) {
+  const aiFix = String(ai.fix ?? '').trim().toUpperCase();
+  const jeppFix = String(jeppesen.fix ?? '').trim().toUpperCase();
+  const aiPt = String(ai.pathTerminator ?? '').trim().toUpperCase();
+  const jeppPt = String(jeppesen.pathTerminator ?? '').trim().toUpperCase();
+  let score = aiFix && aiFix === jeppFix ? 4 : (!aiFix && !jeppFix ? 1 : -3);
+  score += aiPt && aiPt === jeppPt ? 2 : -1;
+  if (ai.sequence === jeppesen.sequence) score += 1;
+  return score;
 }
 
 function sameText(a: unknown, b: unknown) {

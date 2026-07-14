@@ -41,7 +41,10 @@ export function normalizeProcedureUnderstandingResult(
   }
 
   return {
-    airportIcao: stringOrNull(input.airportIcao) ?? airportMetadata(aiInputPackage).airportIcao ?? null,
+    airportIcao: stringOrNull(input.airportIcao)
+      ?? airportMetadata(aiInputPackage).airportIcao
+      ?? airportIcaoFromGroup(group)
+      ?? null,
     airportName: stringOrNull(input.airportName) ?? airportMetadata(aiInputPackage).airportName ?? null,
     packageType: stringOrNull(input.packageType) ?? stringOrNull(classification.packageType) ?? group.packageType ?? null,
     procedureCategory: stringOrNull(input.procedureCategory) ?? stringOrNull(classification.procedureCategory) ?? group.procedureCategory ?? null,
@@ -163,21 +166,30 @@ function normalizeProcedures(rawProcedures: unknown[], tableLegs: ReturnType<typ
     const name = stringOrNull(raw?.procedureName) ?? stringOrNull(raw?.name);
     if (raw && name) rawByName.set(name, raw);
   }
-  const names = new Set([
+  const recognizedNames = new Set([
     ...tableLegs.map((item) => item.procedureName).filter(Boolean) as string[],
     ...rawByName.keys(),
-    ...(group.procedureNames ?? []),
   ]);
+  const names = new Set(recognizedNames);
+  for (const groupName of recognizedNames.size ? [] : (group.procedureNames ?? [])) {
+    const family = normalizedProcedureFamily(groupName);
+    const alreadyRepresented = [...recognizedNames].some(
+      (recognizedName) => normalizedProcedureFamily(recognizedName) === family,
+    );
+    if (!alreadyRepresented) names.add(groupName);
+  }
 
   return [...names].map((name) => {
     const raw = rawByName.get(name) ?? {};
+    const transitionName = stringOrNull(raw.transitionName)?.replace(/\s+TRANSITION$/i, '').trim() ?? null;
     const legs = tableLegs
       .filter((leg) => leg.procedureName === name)
       .sort((a, b) => (a.sequence ?? 0) - (b.sequence ?? 0))
       .map((leg) => normalizeLeg(leg, evidenceIds));
     return {
       procedureName: name,
-      runway: stringOrNull(raw.runway) ?? group.runway ?? null,
+      runway: transitionName ? null : (stringOrNull(raw.runway) ?? group.runway ?? null),
+      transitionName,
       navigationSpec: stringOrNull(raw.navigationSpec) ?? stringOrNull(raw.navSpec) ?? inferNavigationSpec(tableLegs) ?? null,
       legs,
       sourceEvidenceIds: evidenceIds,
@@ -185,6 +197,15 @@ function normalizeProcedures(rawProcedures: unknown[], tableLegs: ReturnType<typ
       reviewRequired: booleanOr(raw.reviewRequired, false),
     };
   });
+}
+
+function normalizedProcedureFamily(name: string) {
+  return name
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .replace(/\s+RWY?\s*\d{2}[LRCB]?(?:\s*\/\s*\d{2}[LRCB]?)*$/, '')
+    .replace(/\s+(?:DEPARTURE|ARRIVAL)$/, '');
 }
 
 type NormalizedGeometrySemantic = ReturnType<typeof normalizeGeometrySemantic>;
@@ -519,6 +540,18 @@ function airportMetadata(aiInputPackage: AiInputPackage) {
     airportIcao: stringOrNull(airport.airportIcao),
     airportName: stringOrNull(airport.airportName),
   };
+}
+
+export function airportIcaoFromGroup(group: ProcedureGroup) {
+  const values = [group.chartNo, ...(group.relatedChartNos ?? [])];
+  for (const value of values) {
+    const text = String(value ?? '').toUpperCase();
+    const aipSection = text.match(/\bAD\s*2(?:\.\d+)?\s*[- ]\s*([A-Z]{4})\b/);
+    if (aipSection) return aipSection[1];
+    const chartDialect = text.match(/\b([A-Z]{4})\s+AD\s+CHART\b/);
+    if (chartDialect) return chartDialect[1];
+  }
+  return null;
 }
 
 function record(value: unknown): JsonRecord | undefined {

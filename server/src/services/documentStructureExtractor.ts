@@ -7,7 +7,7 @@ export function extractAipAdStructure(pages: PdfPageAsset[]): AipAdStructure {
   const chartIndexPages = pages.filter((page) => {
     const text = page.ocrText || page.textLayerText || '';
     // 注意不能用正文里“见 AD 2.24”之类的提及来判定目录页，否则正文引用的图号会被当成目录项
-    return page.chartRole === 'CHART_INDEX' || /CHARTS RELATED TO AN AERODROME/i.test(text) || looksLikeChartIndexContinuation(text);
+    return page.chartRole === 'CHART_INDEX' || /CHARTS RELATED TO (?:AN|THE) AERODROME/i.test(text) || looksLikeChartIndexContinuation(text);
   });
   const chartIndexItems = parseChartIndexFromPages(chartIndexPages);
 
@@ -39,7 +39,10 @@ export function extractAipAdStructure(pages: PdfPageAsset[]): AipAdStructure {
 function looksLikeChartIndexContinuation(text: string) {
   const upper = text.toUpperCase();
   const programItemCount = (upper.match(/STANDARD\s+DEPARTURE\s+CHART|STANDARD\s+ARRIVAL\s+CHART|INSTRUMENT\s+APPROACH\s+CHART/g) || []).length;
-  if (programItemCount >= 4 && /CHART\s+NAME\s+PAGE|AD\s*2\.?24|CHARTS RELATED TO AN AERODROME/i.test(text)) return true;
+  if (programItemCount >= 4 && /CHART\s+NAME\s+PAGE|AD\s*2\.?24|CHARTS RELATED TO (?:AN|THE) AERODROME/i.test(text)) return true;
+  // 韩国式目录续页：图名 + 点线引导符（····）成排出现，图号列在页面另一栏
+  const dottedLeaderCount = (text.match(/·{4,}|\.{6,}/g) || []).length;
+  if (programItemCount >= 4 && dottedLeaderCount >= 4) return true;
   // 香港式目录续页：整页都是“图名 + 字母段图号”条目（正文引用图号一般不超过几个）
   return countLetteredChartNos(text) >= 8;
 }

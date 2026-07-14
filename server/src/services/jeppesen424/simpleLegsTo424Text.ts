@@ -27,7 +27,7 @@ export function simpleLegsTo424Text(legs: SimpleProcedureLeg[], options: Jeppese
     (a, b) => a.procedureName.localeCompare(b.procedureName) || Number(a.sequence) - Number(b.sequence),
   );
   for (const leg of sorted) {
-    const key = `${leg.procedureName}|${leg.runway}`;
+    const key = `${leg.procedureName}|${leg.runway}|${leg.transitionName ?? ''}`;
     const list = procedures.get(key) ?? [];
     list.push(leg);
     procedures.set(key, list);
@@ -110,8 +110,12 @@ function continuationRecord(leg: SimpleProcedureLeg, context: LegContext) {
 }
 
 function baseRecord(leg: SimpleProcedureLeg, context: LegContext) {
-  if (!/^RW\d{2}[A-Z]?$/.test(leg.runway)) {
+  const transitionName = String(leg.transitionName ?? '').trim().toUpperCase();
+  if (!transitionName && !/^RW\d{2}[A-Z]?$/.test(leg.runway)) {
     throw new Error(`无法导出 424：腿段 ${leg.procedureName} ${leg.sequence} 缺少有效跑道（当前值 "${leg.runway}"）。`);
+  }
+  if (transitionName && !/^[A-Z0-9]{2,5}$/.test(transitionName)) {
+    throw new Error(`无法导出 424：腿段 ${leg.procedureName} ${leg.sequence} 的转场名 "${transitionName}" 无效。`);
   }
   const sequence = leg.sequence.padStart(3, '0');
   if (!/^\d{3}$/.test(sequence)) {
@@ -127,8 +131,8 @@ function baseRecord(leg: SimpleProcedureLeg, context: LegContext) {
   put(chars, 10, context.region);
   put(chars, 12, 'E');
   put(chars, 13, context.routeCode);
-  put(chars, 19, '2');
-  put(chars, 20, leg.runway);
+  put(chars, 19, transitionName ? '3' : '2');
+  put(chars, 20, transitionName || leg.runway);
   put(chars, 26, sequence);
   put(chars, 29, leg.fix);
   if (leg.fix || context.fixSection) {

@@ -3,6 +3,7 @@ import type { PdfPageAsset, ProcedureGroup, ProcedureUnderstandingResult } from 
 import { withBbox } from './geojsonValidator';
 import { buildProcedureRenderPlan, type ProcedureRenderPlan } from './rendering/procedureRenderPlan';
 import type { SimpleProcedureLeg } from './jeppesen424/types';
+import { decodeEmbeddedPdfText } from './pdfTextDecoder';
 
 type ProcedureFeature = Feature<Geometry | null, GeoJsonProperties>;
 type FixRecord = {
@@ -115,7 +116,12 @@ export function buildGeoJsonFromProcedureUnderstanding(
   pages: PdfPageAsset[] = [],
   options: ProcedureGeoJsonBuildOptions = {},
 ): FeatureCollection<Geometry | null, GeoJsonProperties> {
-  const fixes = enrichFixesWithPageCoordinates((understanding.fixes ?? []) as FixRecord[], group, pages);
+  const fixes = enrichFixesWithPageCoordinates(
+    (understanding.fixes ?? []) as FixRecord[],
+    group,
+    pages,
+    understanding.sourceEvidence ?? [],
+  );
   const renderPlan = options.renderPlan ?? buildProcedureRenderPlan(
     understanding,
     group,
@@ -1197,6 +1203,7 @@ function enrichFixesWithPageCoordinates(
   fixes: FixRecord[],
   group: ProcedureGroup,
   pages: PdfPageAsset[],
+  sourceEvidence: Array<Record<string, unknown>>,
 ): FixRecord[] {
   const parsedFixes = fixes.map((fix) => {
     if (isCoordinate(fix.longitude, fix.latitude)) return fix;
@@ -1210,12 +1217,14 @@ function enrichFixesWithPageCoordinates(
       reviewRequired: fix.reviewRequired ?? false,
     };
   });
-  const coordinateMap = waypointCoordinateMap(group, pages);
-  if (!coordinateMap.size) return parsedFixes;
+  const evidenceCoordinates = evidenceCoordinateMap(sourceEvidence);
+  const pageCoordinates = waypointCoordinateMap(group, pages);
+  if (!evidenceCoordinates.size && !pageCoordinates.size) return parsedFixes;
 
   return parsedFixes.map((fix) => {
     if (!fix.identifier || isCoordinate(fix.longitude, fix.latitude)) return fix;
-    const coordinate = coordinateMap.get(String(fix.identifier).toUpperCase());
+    const coordinate = evidenceCoordinates.get(String(fix.identifier).toUpperCase())
+      ?? pageCoordinates.get(String(fix.identifier).toUpperCase());
     if (!coordinate) return fix;
     return {
       ...fix,
@@ -1227,6 +1236,28 @@ function enrichFixesWithPageCoordinates(
       reviewRequired: fix.reviewRequired ?? false,
     };
   });
+}
+
+function evidenceCoordinateMap(sourceEvidence: Array<Record<string, unknown>>) {
+  const coordinates = new Map<string, { lat: number; lon: number; raw: string; sourcePage: number }>();
+  for (const evidence of sourceEvidence) {
+    const rawText = typeof evidence.rawText === 'string' ? evidence.rawText : '';
+    const sourcePage = Number(evidence.pageNo ?? evidence.sourcePageNo ?? 0) || 0;
+    for (const match of rawText.matchAll(/\b([A-Z][A-Z0-9]{2,5})\s+(\d{6}(?:\.\d+)?)\s*([NS])\s*\/?\s*(\d{7}(?:\.\d+)?)\s*([EW])\b/gi)) {
+      const latitude = compactDmsValueToDecimal(match[2], 2);
+      const longitude = compactDmsValueToDecimal(match[4], 3);
+      if (latitude === undefined || longitude === undefined) continue;
+      const lat = match[3].toUpperCase() === 'S' ? -latitude : latitude;
+      const lon = match[5].toUpperCase() === 'W' ? -longitude : longitude;
+      coordinates.set(match[1].toUpperCase(), {
+        lat,
+        lon,
+        raw: `${match[2]}${match[3].toUpperCase()} ${match[4]}${match[5].toUpperCase()}`,
+        sourcePage,
+      });
+    }
+  }
+  return coordinates;
 }
 
 function waypointCoordinateMap(group: ProcedureGroup, pages: PdfPageAsset[]) {
@@ -1256,6 +1287,20 @@ function coordinateForIdent(text: string, ident: string) {
   const index = text.indexOf(ident);
   if (index < 0) return undefined;
   const segment = text.slice(index + ident.length, index + ident.length + 120);
+  const compact = segment.match(/\b(\d{6}(?:\.\d+)?)\s*([NS])\s*\/?\s*(\d{7}(?:\.\d+)?)\s*([EW])\b/i);
+  if (compact) {
+    const latitude = compactDmsValueToDecimal(compact[1], 2);
+    const longitude = compactDmsValueToDecimal(compact[3], 3);
+    if (latitude !== undefined && longitude !== undefined) {
+      const lat = compact[2].toUpperCase() === 'S' ? -latitude : latitude;
+      const lon = compact[4].toUpperCase() === 'W' ? -longitude : longitude;
+      return {
+        lat,
+        lon,
+        raw: `${compact[1]}${compact[2].toUpperCase()} ${compact[3]}${compact[4].toUpperCase()}`,
+      };
+    }
+  }
   const numbers = [...segment.matchAll(/\d+(?:\.\d+)?/g)].map((match) => match[0]);
   if (numbers.length < 6) return undefined;
   const [latDegText, latMinText, latSecText, lonDegText, lonMinText, lonSecText] = numbers.slice(0, 6);
@@ -1278,21 +1323,14 @@ function coordinateForIdent(text: string, ident: string) {
   };
 }
 
-function decodeEmbeddedPdfText(text: string) {
-  const hasEncodedGlyphs = [...text].some((char) => {
-    const code = char.charCodeAt(0);
-    return code === 0x03 || code === 0x0e || code === 0x10 || code === 0x11 || (code >= 0x13 && code <= 0x1c);
-  });
-  if (!hasEncodedGlyphs) return text;
-
-  return [...text].map((char) => {
-    const code = char.charCodeAt(0);
-    if (code === 0x0e) return '+';
-    if (code === 0x10) return '-';
-    if (code === 0x11) return '.';
-    if (code >= 0x13 && code <= 0x3d) return String.fromCharCode(code + 0x1d);
-    return char;
-  }).join('');
+function compactDmsValueToDecimal(value: string, degreeDigits: 2 | 3) {
+  const degrees = Number(value.slice(0, degreeDigits));
+  const minutes = Number(value.slice(degreeDigits, degreeDigits + 2));
+  const seconds = Number(value.slice(degreeDigits + 2));
+  if (![degrees, minutes, seconds].every(Number.isFinite)) return undefined;
+  if (minutes >= 60 || seconds >= 60) return undefined;
+  if ((degreeDigits === 2 && degrees > 90) || (degreeDigits === 3 && degrees > 180)) return undefined;
+  return degrees + minutes / 60 + seconds / 3600;
 }
 
 function formatSeconds(value: string) {

@@ -10,6 +10,20 @@ Focus on:
 Prefer tabular descriptions for leg order and chart images for runway alignment, turn direction, labels, and obstacle/airspace notes.
 
 SID-specific reading rules:
+- Treat the complete multi-page source package as the recognition scope. Package metadata such as a single
+  `runway` value is only a grouping hint and MUST NOT restrict extraction to that runway.
+- When the package contains several runway branches for one named departure, output every branch as a
+  separate `procedures[]` entry with its own `runway` and complete ordered legs. Include the runway in the
+  procedure identity when needed to keep `tableLegs.procedureName` unambiguous.
+- Extract every named enroute transition shown on later chart/table pages. Keep transition legs separate
+  from runway branches, set `procedures[].transitionName` to the printed transition ident and `runway=null`,
+  preserve their printed join fix and sequence, and do not stop after the first visually complete branch.
+  Give each one a unique procedureName in the form `<departure name> / <transition ident> TRANSITION`, and
+  use that exact same name in its `tableLegs.procedureName` values.
+- Mandatory completeness check before answering: scan every supplied page header. For every page whose
+  title or purpose contains `TRANSITION`, enumerate every named transition on that page and verify that a
+  corresponding non-empty `procedures[]` entry exists. If any transition cannot be extracted, add a warning
+  naming the page, set `reviewRequired=true`, and never silently omit the page.
 - Keep runway variants separate: `<FIX> 1J RWY16`, `<FIX> 1K RWY34`, `<FIX> 2J RWY16`, etc. are separate
   procedures even when they share the same terminal waypoint.
 - The first leg of an RNAV SID may still be a runway/course-to-altitude leg. If the table says track 160

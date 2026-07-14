@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import type { ProcedureTask } from '../types/procedure';
+import type { ProcedureTask, TaskSourceFile } from '../types/procedure';
 
 const dataRoot = path.resolve(process.cwd(), 'server', 'data');
 const taskRoot = path.join(dataRoot, 'procedure-tasks');
@@ -22,7 +22,7 @@ export async function ensureStorage() {
   await fs.mkdir(getUploadDir(), { recursive: true });
 }
 
-export async function createTask(fileName: string, filePath: string): Promise<ProcedureTask> {
+export async function createTask(fileName: string, filePath: string, sourceFiles?: TaskSourceFile[]): Promise<ProcedureTask> {
   await ensureStorage();
   const now = new Date().toISOString();
   const task: ProcedureTask = {
@@ -34,6 +34,7 @@ export async function createTask(fileName: string, filePath: string): Promise<Pr
     groups: [],
     createdAt: now,
     updatedAt: now,
+    ...(sourceFiles?.length ? { sourceFiles } : {}),
   };
   await fs.mkdir(getTaskDir(task.taskId), { recursive: true });
   await saveTask(task);

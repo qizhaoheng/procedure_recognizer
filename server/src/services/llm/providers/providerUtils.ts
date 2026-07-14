@@ -1,5 +1,8 @@
 import type { StructuredOutputModeUsed, VisionRecognitionRequest } from '../llmClient';
 import { LlmApiError, type LlmRuntimeConfig, type VisionRecognitionResponse } from '../llmClient';
+import { Agent } from 'undici';
+
+const dispatchers = new Map<number, Agent>();
 
 export function endpointUrl(config: LlmRuntimeConfig, path: string) {
   return `${config.baseUrl.replace(/\/$/, '')}${path}`;
@@ -12,7 +15,11 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
   if (externalSignal?.aborted) abortFromExternal();
   else externalSignal?.addEventListener('abort', abortFromExternal, { once: true });
   try {
-    return await fetch(url, { ...init, signal: controller.signal });
+    // Node's built-in fetch uses Undici's ~300s response-header timeout by
+    // default. Long vision jobs can legitimately exceed that, so keep the
+    // transport timeout slightly beyond the application AbortController.
+    const dispatcher = dispatcherFor(timeoutMs);
+    return await fetch(url, { ...init, signal: controller.signal, dispatcher } as RequestInit & { dispatcher: Agent });
   } catch (error) {
     const message = summarizeError(error);
     const raw = describeError(error);
@@ -36,6 +43,19 @@ export async function fetchWithTimeout(url: string, init: RequestInit, timeoutMs
     clearTimeout(timeout);
     externalSignal?.removeEventListener('abort', abortFromExternal);
   }
+}
+
+function dispatcherFor(timeoutMs: number) {
+  const transportTimeoutMs = timeoutMs + 5000;
+  const cached = dispatchers.get(transportTimeoutMs);
+  if (cached) return cached;
+  const dispatcher = new Agent({
+    headersTimeout: transportTimeoutMs,
+    bodyTimeout: transportTimeoutMs,
+    connectTimeout: Math.min(30000, timeoutMs),
+  });
+  dispatchers.set(transportTimeoutMs, dispatcher);
+  return dispatcher;
 }
 
 export async function withRetries<T>(fn: () => Promise<T>, maxRetries: number): Promise<T> {

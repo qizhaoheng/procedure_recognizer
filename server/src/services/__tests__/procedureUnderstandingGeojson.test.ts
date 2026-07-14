@@ -366,6 +366,55 @@ describe('procedure understanding GeoJSON — RNAV regression', () => {
     assert.ok((df?.geometry as GeoJSON.LineString).coordinates.length > 3, 'DF leg should be sampled as a charted turn, not a direct two-point line');
   });
 
+  it('parses compact AIP coordinates and renders procedure geometry', () => {
+    const compactGroup = {
+      ...group,
+      packageName: 'RWY16R RNAV SID VAMOS FOUR DEPARTURE',
+      packageType: 'SID',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'RNAV',
+      coordinatePages: [16],
+      relatedPageNos: [13, 16],
+      procedureNames: ['VAMOS FOUR DEPARTURE'],
+    } as unknown as ProcedureGroup;
+    const compactResult: ProcedureUnderstandingResult = {
+      airportIcao: 'RJTT',
+      runway: 'RWY16R',
+      navigationType: 'RNAV',
+      fixes: [{ identifier: 'T6R11' }, { identifier: 'VAMOS' }],
+      sourceEvidence: [{
+        id: 'compact_coordinates',
+        pageNo: 16,
+        evidenceType: 'COORDINATES',
+        fieldName: 'waypoint_coordinates',
+        rawText: 'T6R11 352552.5N / 1395137.2E; VAMOS 351215.5N / 1394543.6E',
+      }],
+      procedures: [{
+        procedureName: 'VAMOS FOUR DEPARTURE RWY16R',
+        runway: 'RWY16R',
+        legs: [
+          { sequence: 20, pathTerminator: 'DF', fixIdentifier: 'T6R11' },
+          { sequence: 30, pathTerminator: 'TF', fromFix: 'T6R11', fixIdentifier: 'VAMOS', courseDegMag: 207, distanceNm: 14.5 },
+        ],
+      }],
+    };
+    const compactPages = [{
+      pageNo: 16,
+      chartRole: 'WAYPOINT_COORDINATES',
+      procedureCategory: 'DEPARTURE',
+      navigationType: 'RNAV',
+      textLayerText: 'Waypoint Coordinates VAMOS 351215.5N / 1394543.6E 352552.5N / 1395137.2E T6R11',
+    }] as unknown as PdfPageAsset[];
+
+    const geojson = buildGeoJsonFromProcedureUnderstanding(compactResult, compactGroup, compactPages);
+    const t6r11 = geojson.features.find((feature) => feature.properties?.object_type === 'ProcedureFix' && feature.properties?.ident === 'T6R11');
+    const vamos = geojson.features.find((feature) => feature.properties?.object_type === 'ProcedureFix' && feature.properties?.ident === 'VAMOS');
+    assertClose((t6r11?.geometry as GeoJSON.Point).coordinates as [number, number], [139.86033333333333, 35.43125], 0.00001);
+    assertClose((vamos?.geometry as GeoJSON.Point).coordinates as [number, number], [139.7621111111111, 35.20430555555556], 0.00001);
+    const tf = geojson.features.find((feature) => feature.properties?.object_type === 'ProcedureLeg' && feature.properties?.leg_seq === 30);
+    assert.ok(tf?.geometry, 'compact coordinate fixes should produce renderable TF geometry');
+  });
+
   it('renders conventional SID CR/CI/CF legs from charted VOR radial intercepts', () => {
     const conventionalGroup = {
       ...group,

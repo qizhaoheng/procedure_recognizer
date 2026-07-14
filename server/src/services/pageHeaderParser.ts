@@ -4,6 +4,7 @@ import {
   detectApproachProcedureNames,
   detectNavigationTypeForPackage,
   detectPackageType,
+  detectProcedureNames,
   detectProcedureCategory,
   detectRunway,
   extractLikelyAipPageNo,
@@ -48,7 +49,7 @@ export function parsePageHeader(page: PdfPageAsset): PageHeaderMetadata {
   const procedureNames =
     packageType === 'APPROACH'
       ? detectApproachProcedureNames(source, navigationType, runway)
-      : Array.from(new Set([...(page.procedureNames ?? []), ...Array.from(source.matchAll(/\b[A-Z]{5}\s*\d[A-Z]\b/g), (match) => match[0].replace(/\s+/g, ' '))]));
+      : Array.from(new Set([...(page.procedureNames ?? []), ...detectProcedureNames(source, navigationType)]));
   const normalizedGroupKey =
     procedureCategory !== 'UNKNOWN'
       ? buildNormalizedGroupKey({ procedureCategory, packageType, navigationType, runway, procedureNames, chartName: chartTitle })

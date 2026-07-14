@@ -249,3 +249,49 @@ describe('procedure understanding normalizer - canonical rendering separation', 
     assert.ok((result.procedures ?? []).every((procedure) => (procedure.legs ?? []).length === 0));
   });
 });
+
+describe('procedure understanding normalizer - document-derived identity', () => {
+  it('backfills ICAO from an AIP chart number when the model omits it', () => {
+    const result = normalizeProcedureUnderstandingResult(
+      {
+        airportIcao: null,
+        procedures: [],
+        tableLegs: [],
+        sourceEvidence: [],
+      },
+      {
+        groupId: 'rjtt_sid',
+        chartNo: 'AD 2-RJTT-SID-11',
+        procedureCategory: 'DEPARTURE',
+        navigationType: 'RNAV',
+        procedureNames: [],
+      } as unknown as ProcedureGroup,
+      aiInputPackage,
+    ) as ProcedureUnderstandingResult;
+
+    assert.equal(result.airportIcao, 'RJTT');
+  });
+
+  it('does not append a duplicate empty group placeholder for a recognized runway variant', () => {
+    const result = normalizeProcedureUnderstandingResult(
+      {
+        procedures: [{ procedureName: 'VAMOS FOUR DEPARTURE RWY16R', runway: 'RWY16R' }],
+        tableLegs: [
+          { procedureName: 'VAMOS FOUR DEPARTURE RWY16R', sequence: 10, pathTerminator: 'CA' },
+        ],
+        sourceEvidence: [],
+      },
+      {
+        groupId: 'rjtt_sid',
+        procedureCategory: 'DEPARTURE',
+        navigationType: 'RNAV',
+        procedureNames: ['VAMOS FOUR DEPARTURE'],
+      } as unknown as ProcedureGroup,
+      aiInputPackage,
+    ) as ProcedureUnderstandingResult;
+
+    assert.deepEqual(result.procedures?.map((procedure) => procedure.procedureName), [
+      'VAMOS FOUR DEPARTURE RWY16R',
+    ]);
+  });
+});

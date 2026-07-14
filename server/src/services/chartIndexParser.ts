@@ -7,10 +7,23 @@ const CHART_NO_PATTERN = /A\s*D\s*-?\s*2\s*-\s*([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z])\s
 const LETTERED_CHART_NO_PATTERN = /AD\s*-?\s*2\s*-\s*([A-Z]{4})\s*-\s*([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)*(?:\.\d{1,2})?)/;
 const LETTERED_CHART_NO_PATTERN_GLOBAL = new RegExp(LETTERED_CHART_NO_PATTERN.source, 'g');
 const LETTERED_CHART_NO_LINE_PATTERN = new RegExp(`^${LETTERED_CHART_NO_PATTERN.source}$`);
+// 韩国式图号：RKSI AD CHART 2 - 28（图面页）/ RKSI AD CHART 2 - 28 - 1（随后的官方编码表页）。
+// 只匹配大写 "AD CHART"，避免正文引用（"See AD chart 2-74"）误配；归一为 AD 2-RKSI-28 / AD 2-RKSI-28-1，
+// 子页形与数字段图号同形（AD 2-{ICAO}-{n}-{m}），可被 normalizeNumericChartNo 幂等重归一
+const KOREAN_CHART_NO_PATTERN = /([A-Z]{4})\s+AD\s+CHART\s+2\s*-\s*(\d{1,3})(?:\s*-\s*(\d{1,2}))?/;
+// 韩国式图面页归一后的规范形（单数字段），重归一时需要能自识别
+const KOREAN_CANONICAL_PATTERN = /^AD\s*2-([A-Z]{4})-(\d{1,3})$/;
+// 日本式图号：RJTT AD2.24-SID-27（AD 2.24 小节内按图类全局连续编号），归一为字母段形 AD 2-RJTT-SID-27
+const JAPANESE_CHART_NO_PATTERN = /([A-Z]{4})\s*AD\s*2\.24-([A-Z][A-Z0-9]*-\d{1,3})/;
 const PROGRAM_CHART_PATTERN = /STANDARD\s+DEPARTURE\s+CHART|STANDARD\s+ARRIVAL\s+CHART|INSTRUMENT\s+APPROACH\s+CHART/i;
 
 export function normalizeChartNo(raw?: string | null): string | undefined {
-  return normalizeNumericChartNo(raw) || normalizeLetteredChartNo(raw);
+  return (
+    normalizeNumericChartNo(raw) ||
+    normalizeLetteredChartNo(raw) ||
+    normalizeKoreanChartNo(raw) ||
+    normalizeJapaneseChartNo(raw)
+  );
 }
 
 export function normalizeNumericChartNo(raw?: string | null): string | undefined {
@@ -25,6 +38,23 @@ export function normalizeNumericChartNo(raw?: string | null): string | undefined
 
 export function normalizeLetteredChartNo(raw?: string | null): string | undefined {
   const match = raw?.toUpperCase().match(LETTERED_CHART_NO_PATTERN);
+  if (!match) return undefined;
+  return `AD 2-${match[1]}-${match[2]}`;
+}
+
+// 大小写敏感：韩国正文引用写作 "See AD chart 2-74"（小写），只有页脚/表头的全大写形式可信
+export function normalizeKoreanChartNo(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const canonical = raw.match(KOREAN_CANONICAL_PATTERN);
+  if (canonical) return `AD 2-${canonical[1]}-${Number(canonical[2])}`;
+  const match = raw.match(KOREAN_CHART_NO_PATTERN);
+  if (!match) return undefined;
+  const suffix = match[3] ? `-${Number(match[3])}` : '';
+  return `AD 2-${match[1]}-${Number(match[2])}${suffix}`;
+}
+
+export function normalizeJapaneseChartNo(raw?: string | null): string | undefined {
+  const match = raw?.match(JAPANESE_CHART_NO_PATTERN);
   if (!match) return undefined;
   return `AD 2-${match[1]}-${match[2]}`;
 }
@@ -66,7 +96,9 @@ export function extractLikelyAipPageNo(raw?: string | null): string | undefined 
     const lineMatch = line.trim().toUpperCase().match(LETTERED_CHART_NO_LINE_PATTERN);
     if (lineMatch) return `AD 2-${lineMatch[1]}-${lineMatch[2]}`;
   }
-  return undefined;
+  // 韩/日式页脚图号带 ICAO 前缀且要求全大写，特异性足够，整页任意位置匹配。
+  // 页脚数字可能被日期等碎片打断（"2 - 28 30 APR"），正则按最短合法形式截断
+  return normalizeKoreanChartNo(raw) || normalizeJapaneseChartNo(raw);
 }
 
 export function parseChartIndexFromPages(chartIndexPages: PdfPageAsset[]): ChartIndexItem[] {
@@ -223,6 +255,18 @@ export function buildNormalizedGroupKey(input: {
 export function parseApproachProcedureName(chartName: string): string {
   const baseName = stripTabularMarker(chartName).replace(/\s+/g, ' ').trim();
   const runway = detectRunway(baseName);
+  // 韩国式标题：SEOUL/Incheon Intl(RKSI) ILS Z or LOC Z RWY 15L CAT II & III INSTRUMENT APPROACH CHART - ICAO，
+  // 程序名（导航类型 + RWY）出现在图名措辞之前——按位置判定语序，避免标准语序正则跨长文本误捕
+  const chartPhraseIndex = baseName.search(/INSTRUMENT\s+APPROACH\s+CHART|APPROACH\s+TRANSITION\s+CHART/i);
+  const navBeforeRunwayMatch = baseName.match(
+    /\b((?:ILS|LOC|VOR|NDB|GLS|LDA|IGS|RNP|RNAV)(?:[ /][A-Z0-9()]{1,6})*?(?:\s+or\s+(?:ILS|LOC|VOR|NDB|GLS|LDA|IGS|RNP|RNAV)(?:[ /][A-Z0-9()]{1,6})*?)?)\s+RWY\s*\d{2}[LRC]?/,
+  );
+  if (navBeforeRunwayMatch && chartPhraseIndex >= 0 && (navBeforeRunwayMatch.index ?? 0) < chartPhraseIndex) {
+    const runwayMatch = baseName.match(/RWY\s*\d{2}[LRC]?(?:\s*\/\s*(?:\d{2})?[LRC]?)*/i);
+    const afterRunway = runwayMatch ? baseName.slice((runwayMatch.index ?? 0) + runwayMatch[0].length) : '';
+    const category = afterRunway.match(/^\s*(CAT\s*(?:III|II|IV|I)(?:\s*&\s*(?:III|II|IV|I))*)\b/)?.[1]?.replace(/\s+/g, ' ').trim();
+    return [navBeforeRunwayMatch[1].trim(), category, runway].filter(Boolean).join(' ').trim();
+  }
   // 香港式标题：Instrument Approach Chart - ICAO - ILS - RWY 07R，程序类型在 RWY 之前
   const middle = baseName.match(
     /(?:INSTRUMENT\s+APPROACH\s+CHART|APPROACH\s+TRANSITION\s+CHART)(?:\s*[-–]\s*ICAO)?\s*[-–]\s*(.+?)\s*[-–]?\s*RWY/i,
@@ -311,9 +355,16 @@ function stripProcedureChartWords(value: string) {
     .trim();
 }
 
-function detectProcedureNames(text: string, navigationType: NavigationType) {
+export function detectProcedureNames(text: string, navigationType: NavigationType) {
   const names = uniqueMatches(text, /\b[A-Z]{5}\s*\d[A-Z]\b/g).map(normalizeProcedureName);
   if (names.length) return names;
+  // Some AIPs spell the revision in words (for example "TIARA TWO A
+  // DEPARTURE") instead of the compact ICAO designator form.
+  const wordNumberNames = uniqueMatches(
+    text.toUpperCase(),
+    /\b[A-Z]{3,6}\s+(?:ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE)(?:\s+[A-Z])?\s+(?:DEPARTURE|ARRIVAL)\b/g,
+  ).map(normalizeProcedureName);
+  if (wordNumberNames.length) return wordNumberNames;
   // 新加坡式图名以程序号收尾：RNAV (GNSS) SID - RWY 02C - VMR 6A（VOR 台名可短于 5 字母）
   const trailing = text.split(/\s+-\s+/).pop()?.trim().toUpperCase();
   if (trailing && !/^RWY/.test(trailing) && /^[A-Z]{2,5}\s?\d{1,2}[A-Z]$/.test(trailing)) {

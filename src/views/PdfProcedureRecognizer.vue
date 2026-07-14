@@ -79,6 +79,7 @@ const sourceLabels: Record<string, string> = {
 };
 
 const fileInput = ref<HTMLInputElement>();
+const folderInput = ref<HTMLInputElement>();
 const task = ref<ProcedureTask>();
 const selectedPageNo = ref<number>();
 const selectedGroupId = ref('');
@@ -627,21 +628,31 @@ function openFilePicker() {
   fileInput.value?.click();
 }
 
+function openFolderPicker() {
+  folderInput.value?.click();
+}
+
 async function onFileSelected(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith('.pdf')) {
+  const selectedFiles = Array.from(input.files ?? []);
+  if (!selectedFiles.length) return;
+  const files = selectedFiles.filter((item) => item.name.toLowerCase().endsWith('.pdf'));
+  if (!files.length) {
     error.value = '请选择 PDF 文件';
     input.value = '';
     return;
   }
 
+  // 日/韩式 AIP 一个机场拆成多份 PDF，可一次多选：后端按文件名自然序合并为单任务
   const formData = new FormData();
-  formData.append('file', file);
+  if (files.length === 1) formData.append('file', files[0]);
+  else for (const item of files) formData.append('files', item, item.webkitRelativePath || item.name);
   busy.value = true;
   error.value = '';
-  message.value = `正在上传 ${file.name}`;
+  const ignoredCount = selectedFiles.length - files.length;
+  message.value = files.length === 1
+    ? `正在上传 ${files[0].name}`
+    : `正在上传并合并 ${files.length} 个 PDF${ignoredCount ? `（已忽略 ${ignoredCount} 个非 PDF 文件）` : ''}`;
 
   try {
     const uploaded = await requestJson<Pick<ProcedureTask, 'taskId' | 'fileName' | 'status'>>('/api/procedure-tasks/upload', {
@@ -838,16 +849,37 @@ async function loadPromptPreview() {
 
 async function sendRecognition() {
   if (!task.value || !selectedGroup.value) return;
+  const taskId = task.value.taskId;
+  const groupId = selectedGroup.value.groupId;
   goToStep('recognition');
   recognitionBusy.value = true;
   error.value = '';
   message.value = '正在调用 AI 识别';
   try {
-    const result = await requestJson<{ status: string }>(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/run-vision-recognition`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
+    if (!aiInputPackage.value) await loadAiInputPackage(false);
+    const imagePageNos = [...new Set(
+      (aiInputPackage.value?.includedImages ?? []).map((page) => page.pageNo),
+    )].sort((a, b) => a - b);
+    const batches = chunkPageNos(imagePageNos, 2);
+    const effectiveBatches = batches.length ? batches : [[]];
+    let result: { status: string } = { status: 'AI_RUNNING' };
+    for (let index = 0; index < effectiveBatches.length; index += 1) {
+      const pageNos = effectiveBatches[index];
+      message.value = effectiveBatches.length > 1
+        ? `正在调用 AI 识别（批次 ${index + 1}/${effectiveBatches.length}，PDF ${pageNos.join(', ')}）`
+        : '正在调用 AI 识别';
+      result = await requestJson<{ status: string }>(
+        `/api/procedure-tasks/${taskId}/packages/${groupId}/run-vision-recognition`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(pageNos.length ? {
+            pageNos,
+            mergeWithExisting: index > 0,
+          } : {}),
+        },
+      );
+    }
     await refreshTask(false);
     message.value = result.status === 'AI_COMPLETED' ? 'AI 识别已完成' : `AI 识别未完成：${result.status}`;
   } catch (aiError) {
@@ -857,6 +889,14 @@ async function sendRecognition() {
   } finally {
     recognitionBusy.value = false;
   }
+}
+
+function chunkPageNos(pageNos: number[], size: number) {
+  const chunks: number[][] = [];
+  for (let index = 0; index < pageNos.length; index += size) {
+    chunks.push(pageNos.slice(index, index + size));
+  }
+  return chunks;
 }
 
 // 识别问题标记：保存到任务记录，用于后续 Prompt 打磨
@@ -1569,8 +1609,12 @@ function isCancelledError(value: unknown) {
       </div>
       <div class="actions">
         <input ref="fileInput" class="file-input" type="file" accept="application/pdf,.pdf" @change="onFileSelected" />
+        <input ref="folderInput" class="file-input" type="file" accept="application/pdf,.pdf" webkitdirectory directory multiple @change="onFileSelected" />
         <button type="button" class="primary" :disabled="busy" @click="openFilePicker">
           <Upload :size="16" /> 上传PDF
+        </button>
+        <button type="button" class="primary" :disabled="busy" @click="openFolderPicker">
+          <Upload :size="16" /> 上传文件夹
         </button>
         <button type="button" :disabled="!task || busy" @click="startParse">
           <FileText :size="16" /> 开始解析

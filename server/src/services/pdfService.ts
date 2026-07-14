@@ -38,10 +38,17 @@ export async function parsePdfTask(task: ProcedureTask): Promise<PdfPageAsset[]>
       thumbnailUrl: `/uploads/procedure-tasks/${task.taskId}/pages/${thumbFile}`,
       sourceWidthPt: extracted.width,
       sourceHeightPt: extracted.height,
+      sourceFileName: sourceFileForPage(task, extracted.pageNo),
     });
   }
 
   return pages;
+}
+
+function sourceFileForPage(task: ProcedureTask, pageNo: number) {
+  return task.sourceFiles?.find(
+    (source) => pageNo >= source.startPageNo && pageNo < source.startPageNo + source.pageCount,
+  )?.fileName;
 }
 
 async function extractPdfPages(filePath: string): Promise<ExtractedPdfPage[]> {
