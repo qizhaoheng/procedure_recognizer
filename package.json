@@ -4,11 +4,12 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web\"",
-    "dev:web": "vite --host 0.0.0.0 --port 3307 --strictPort",
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:web:only\"",
+    "dev:web": "concurrently -k \"npm:dev:server\" \"npm:dev:web:only\"",
+    "dev:web:only": "vite --host 0.0.0.0 --port 3307 --strictPort",
     "dev:server": "tsx watch server/src/index.ts",
     "server": "tsx server/src/index.ts",
-    "test": "node --import tsx --test \"server/src/services/__tests__/*.test.ts\"",
+    "test": "node --import tsx --test \"server/src/services/__tests__/*.test.ts\" \"apps/aip-procedure-agent/src/__tests__/*.test.ts\"",
     "build": "vue-tsc --noEmit && vite build",
     "preview": "vite preview --host 0.0.0.0"
   },
