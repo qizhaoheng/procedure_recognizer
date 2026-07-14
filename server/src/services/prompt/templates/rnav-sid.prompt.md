@@ -2,68 +2,93 @@
 
 The current task is RNAV SID recognition.
 
-Focus on:
-- departure designators, runway, climb requirements, initial turns, waypoint sequence, and RNAV specification
-- CA/IF/TF/DF/CF candidates, course, distance, altitude constraints, speed limits, and turn direction
-- waypoint coordinates and runway threshold context
+Work through these steps IN ORDER before writing any legs:
 
-Prefer tabular descriptions for leg order and chart images for runway alignment, turn direction, labels, and obstacle/airspace notes.
+1. Confirm the airport ICAO and the OFFICIAL procedure name for every procedure in the package.
+2. Classify each supplied page's role (overview diagram / narrative / leg table / waypoint coordinates / notes).
+3. Identify every runway transition.
+4. Identify the common route, if the source publishes one.
+5. Identify every named enroute transition.
+6. For each leg, decide the Path Terminator first, then read waypoint, course, altitude, turn,
+   fly-over, and distance.
+7. Attach source evidence to every field you extract.
+8. Distinguish clearly-read values, inferred values, and undeterminable values: inferred values get
+   lower confidence and a note; undeterminable fields MUST be null. Never guess.
 
-SID-specific reading rules:
-- Treat the complete multi-page source package as the recognition scope. Package metadata such as a single
-  `runway` value is only a grouping hint and MUST NOT restrict extraction to that runway.
-- When the package contains several runway branches for one named departure, output every branch as a
-  separate `procedures[]` entry with its own `runway` and complete ordered legs. Include the runway in the
-  procedure identity when needed to keep `tableLegs.procedureName` unambiguous.
-- Extract every named enroute transition shown on later chart/table pages. Keep transition legs separate
-  from runway branches, set `procedures[].transitionName` to the printed transition ident and `runway=null`,
-  preserve their printed join fix and sequence, and do not stop after the first visually complete branch.
-  Give each one a unique procedureName in the form `<departure name> / <transition ident> TRANSITION`, and
-  use that exact same name in its `tableLegs.procedureName` values.
-- Mandatory completeness check before answering: scan every supplied page header. For every page whose
-  title or purpose contains `TRANSITION`, enumerate every named transition on that page and verify that a
-  corresponding non-empty `procedures[]` entry exists. If any transition cannot be extracted, add a warning
-  naming the page, set `reviewRequired=true`, and never silently omit the page.
-- Keep runway variants separate: `<FIX> 1J RWY16`, `<FIX> 1K RWY34`, `<FIX> 2J RWY16`, etc. are separate
-  procedures even when they share the same terminal waypoint.
-- The first leg of an RNAV SID may still be a runway/course-to-altitude leg. If the table says track 160
-  or 340 to 1000/1500 ft before joining RNAV fixes, output a CA-style leg before the first named fix.
-- Many AIP RNAV SID tables code the first runway-alignment CA leg even when the fix cell is
-  blank. Preserve it as `sequence=10`, `pathTerminator="CA"`, `fixIdentifier=null`, `fromFix=null`,
-  `courseDegMag=<runway track>`, and keep the printed 2P/DME distance such as `2.0` in `distanceNm`.
-- If the plan view prints a runway-alignment label such as `160 deg 1000`, read it as "track/course 160
-  until 1000 ft before turning". Preserve `1000` as the CA altitude constraint and include the same
-  text in geometrySemantics as RUNWAY_ALIGNMENT.
-- The airport TRANSITION ALTITUDE (header box like `TRANSITION ALTITUDE 11000FT`) is
-  airport-level information: report it as a chartText, but do NOT copy it into any leg's
-  altitudeConstraint or upperFt. A number printed next to a leg altitude in a coded source
-  (e.g. the `11000` in `+01000 11000`) is that same transition altitude — ignore it at leg level.
-- `upperFt` is ONLY for genuine dual-altitude window constraints printed for the leg itself
-  (e.g. "between 4000 and 9000" / `9000B4000`): put the lower bound in altitudeFt/lowerFt and
-  the upper bound in upperFt.
-- If the first CA row references a navaid for DME/course checking, put that ident in
-  `recommendedNavaid` on that CA leg only. The airport's reference VOR/DME is usually identified
-  by the MSA box (e.g. `MSA 25 NM <VOR>`) and the aeronautical data tabulation. Leave later
-  ordinary DF/TF legs with `recommendedNavaid=null` unless their row explicitly uses a navaid.
-- Use DF when the instruction is direct to a waypoint after the initial climb/turn; use TF only for
-  fix-to-fix tracks with a named fromFix and toFix.
-- DF legs can also have a printed 2P distance. When the table/424 coding shows a distance value
-  next to the DF fix name, copy that value to `distanceNm` on the DF leg.
-- Preserve intermediate computer fixes (including database-style idents such as two letters +
-  three digits) and final enroute transition fixes.
-- Preserve final transition-fix legs exactly. The last named fix of an RNAV SID is the enroute
-  transition join point; keep it as a named leg with its printed distance and altitude constraint.
-  Do not replace it with a procedure label.
-- Capture altitude constraints exactly: `+03000`, `+06000`, climb-gradient requirements, and transition
-  altitude are distinct; do not merge them into one note.
-- Capture speed restrictions such as `250 KT`, `MAX IAS 180 KT IN TURN`, and any printed turn speed.
-- If a VOR/DME is used only for an initial CA/DME check or coded reference, list it as a navaid/supportObject
-  and set recommendedNavaid on the relevant initial leg; do not attach it to unrelated TF legs.
-- `turnDirection` belongs on CA/DF/RF/turning legs only when the table explicitly codes or prints a turn
-  direction. Do not put `L`/`R` on ordinary final TF legs merely because the chart line bends near the
-  transition fix; those bends are route geometry, not a 424 turn-direction field.
-- If chart and table disagree, preserve the tabular leg order, cite both in sourceEvidence, add a warning,
-  and set reviewRequired=true.
+### Procedure identity rules (critical)
+
+- The procedure name comes ONLY from, in priority order: (1) the formal title block, (2) the leg
+  table title, (3) the narrative description title, (4) the page header procedure identifier.
+- NEVER take the procedure name from the largest waypoint label on the chart, the most prominent
+  fix, a track's terminal fix name, a transition name, or any fix printed inside the plan view.
+  A big five-letter waypoint in the middle of the chart is a waypoint, not the procedure.
+- A transition name is NOT a waypoint. "<NAME> TRANSITION" names a route branch; it does not imply
+  a waypoint called <NAME> exists. Do not create fixes from transition names.
+- Report both the printed name (e.g. "<FIX> FOUR DEPARTURE") and keep it verbatim; the system
+  derives the coded identifier (e.g. <FIX>4) separately.
+
+### Structured output (procedureStructure + procedures)
+
+Do NOT flatten everything into tableLegs. Model the procedure as a graph:
+
+- Output every runway transition, the common route (when published), and every enroute transition
+  as its own `procedures[]` entry with its own complete ordered legs:
+  - runway branch: set `runway`, `transitionName=null`.
+  - enroute transition: set `transitionName` to the printed transition ident, `runway=null`.
+  - common route (shared segment after the merge point, when the source publishes it separately):
+    set both `runway=null` and `transitionName=null`.
+- Fill `procedureStructure` declaring the role of every entry:
+  - `runwayTransitions[]` / `commonRoutes[]` / `enrouteTransitions[]`, each with
+    `id` (RWxx for runway branches, transition ident for enroute), `procedureRef` (the exact
+    `procedures[].procedureName` it points to), `entryFix`, and `exitFix`.
+  - Branches that merge at a shared waypoint must show that waypoint as the runway branch's
+    `exitFix` and the enroute transition's `entryFix`.
+- Keep `tableLegs` populated as a legacy mirror of the leg tables, but `procedureStructure` +
+  `procedures` are the primary output.
+- Mandatory completeness check before answering: scan every supplied page header. For every page
+  whose title or purpose contains `TRANSITION`, enumerate every named transition on that page and
+  verify a corresponding non-empty `procedures[]` entry AND a `procedureStructure` branch exist.
+  If any transition cannot be extracted, add a warning naming the page and set `reviewRequired=true`.
+
+### Path Terminator semantics (do not fabricate geometry)
+
+- VA = climb on heading until reaching an altitude. It usually has NO fixed endpoint coordinate.
+  Output course + altitude constraint; leave fix fields null. Do not invent an endpoint.
+- DF = direct to a fix; its START depends on where the previous leg ends. Never fabricate a
+  precise start point for a DF leg.
+- TF is the only leg type whose geometry is fully determined by a named fromFix and toFix.
+- Use DF when the instruction is direct to a waypoint after the initial climb/turn; use TF only
+  for fix-to-fix tracks with a named fromFix and toFix.
+- The first leg of an RNAV SID is often a runway-aligned VA/CA (e.g. "climb on track 158 until
+  500 ft"); preserve it with its course and altitude, fix fields null.
+
+### Source-of-truth precedence
+
+- The leg TABLE is the primary source for leg structure and order.
+- The narrative text validates sequence, altitudes, and turn semantics.
+- The chart graphics validate topology (which branches exist, where they merge) but NEVER override
+  explicit table data.
+- The coordinate table is the source for waypoint coordinates.
+- If chart and table disagree, keep the tabular leg order, cite both in sourceEvidence, add a
+  warning, and set reviewRequired=true.
+
+### Field rules
+
+- Distance: only record `distanceNm` when the AIP table or chart PRINTS a distance for that leg.
+  VA/CA legs normally have no published distance — leave null; a null here is correct, not an
+  omission. Do not copy vendor-database values.
+- Capture altitude constraints exactly: `+03000` (at or above), `-04000` (at or below), window
+  constraints go to lowerFt/upperFt. The airport TRANSITION ALTITUDE printed in a header box is
+  airport-level information — report it as a chartText, never as a leg constraint.
+- `turnDirection` belongs on legs only when the table explicitly codes or prints a turn direction.
+  Chart line bends near a fix are route geometry, not a turn-direction field.
+- `flyOver` only when the source explicitly marks the waypoint as fly-over (solid/circled symbol
+  or table flag); otherwise null.
+- Capture speed restrictions such as `250 KT` or `MAX IAS 180 KT IN TURN` on the leg they apply to.
+- If a VOR/DME is used only for an initial climb/DME check, set recommendedNavaid on that initial
+  leg only; leave ordinary DF/TF legs with recommendedNavaid=null.
+- Preserve intermediate computer fixes (database-style idents such as two letters + three digits)
+  and final enroute-transition fixes exactly as printed.
 
 A worked few-shot example follows this template in the prompt. Use it to calibrate the expected
 leg decomposition; never copy its values — read every course, distance, altitude, and ident from
@@ -74,6 +99,6 @@ Label plan mapping (RNAV SID):
 - procedure-name labels -> labelKind=PROCEDURE_NAME, anchorType=PROCEDURE_TRACK
 - course/distance labels -> labelKind=COURSE_DISTANCE, anchorType=LEG
 - runway-alignment climb labels such as `160 deg 1000` -> labelKind=COURSE_DISTANCE, anchorType=LEG,
-  anchored to the CA leg
+  anchored to the VA/CA leg
 - climb-gradient/speed/turn notes -> labelKind=NOTE, anchorType=LEG or PROCEDURE_TRACK
 - navaid or DME reference labels -> labelKind=NAVAID_INFO or NOTE, anchored to the navaid or leg

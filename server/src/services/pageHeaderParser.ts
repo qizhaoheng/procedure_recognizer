@@ -46,10 +46,16 @@ export function parsePageHeader(page: PdfPageAsset): PageHeaderMetadata {
     page.chartRole === 'MINIMA_TABLE' ||
     /\(TABULAR\s*\d+\)|TABULAR DESCRIPTION/i.test(source);
   const tabularNo = Number(source.match(/\(TABULAR\s*(\d+)\)/i)?.[1]) || page.tabularNo;
+  // 页面级确认名（标题区/表格标题来源，见 procedurePageClassifier）优先：它是程序身份的
+  // 唯一可信来源；图面文本里的紧凑代号只在没有确认名时兜底。大字航路点永远不会成为确认名，
+  // 因此含 VAMOS 大字的 RUTAS FOUR 页不会再被并进 VAMOS FOUR。
+  const confirmedName = page.pageClassification?.confirmedProcedureName;
   const procedureNames =
     packageType === 'APPROACH'
       ? detectApproachProcedureNames(source, navigationType, runway)
-      : Array.from(new Set([...(page.procedureNames ?? []), ...detectProcedureNames(source, navigationType)]));
+      : confirmedName
+        ? [confirmedName]
+        : Array.from(new Set([...(page.procedureNames ?? []), ...detectProcedureNames(source, navigationType)]));
   const normalizedGroupKey =
     procedureCategory !== 'UNKNOWN'
       ? buildNormalizedGroupKey({ procedureCategory, packageType, navigationType, runway, procedureNames, chartName: chartTitle })

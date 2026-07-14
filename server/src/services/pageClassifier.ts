@@ -1,5 +1,6 @@
 import type { ChartRole, NavigationType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
 import { classifyChartNoType, extractLikelyAipPageNo } from './chartIndexParser';
+import { classifyProcedurePage } from './procedurePageClassifier';
 import { assessPdfTextLayer } from './pdfTextDecoder';
 
 export function classifyPage(pageNo: number, text: string): PdfPageAsset {
@@ -30,7 +31,13 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
   }
 
   const runwayMatch = firstMatch(normalized, /RWY\s?(\d{2}[LRC]?)/i);
-  const procedureNames = uniqueMatches(normalized, /\b[A-Z]{5}\s?\d[A-Z]\b/g).map((name) => name.replace(/\s+/, ' '));
+  // 页面级程序识别：名称候选按"标题区 > 表格标题 > 正文标题"优先级提取；
+  // 图面大字航路点 / Transition 名 / 任意 FIX 名不产生候选
+  const pageClassification = classifyProcedurePage(pageNo, text, chartRole);
+  const compactNames = uniqueMatches(normalized, /\b[A-Z]{5}\s?\d[A-Z]\b/g).map((name) => name.replace(/\s+/, ' '));
+  const procedureNames = pageClassification.confirmedProcedureName
+    ? Array.from(new Set([pageClassification.confirmedProcedureName, ...compactNames]))
+    : compactNames;
   const chartTitle = detectTitle(text);
   const confidence = calculateConfidence(chartRole, procedureCategory, navigationType, aipPageNo, runwayMatch);
 
@@ -47,6 +54,7 @@ export function classifyPage(pageNo: number, text: string): PdfPageAsset {
     runway: runwayMatch ? `RWY${runwayMatch.replace(/RWY\s?/i, '')}` : undefined,
     chartTitle,
     procedureNames,
+    pageClassification,
     confidence,
     reviewRequired: confidence < 0.72 || chartRole === 'UNKNOWN' || procedureCategory === 'UNKNOWN' || textAssessment.quality === 'SUSPECT',
   };
@@ -98,7 +106,9 @@ function detectTitle(text: string) {
   const lines = text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
   const index = lines.findIndex((line) => /STANDARD (ARRIVAL|DEPARTURE) CHART|INSTRUMENT APPROACH CHART/i.test(line));
   if (index < 0) return lines[0]?.slice(0, 140);
-  return lines.slice(Math.max(0, index - 1), Math.min(lines.length, index + 3)).join(' ').slice(0, 180);
+  // 从标题行本身开始截取：标题行前一行往往是图面大字航路点标签（如程序中最显眼的 waypoint），
+  // 把它拼进标题会让分组把航路点当程序名
+  return lines.slice(index, Math.min(lines.length, index + 3)).join(' ').slice(0, 180);
 }
 
 function firstMatch(text: string, regex: RegExp) {

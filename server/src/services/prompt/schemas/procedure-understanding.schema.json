@@ -12,6 +12,7 @@
     "navigationType",
     "runway",
     "procedureClassification",
+    "procedureStructure",
     "chartTexts",
     "geometrySemantics",
     "labelPlan",
@@ -37,6 +38,7 @@
     "navigationType": { "type": ["string", "null"] },
     "runway": { "type": ["string", "null"] },
     "procedureClassification": { "$ref": "#/$defs/procedureClassification" },
+    "procedureStructure": { "$ref": "#/$defs/procedureStructure" },
     "chartTexts": {
       "type": "array",
       "items": { "$ref": "#/$defs/chartText" }
@@ -97,6 +99,31 @@
     "reviewRequired": { "type": "boolean" }
   },
   "$defs": {
+    "procedureStructure": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["procedureName", "procedureId", "runwayTransitions", "commonRoutes", "enrouteTransitions"],
+      "properties": {
+        "procedureName": { "type": ["string", "null"] },
+        "procedureId": { "type": ["string", "null"] },
+        "runwayTransitions": { "type": "array", "items": { "$ref": "#/$defs/structureBranch" } },
+        "commonRoutes": { "type": "array", "items": { "$ref": "#/$defs/structureBranch" } },
+        "enrouteTransitions": { "type": "array", "items": { "$ref": "#/$defs/structureBranch" } }
+      }
+    },
+    "structureBranch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "procedureRef", "entryFix", "exitFix"],
+      "properties": {
+        "id": { "type": "string" },
+        "displayName": { "type": ["string", "null"] },
+        "runway": { "type": ["string", "null"] },
+        "procedureRef": { "type": ["string", "null"] },
+        "entryFix": { "type": ["string", "null"] },
+        "exitFix": { "type": ["string", "null"] }
+      }
+    },
     "procedureClassification": {
       "type": ["object", "null"],
       "additionalProperties": false,
@@ -289,6 +316,7 @@
         "distanceNm": { "type": ["number", "null"], "minimum": 0 },
         "altitudeConstraint": { "type": ["string", "null"] },
         "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", "NONE", "UNKNOWN", null] },
+        "flyOver": { "type": ["boolean", "null"] },
         "recommendedNavaid": { "type": ["string", "null"] },
         "remarks": { "type": ["string", "null"] },
         "sourcePageNo": { "type": ["integer", "null"], "minimum": 1 },
@@ -340,6 +368,7 @@
         "courseDegMag": { "type": ["number", "null"], "minimum": 0, "maximum": 360 },
         "distanceNm": { "type": ["number", "null"], "minimum": 0 },
         "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", "STRAIGHT", null] },
+        "flyOver": { "type": ["boolean", "null"] },
         "altitudeConstraint": { "$ref": "#/$defs/constraint" },
         "speedLimitKias": { "type": ["number", "null"], "minimum": 0 },
         "navigationSpec": { "type": ["string", "null"] },

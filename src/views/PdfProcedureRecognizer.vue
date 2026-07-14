@@ -26,6 +26,7 @@ import type {
   BuiltPromptPreview,
   EvaluationResult,
   GeoJsonRenderMode,
+  GraphCompareResult,
   Jeppesen424CompareResponse,
   LegCompareResult,
   PackageType,
@@ -33,6 +34,7 @@ import type {
   PdfPageAsset,
   ProcedureGroup,
   ProcedureCompareResult,
+  ProcedureGraphResponse,
   ProcedureTask,
   SendMode,
   SendPolicy,
@@ -160,6 +162,55 @@ const selectedGeoJsonRenderMode = computed<GeoJsonRenderMode>({
   },
 });
 const geojsonRenderSummary = computed(() => selectedGroup.value?.geojsonRenderSummary);
+
+// ---------- 地图展示模式：程序拓扑 / 航路实例 ----------
+const selectedViewMode = computed<'TOPOLOGY' | 'ROUTE_INSTANCE'>({
+  get: () => selectedGroup.value?.geojsonViewMode ?? 'TOPOLOGY',
+  set: (mode) => {
+    if (selectedGroup.value) selectedGroup.value.geojsonViewMode = mode;
+  },
+});
+const selectedInstanceRunway = computed<string>({
+  get: () => selectedGroup.value?.geojsonInstanceRunway ?? '',
+  set: (value) => {
+    if (selectedGroup.value) selectedGroup.value.geojsonInstanceRunway = value || undefined;
+  },
+});
+const selectedInstanceTransition = computed<string>({
+  get: () => selectedGroup.value?.geojsonInstanceEnrouteTransition ?? '',
+  set: (value) => {
+    if (selectedGroup.value) selectedGroup.value.geojsonInstanceEnrouteTransition = value || undefined;
+  },
+});
+const procedureGraphInfo = ref<ProcedureGraphResponse>();
+const instanceRunwayOptions = computed(() => {
+  const graph = procedureGraphInfo.value?.graphs?.[0];
+  return graph ? graph.runwayTransitions.map((item) => item.runway ?? item.id) : [];
+});
+const instanceTransitionOptions = computed(() => {
+  const graph = procedureGraphInfo.value?.graphs?.[0];
+  return graph ? graph.enrouteTransitions.map((item) => ({ id: item.id, displayName: item.displayName })) : [];
+});
+// 地图标题来自 GeoJSON 的 ProcedureChart display_title：拓扑模式必须是"XX · 程序拓扑"，
+// 实例模式才允许出现跑道
+const mapDisplayTitle = computed(() => {
+  const chartFeature = (selectedGroup.value?.geojson?.features ?? []).find(
+    (feature) => (feature.properties as Record<string, unknown> | null)?.object_type === 'ProcedureChart',
+  );
+  return String((chartFeature?.properties as Record<string, unknown> | null)?.display_title ?? '') || undefined;
+});
+
+async function loadProcedureGraph() {
+  if (!task.value || !selectedGroup.value?.procedureUnderstanding) return;
+  try {
+    const packageId = selectedGroup.value.packageId || selectedGroup.value.groupId;
+    procedureGraphInfo.value = await requestJson<ProcedureGraphResponse>(
+      `/api/procedure-tasks/${task.value.taskId}/packages/${packageId}/procedure-graph`,
+    );
+  } catch {
+    procedureGraphInfo.value = undefined;
+  }
+}
 
 const supportingPageCount = computed(() => {
   const group = selectedGroup.value;
@@ -1043,13 +1094,17 @@ const jeppesenAnalysisText = computed(() => {
   }
 
   const s = result.summary;
+  const overallText = s.overallScore === null
+    ? `不适用（${s.comparisonStatus ?? 'NOT_COMPARABLE'}：${s.reason ?? '程序身份未匹配'}）`
+    : `${s.overallScore}%`;
   const lines: string[] = [
     '# Jeppesen 424 对比分析报告',
     `- 程序包: ${group.packageName || group.groupName}`,
     `- Prompt: ${visionRunRecord.value?.promptTemplateId ?? '-'} v${visionRunRecord.value?.promptVersion ?? '-'} | 模型: ${visionRunRecord.value?.model ?? '-'}`,
     `- 腿段来源: ${legFallbackActive.value ? '几何合成兜底（模型未输出 tableLegs，高度缺失为预期）' : '模型 tableLegs'}`,
     `- 报告时间: ${new Date().toISOString()}`,
-    `- 总体匹配率 ${s.overallScore}% | 程序 ${s.matchedProcedures}/${s.totalProcedures} | 完全匹配腿段 ${s.matchedLegs}/${s.totalLegs} | 部分匹配 ${s.partialLegs} | 不匹配 ${s.mismatchedLegs} | AI缺失 ${s.missingAiLegs} | AI多出 ${s.missingJeppesenLegs} | 字段差异 ${s.fieldMismatchCount}`,
+    `- 总体匹配率 ${overallText} | 程序 ${s.matchedProcedures}/${s.totalProcedures} | 完全匹配腿段 ${s.matchedLegs}/${s.totalLegs} | 部分匹配 ${s.partialLegs} | 不匹配 ${s.mismatchedLegs} | AI缺失 ${s.missingAiLegs} | AI多出 ${s.missingJeppesenLegs} | 字段差异 ${s.fieldMismatchCount}`,
+    ...graphAnalysisLines(result.graphComparisons ?? []),
     '',
     `## AI 缺失的腿段（424 有、AI 无）: ${missingAi.length}`,
     ...(missingAi.length ? missingAi : ['  - 无']),
@@ -1073,6 +1128,35 @@ const jeppesenAnalysisText = computed(() => {
 function analysisValue(value: unknown) {
   if (value === undefined || value === null || value === '') return '(空)';
   return String(value);
+}
+
+// 图对比的覆盖率与拓扑差异行（进复制给 AI 的报告，遗漏的分支/过渡必须可见）
+function graphAnalysisLines(graphComparisons: GraphCompareResult[]) {
+  const lines: string[] = [];
+  for (const graphResult of graphComparisons) {
+    lines.push(
+      `- 程序身份: AIP=${graphResult.aiProcedure?.procedureId ?? '-'} vs 424=${graphResult.jeppesenProcedure?.procedureId ?? '-'} → ${graphResult.comparisonStatus}${graphResult.reason ? `（${graphResult.reason}）` : ''}`,
+    );
+    if (graphResult.coverage) {
+      lines.push(
+        `- 覆盖范围: 跑道过渡 ${graphResult.coverage.comparedRunwayTransitions.length}/${graphResult.coverage.totalRunwayTransitions}`
+        + `，航路过渡 ${graphResult.coverage.comparedEnrouteTransitions.length}/${graphResult.coverage.totalEnrouteTransitions}`
+        + `，coverage=${graphResult.coverage.coveragePercent ?? '-'}%`,
+      );
+    }
+    if (graphResult.topology) {
+      const missing = [
+        ...graphResult.topology.runwayTransitions.missingInAi.map((id) => `跑道${id}`),
+        ...graphResult.topology.enrouteTransitions.missingInAi.map((id) => `过渡${id}`),
+      ];
+      const extra = [
+        ...graphResult.topology.runwayTransitions.extraInAi.map((id) => `跑道${id}`),
+        ...graphResult.topology.enrouteTransitions.extraInAi.map((id) => `过渡${id}`),
+      ];
+      lines.push(`- 拓扑差异: AI 缺失 [${missing.join(', ') || '无'}]，AI 多出 [${extra.join(', ') || '无'}]`);
+    }
+  }
+  return lines;
 }
 
 // 缺失腿段的完整字段快照（覆盖全部对比字段），供报告读者判断缺的是什么类型的腿
@@ -1149,7 +1233,13 @@ async function generateGeoJson() {
     await requestJson(`/api/procedure-tasks/${task.value.taskId}/packages/${selectedGroup.value.groupId}/generate-geojson`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: 'geojson', renderMode: selectedGeoJsonRenderMode.value }),
+      body: JSON.stringify({
+        mode: 'geojson',
+        renderMode: selectedGeoJsonRenderMode.value,
+        viewMode: selectedViewMode.value,
+        instanceRunway: selectedViewMode.value === 'ROUTE_INSTANCE' ? (selectedInstanceRunway.value || undefined) : undefined,
+        instanceEnrouteTransition: selectedViewMode.value === 'ROUTE_INSTANCE' ? (selectedInstanceTransition.value || undefined) : undefined,
+      }),
     });
     await refreshTask(false);
     mapResetCounter.value += 1;
@@ -1168,8 +1258,21 @@ async function proceedToPreview() {
     if (!confirmed) return;
   }
   goToStep('preview');
+  void loadProcedureGraph();
   if (!selectedGroup.value?.geojson) await generateGeoJson();
 }
+
+// 展示模式 / 跑道 / 过渡切换后自动重建 GeoJSON（已有结果时）
+watch([selectedViewMode, selectedInstanceRunway, selectedInstanceTransition], async ([mode], [previousMode]) => {
+  if (currentStep.value !== 'preview' || geojsonBusy.value) return;
+  if (!selectedGroup.value?.geojson) return;
+  if (mode === 'ROUTE_INSTANCE' && !selectedInstanceRunway.value && !selectedInstanceTransition.value && previousMode === 'TOPOLOGY') {
+    // 刚切到实例模式还没选跑道/过渡：等选完再重建
+    void loadProcedureGraph();
+    return;
+  }
+  await generateGeoJson();
+});
 
 function openFullMapPreview() {
   if (!task.value || !selectedGroup.value) return;
@@ -1416,8 +1519,52 @@ function scoreText(value: number | undefined) {
   return value === undefined ? '-' : `${Math.round(value * 100)}%`;
 }
 
-function compareScoreText(value: number | undefined) {
-  return value === undefined ? '-' : `${value.toFixed(1).replace(/\.0$/, '')}%`;
+function compareScoreText(value: number | null | undefined) {
+  return value === undefined || value === null ? '-' : `${value.toFixed(1).replace(/\.0$/, '')}%`;
+}
+
+// ---------- 四阶段程序图对比展示辅助 ----------
+
+function graphCompareKey(result: GraphCompareResult) {
+  return `${result.aiProcedure?.procedureId ?? ''}|${result.jeppesenProcedure?.procedureId ?? ''}`;
+}
+
+function graphScoreText(value: number | null | undefined) {
+  return value === undefined || value === null ? '不适用' : `${value.toFixed(1).replace(/\.0$/, '')}%`;
+}
+
+function graphStatusClass(status: GraphCompareResult['comparisonStatus']) {
+  if (status === 'MATCHED') return 'match';
+  if (status === 'PARTIALLY_IDENTIFIED') return 'partial';
+  return 'mismatch';
+}
+
+function branchStatusClass(status: 'COMPARED' | 'MISSING_AI' | 'MISSING_JEPPESEN') {
+  if (status === 'COMPARED') return 'match';
+  return status === 'MISSING_AI' ? 'missing-ai' : 'missing-jeppesen';
+}
+
+function graphLegClass(status: string) {
+  if (status === 'MATCH' || status === 'MERGED_ANCHOR') return 'match';
+  if (status === 'PARTIAL') return 'partial';
+  if (status === 'MISSING_AI') return 'missing-ai';
+  if (status === 'MISSING_JEPPESEN') return 'missing-jeppesen';
+  return 'mismatch';
+}
+
+function segmentTypeLabel(segmentType: 'RUNWAY_TRANSITION' | 'COMMON_ROUTE' | 'ENROUTE_TRANSITION') {
+  if (segmentType === 'RUNWAY_TRANSITION') return 'Runway Transition';
+  if (segmentType === 'COMMON_ROUTE') return 'Common Route';
+  return 'Enroute Transition';
+}
+
+function uncoveredList(result: GraphCompareResult, kind: 'RUNWAY' | 'ENROUTE') {
+  const identity = result.jeppesenProcedure;
+  const coverage = result.coverage;
+  if (!identity || !coverage) return '';
+  const total = kind === 'RUNWAY' ? identity.runwayTransitionIds : identity.enrouteTransitionIds;
+  const compared = new Set(kind === 'RUNWAY' ? coverage.comparedRunwayTransitions : coverage.comparedEnrouteTransitions);
+  return total.filter((id) => !compared.has(id)).join(' / ');
 }
 
 const visionImagePagesText = computed(() => {
@@ -2104,6 +2251,34 @@ function isCancelledError(value: unknown) {
 
             <aside class="preview-side">
               <section class="block">
+                <h2>展示模式</h2>
+                <p class="hint" v-if="mapDisplayTitle"><strong>{{ mapDisplayTitle }}</strong></p>
+                <label class="field-label" for="geojson-view-mode">程序拓扑 / 航路实例</label>
+                <select id="geojson-view-mode" v-model="selectedViewMode">
+                  <option value="TOPOLOGY">程序拓扑：全部跑道分支 + 全部过渡</option>
+                  <option value="ROUTE_INSTANCE">航路实例：仅选中 跑道 + 过渡 的可飞路径</option>
+                </select>
+                <template v-if="selectedViewMode === 'ROUTE_INSTANCE'">
+                  <label class="field-label" for="instance-runway">跑道</label>
+                  <select id="instance-runway" v-model="selectedInstanceRunway">
+                    <option value="">（未选择）</option>
+                    <option v-for="runway in instanceRunwayOptions" :key="runway" :value="runway">{{ runway }}</option>
+                  </select>
+                  <label class="field-label" for="instance-transition">Enroute Transition</label>
+                  <select id="instance-transition" v-model="selectedInstanceTransition">
+                    <option value="">（无 / 不选）</option>
+                    <option v-for="transition in instanceTransitionOptions" :key="transition.id" :value="transition.id">
+                      {{ transition.displayName || transition.id }}
+                    </option>
+                  </select>
+                </template>
+                <div class="map-legend">
+                  <span class="legend-item"><span class="legend-line exact"></span> 精确几何（TF 双端具名坐标）</span>
+                  <span class="legend-item"><span class="legend-line schematic"></span> 示意几何（VA/DF 条件段，不参与精度）</span>
+                </div>
+              </section>
+
+              <section class="block">
                 <h2>GeoJSON 状态</h2>
                 <label class="field-label" for="geojson-render-mode">渲染模式</label>
                 <select id="geojson-render-mode" v-model="selectedGeoJsonRenderMode">
@@ -2207,12 +2382,24 @@ function isCancelledError(value: unknown) {
           <p v-if="jeppesenCompareBusy" class="empty">正在解析并对比 Jeppesen 424 文本...</p>
 
           <template v-if="jeppesenCompareResult">
+            <p
+              v-if="jeppesenCompareResult.summary.overallScore === null"
+              class="alert warn"
+            >
+              程序身份未匹配（{{ jeppesenCompareResult.summary.comparisonStatus }}）：{{ jeppesenCompareResult.summary.reason || '主程序没有匹配成功' }}。已禁止计算总体匹配率。
+            </p>
             <section class="block">
               <h2>对比摘要</h2>
               <div class="summary-cards">
                 <div class="metric-card"><span>部分匹配腿段</span><strong>{{ jeppesenCompareResult.summary.partialLegs }}</strong></div>
                 <div class="metric-card"><span>不匹配腿段</span><strong>{{ jeppesenCompareResult.summary.mismatchedLegs }}</strong></div>
-                <div class="metric-card"><span>总体匹配率</span><strong>{{ compareScoreText(jeppesenCompareResult.summary.overallScore) }}</strong></div>
+                <div class="metric-card">
+                  <span>总体匹配率</span>
+                  <strong v-if="jeppesenCompareResult.summary.overallScore === null" class="status-pill mismatch">
+                    {{ jeppesenCompareResult.summary.comparisonStatus ?? 'NOT_COMPARABLE' }}
+                  </strong>
+                  <strong v-else>{{ compareScoreText(jeppesenCompareResult.summary.overallScore) }}</strong>
+                </div>
                 <div class="metric-card"><span>程序数</span><strong>{{ jeppesenCompareResult.summary.totalProcedures }}</strong></div>
                 <div class="metric-card"><span>腿段数</span><strong>{{ jeppesenCompareResult.summary.totalLegs }}</strong></div>
                 <div class="metric-card"><span>AI 腿段</span><strong>{{ jeppesenCompareResult.aiLegs.length }}</strong></div>
@@ -2222,6 +2409,110 @@ function isCancelledError(value: unknown) {
                 <div class="metric-card"><span>差异数</span><strong>{{ jeppesenCompareResult.summary.issueCount ?? jeppesenCompareResult.procedureResults.reduce((sum, item) => sum + procedureDiffCount(item), 0) }}</strong></div>
               </div>
             </section>
+
+            <!-- ==================== 四阶段程序图对比：身份 / 覆盖 / 拓扑 / 分层腿段 ==================== -->
+            <template v-for="graphResult in jeppesenCompareResult.graphComparisons ?? []" :key="graphCompareKey(graphResult)">
+              <section class="block">
+                <h2>程序身份</h2>
+                <p v-if="graphResult.reason" class="alert warn">{{ graphResult.reason }}</p>
+                <div class="manifest-grid">
+                  <span>AIP 程序</span><strong>{{ graphResult.aiProcedure?.procedureName || '-' }} ({{ graphResult.aiProcedure?.procedureId || '-' }})</strong>
+                  <span>424 程序</span><strong>{{ graphResult.jeppesenProcedure?.procedureName || '-' }} ({{ graphResult.jeppesenProcedure?.procedureId || '-' }})</strong>
+                  <span>机场</span><strong>{{ graphResult.aiProcedure?.airportIcao || graphResult.jeppesenProcedure?.airportIcao || '-' }}</strong>
+                  <span>程序类型</span><strong>{{ graphResult.aiProcedure?.procedureType || graphResult.jeppesenProcedure?.procedureType || '-' }}</strong>
+                  <span>匹配状态</span><strong><span class="status-pill" :class="graphStatusClass(graphResult.comparisonStatus)">{{ graphResult.comparisonStatus }}</span></strong>
+                  <span>是否允许比较</span><strong>{{ graphResult.comparisonStatus === 'MATCHED' ? '是' : '否' }}</strong>
+                </div>
+                <div v-if="graphResult.comparisonStatus === 'MATCHED'" class="summary-cards">
+                  <div class="metric-card"><span>identityScore</span><strong>{{ graphScoreText(graphResult.scores.identityScore) }}</strong></div>
+                  <div class="metric-card"><span>topologyScore</span><strong>{{ graphScoreText(graphResult.scores.topologyScore) }}</strong></div>
+                  <div class="metric-card"><span>legSequenceScore</span><strong>{{ graphScoreText(graphResult.scores.legSequenceScore) }}</strong></div>
+                  <div class="metric-card"><span>comparableFieldScore</span><strong>{{ graphScoreText(graphResult.scores.comparableFieldScore) }}</strong></div>
+                  <div class="metric-card"><span>geometryValidationScore</span><strong>{{ graphScoreText(graphResult.scores.geometryValidationScore) }}</strong></div>
+                  <div class="metric-card"><span>overallScore</span><strong>{{ graphScoreText(graphResult.scores.overallScore) }}</strong></div>
+                  <div class="metric-card"><span>overallStatus</span><strong>{{ graphResult.overallStatus }}</strong></div>
+                </div>
+              </section>
+
+              <section v-if="graphResult.coverage" class="block">
+                <h2>覆盖范围</h2>
+                <div class="manifest-grid">
+                  <span>已比较跑道过渡</span><strong>{{ graphResult.coverage.comparedRunwayTransitions.join(' / ') || '-' }}（{{ graphResult.coverage.comparedRunwayTransitions.length }}/{{ graphResult.coverage.totalRunwayTransitions }}）</strong>
+                  <span>未比较跑道过渡</span><strong>{{ uncoveredList(graphResult, 'RUNWAY') || '无' }}</strong>
+                  <span>已比较航路过渡</span><strong>{{ graphResult.coverage.comparedEnrouteTransitions.join(' / ') || '-' }}（{{ graphResult.coverage.comparedEnrouteTransitions.length }}/{{ graphResult.coverage.totalEnrouteTransitions }}）</strong>
+                  <span>未比较航路过渡</span><strong>{{ uncoveredList(graphResult, 'ENROUTE') || '无' }}</strong>
+                  <span>公共航路</span><strong>{{ graphResult.coverage.commonRouteCompared ? '已比较' : '未比较 / 源数据无独立公共航路' }}</strong>
+                  <span>coveragePercent</span><strong>{{ graphScoreText(graphResult.coverage.coveragePercent) }}</strong>
+                </div>
+              </section>
+
+              <section v-if="graphResult.topology" class="block">
+                <h2>程序拓扑差异</h2>
+                <div class="manifest-grid">
+                  <span>缺失跑道分支（AI 未识别）</span><strong>{{ graphResult.topology.runwayTransitions.missingInAi.join(' / ') || '无' }}</strong>
+                  <span>多出跑道分支（424 无）</span><strong>{{ graphResult.topology.runwayTransitions.extraInAi.join(' / ') || '无' }}</strong>
+                  <span>缺失 Transition（AI 未识别）</span><strong>{{ graphResult.topology.enrouteTransitions.missingInAi.join(' / ') || '无' }}</strong>
+                  <span>多出 Transition（424 无）</span><strong>{{ graphResult.topology.enrouteTransitions.extraInAi.join(' / ') || '无' }}</strong>
+                  <span>汇合点（AI / 424）</span><strong>{{ graphResult.topology.mergePoints.ai.join(',') || '-' }} / {{ graphResult.topology.mergePoints.jeppesen.join(',') || '-' }}</strong>
+                  <span>entry/exit 差异</span>
+                  <strong>
+                    <template v-if="graphResult.topology.entryExitDiffs.length">
+                      <span v-for="diff in graphResult.topology.entryExitDiffs" :key="`${diff.transitionId}-${diff.field}`" class="status-pill partial">
+                        {{ diff.transitionId }}.{{ diff.field }}: AI={{ diff.aiValue || '-' }} vs 424={{ diff.jeppesenValue || '-' }}
+                      </span>
+                    </template>
+                    <template v-else>无</template>
+                  </strong>
+                </div>
+              </section>
+
+              <details
+                v-for="branch in graphResult.branches"
+                :key="`${graphCompareKey(graphResult)}-${branch.segmentType}-${branch.transitionId}`"
+                class="block compare-panel"
+                :open="branch.status !== 'COMPARED'"
+              >
+                <summary>
+                  <span class="status-pill" :class="branchStatusClass(branch.status)">{{ segmentTypeLabel(branch.segmentType) }}</span>
+                  {{ branch.displayName || branch.transitionId }}
+                  <template v-if="branch.status === 'MISSING_AI'"> — AI 缺失整个分支</template>
+                  <template v-else-if="branch.status === 'MISSING_JEPPESEN'"> — 424 无此分支</template>
+                </summary>
+                <div class="table-wrap">
+                  <table class="compare-table">
+                    <thead>
+                      <tr>
+                        <th>AI Seq</th>
+                        <th>424 Seq</th>
+                        <th>PT</th>
+                        <th>toFix</th>
+                        <th>状态</th>
+                        <th>字段（AI 值 / 424 值 / 判定）</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="(legResult, legIndex) in branch.legResults" :key="legIndex" :class="graphLegClass(legResult.status)">
+                        <td>{{ legResult.aiSequence ?? '-' }}</td>
+                        <td>{{ legResult.jeppesenSequence ?? '-' }}</td>
+                        <td>{{ legResult.pathTerminator || '-' }}</td>
+                        <td>{{ legResult.toFix || '-' }}</td>
+                        <td><span class="status-pill" :class="graphLegClass(legResult.status)">{{ legResult.status === 'MERGED_ANCHOR' ? 'IF 锚点已合并' : legResult.status }}</span></td>
+                        <td>
+                          <div v-for="field in legResult.fields" :key="field.field" class="graph-field-row">
+                            <code>{{ field.field }}</code>
+                            <span>{{ valueText(field.aiValue) }} / {{ valueText(field.jeppesenValue) }}</span>
+                            <span v-if="!field.comparable" class="status-pill vendor-only" :title="field.reason">仅供应商数据</span>
+                            <span v-else-if="field.matched && field.toleranceApplied" class="status-pill partial" title="容差内匹配">tolerance match</span>
+                            <span v-else-if="field.matched" class="status-pill match">match</span>
+                            <span v-else class="status-pill mismatch" :title="field.reason">mismatch</span>
+                          </div>
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </details>
+            </template>
 
             <details
               v-for="procedure in jeppesenCompareResult.procedureResults"
@@ -2907,6 +3198,51 @@ button.issue-active {
 }
 
 /* ---------- Step 5 ---------- */
+
+.graph-field-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 12px;
+}
+
+.graph-field-row code {
+  min-width: 130px;
+  color: #475569;
+}
+
+.status-pill.vendor-only {
+  background: #f1f5f9;
+  color: #64748b;
+  border: 1px dashed #94a3b8;
+}
+
+.map-legend {
+  display: grid;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: #334155;
+}
+
+.legend-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.legend-line {
+  display: inline-block;
+  width: 34px;
+  height: 0;
+  border-top: 3px solid #2563eb;
+}
+
+.legend-line.schematic {
+  border-top-style: dashed;
+  border-top-color: #f59e0b;
+}
 
 .jeppesen-input {
   width: 100%;

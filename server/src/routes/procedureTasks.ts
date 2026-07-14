@@ -15,6 +15,9 @@ import { evaluateProcedureUnderstanding } from '../services/evaluation/procedure
 import { aiProcedureToSimpleLegs } from '../services/jeppesen424/aiProcedureToSimpleLegs';
 import { parseJeppesen424Text } from '../services/jeppesen424/jeppesen424TextParser';
 import { alignJeppesenProcedureNames, compareSimpleProcedureLegs } from '../services/jeppesen424/simpleProcedureComparator';
+import { buildGraphsFromJeppesenLegs, buildGraphsFromUnderstanding } from '../services/procedureGraph/buildProcedureGraph';
+import { compareProcedureGraphs, findMatchingJeppesenGraph } from '../services/procedureGraph/graphComparator';
+import { materializeAllRoutes } from '../services/procedureGraph/materializeRoute';
 import { simpleLegsTo424Text } from '../services/jeppesen424/simpleLegsTo424Text';
 import { buildPrompt as buildProcedurePrompt } from '../services/prompt/promptBuilder';
 import { savePromptRunRecord } from '../services/prompt/promptRunStore';
@@ -350,11 +353,21 @@ router.post('/:taskId/groups/:groupId/run-ai', async (req, res, next) => {
 router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, next) => {
   try {
     const requestedRenderMode = normalizeGeoJsonRenderMode(req.body?.renderMode);
+    const requestedViewMode = req.body?.viewMode === 'ROUTE_INSTANCE' ? 'ROUTE_INSTANCE' as const
+      : req.body?.viewMode === 'TOPOLOGY' ? 'TOPOLOGY' as const
+        : undefined;
+    const instanceRunway = typeof req.body?.instanceRunway === 'string' ? req.body.instanceRunway.trim().toUpperCase() : undefined;
+    const instanceEnrouteTransition = typeof req.body?.instanceEnrouteTransition === 'string'
+      ? req.body.instanceEnrouteTransition.trim().toUpperCase()
+      : undefined;
     await updateTask(req.params.taskId, (draft) => {
       const group = findGroup(draft.groups, req.params.packageId);
       group.geojsonStatus = 'GENERATING';
       group.geojsonError = undefined;
       if (requestedRenderMode) group.geojsonRenderMode = requestedRenderMode;
+      if (requestedViewMode) group.geojsonViewMode = requestedViewMode;
+      group.geojsonInstanceRunway = requestedViewMode === 'ROUTE_INSTANCE' ? instanceRunway : undefined;
+      group.geojsonInstanceEnrouteTransition = requestedViewMode === 'ROUTE_INSTANCE' ? instanceEnrouteTransition : undefined;
     });
 
     const task = await readTask(req.params.taskId);
@@ -380,7 +393,12 @@ router.post('/:taskId/packages/:packageId/generate-geojson', async (req, res, ne
         aiProcedureCount: renderPlan.aiProcedureCount,
         warnings: renderPlan.warnings,
       };
-      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group, task.pages, { renderPlan });
+      group.geojson = buildGeoJsonFromProcedureUnderstanding(group.procedureUnderstanding, group, task.pages, {
+        renderPlan,
+        viewMode: group.geojsonViewMode ?? 'TOPOLOGY',
+        instanceRunway: group.geojsonInstanceRunway,
+        instanceEnrouteTransition: group.geojsonInstanceEnrouteTransition,
+      });
       const validation = validateProcedureGeoJson(group.geojson, group);
       group.geojsonStatus = validation.valid ? 'GENERATED' : 'ERROR';
       group.geojsonGeneratedAt = validation.valid ? new Date().toISOString() : undefined;
@@ -527,14 +545,56 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       createdAt: new Date().toISOString(),
     };
     group.aiResponse = await runProcedureUnderstandingRecognition(builtPrompt, model, abortController.signal);
-    const normalizedResult = normalizeProcedureUnderstandingResult(group.aiResponse.parsedJson, group, aiInputPackage) as ProcedureUnderstandingResult;
-    group.aiResponse.parsedJson = mergeWithExisting && group.procedureUnderstanding
-      ? mergeProcedureUnderstandingResults(group.procedureUnderstanding, normalizedResult)
-      : normalizedResult;
+    const originalRawText = group.aiResponse.rawText;
+    const buildCandidate = (parsed: unknown) => {
+      const normalized = normalizeProcedureUnderstandingResult(parsed, group, aiInputPackage) as ProcedureUnderstandingResult;
+      return mergeWithExisting && group.procedureUnderstanding
+        ? mergeProcedureUnderstandingResults(group.procedureUnderstanding, normalized)
+        : normalized;
+    };
+    group.aiResponse.parsedJson = buildCandidate(group.aiResponse.parsedJson);
+    let validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson, builtPrompt.responseSchema);
+    let schemaRepairApplied = false;
+
+    // Schema 校验失败：保留原始结果 → 触发一次修复 Prompt（文本修复，不再送图）→
+    // 修复后仍失败则进入人工复核，不得静默降级成错误结果
+    if (!validationResult.schemaValid) {
+      try {
+        const repairResponse = await runProcedureUnderstandingRecognition(
+          {
+            ...builtPrompt,
+            userPrompt: buildSchemaRepairPrompt(validationResult.errors, originalRawText),
+            inputImages: [],
+          },
+          model,
+          abortController.signal,
+        );
+        const repairedCandidate = buildCandidate(repairResponse.parsedJson);
+        const repairedValidation = validateProcedureUnderstandingResult(repairedCandidate, builtPrompt.responseSchema);
+        if (repairedValidation.schemaValid) {
+          schemaRepairApplied = true;
+          group.aiResponse = { ...repairResponse, parsedJson: repairedCandidate };
+          validationResult = repairedValidation;
+        }
+      } catch {
+        // 修复调用失败保持原校验错误，进入人工复核
+      }
+    }
+
     const completedAt = new Date().toISOString();
-    const validationResult = validateProcedureUnderstandingResult(group.aiResponse.parsedJson, builtPrompt.responseSchema);
     const validationErrorMessage = validationResult.schemaValid ? undefined : schemaValidationMessage(validationResult.errors);
-    group.procedureUnderstanding = group.aiResponse.parsedJson as ProcedureUnderstandingResult;
+    if (validationResult.schemaValid) {
+      const candidate = group.aiResponse.parsedJson as ProcedureUnderstandingResult;
+      if (schemaRepairApplied) {
+        candidate.warnings = [
+          ...(candidate.warnings ?? []),
+          { message: '模型首次输出未通过 Schema 校验，已通过一次修复 Prompt 纠正；请复核关键字段。', pageNos: [], fieldName: null, reviewRequired: true },
+        ];
+        candidate.reviewRequired = true;
+      }
+      group.procedureUnderstanding = candidate;
+    }
+    // 校验失败：保留 group.procedureUnderstanding 原值（不得用非法结果覆盖），原始输出存于 visionRunRecord
     group.aiResponse.errors = validationResult.schemaValid ? undefined : validationResult.errors;
     group.visionRunRecord = {
       runId: `vision_run_${Date.now()}`,
@@ -553,14 +613,16 @@ router.post('/:taskId/packages/:packageId/run-vision-recognition', async (req, r
       supportSummaryPages: Array.from(new Set(builtPrompt.supportSummaries.flatMap((item) => item.pageNos))).sort((a, b) => a - b),
       startedAt,
       completedAt,
-      rawResponse: group.aiResponse.rawText,
+      rawResponse: originalRawText,
       parsedJson: group.aiResponse.parsedJson,
       validationResult,
       schemaValidation: {
         valid: validationResult.schemaValid,
         errors: validationResult.errors,
       },
-      errorType: validationResult.schemaValid ? undefined : 'SCHEMA_VALIDATION',
+      errorType: validationResult.schemaValid
+        ? (schemaRepairApplied ? 'SCHEMA_REPAIRED' : undefined)
+        : 'SCHEMA_VALIDATION_REVIEW',
       errorMessage: validationErrorMessage,
     };
     group.status = validationResult.schemaValid ? 'AI_COMPLETED' : 'ERROR';
@@ -644,6 +706,21 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
     const aiLegs = filterSimpleLegs(allAiLegs, procedureFilter, runway);
     const procedureResults = compareSimpleProcedureLegs(aiLegs, parsedJeppesenLegs);
 
+    // ==================== 四阶段程序图对比（身份门槛 → 拓扑 → 腿段 → 字段） ====================
+    // 覆盖率与拓扑差异基于"全部" 424 腿段（不受跑道过滤影响），保证遗漏的跑道分支/过渡可见
+    const aiGraphs = buildGraphsFromUnderstanding(group.procedureUnderstanding);
+    const jeppesenGraphs = buildGraphsFromJeppesenLegs(
+      alignedJeppesenLegs,
+      String(group.procedureUnderstanding.airportIcao ?? ''),
+    );
+    const graphComparisons = aiGraphs.length
+      ? aiGraphs.map((aiGraph) => compareProcedureGraphs(aiGraph, findMatchingJeppesenGraph(aiGraph, jeppesenGraphs)))
+      : jeppesenGraphs.map((jeppesenGraph) => compareProcedureGraphs(
+        { ...jeppesenGraph, builtFrom: 'AI_UNDERSTANDING', runwayTransitions: [], commonRoutes: [], enrouteTransitions: [], mergePoints: [] },
+        jeppesenGraph,
+      ));
+    const identityPassed = graphComparisons.some((comparison) => comparison.comparisonStatus === 'MATCHED');
+
     const totalLegs = procedureResults.reduce((sum, result) => sum + result.totalLegs, 0);
     const matchedLegs = procedureResults.reduce((sum, result) => sum + result.matchedLegs, 0);
     const partialLegs = procedureResults.reduce((sum, result) => sum + result.partialLegs, 0);
@@ -655,9 +732,12 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
       0,
     );
     const issueCount = fieldMismatchCount + missingAiLegs + missingJeppesenLegs;
-    const overallScore = totalLegs
-      ? Math.round((procedureResults.reduce((sum, result) => sum + result.score * result.totalLegs, 0) / totalLegs) * 10) / 10
-      : 0;
+    // 程序身份门槛：主程序没有匹配成功时禁止输出总体匹配率（null，不是 0，更不是 91.3%）
+    const overallScore = !identityPassed
+      ? null
+      : totalLegs
+        ? Math.round((procedureResults.reduce((sum, result) => sum + result.score * result.totalLegs, 0) / totalLegs) * 10) / 10
+        : 0;
 
     const importedAt = new Date().toISOString();
     const procedureCount = new Set(parsedJeppesenLegs.map((leg) => `${leg.procedureName}|${leg.runway}`)).size;
@@ -710,7 +790,12 @@ router.post('/:taskId/packages/:packageId/jeppesen424/compare', async (req, res,
         fieldMismatchCount,
         issueCount,
         overallScore,
+        comparisonStatus: identityPassed
+          ? (graphComparisons.some((comparison) => comparison.overallStatus === 'PARTIAL_COMPARISON') ? 'PARTIAL_COMPARISON' : 'MATCHED')
+          : (graphComparisons[0]?.comparisonStatus ?? 'NOT_COMPARABLE'),
+        reason: identityPassed ? undefined : graphComparisons[0]?.reason,
       },
+      graphComparisons,
       procedureResults,
       parsedJeppesenLegs,
       aiLegs,
@@ -815,6 +900,22 @@ router.post('/:taskId/groups/:groupId/validate-geojson', async (req, res, next) 
   }
 });
 
+// 程序图结构：跑道过渡 / 公共航路 / 航路过渡 / 汇合点 + 全部可飞实例（供地图选择器与拓扑报告）
+router.get('/:taskId/packages/:packageId/procedure-graph', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const group = findGroup(task.groups, req.params.packageId);
+    if (!group.procedureUnderstanding) return res.status(400).json({ error: 'No ProcedureUnderstanding result.' });
+    const graphs = buildGraphsFromUnderstanding(group.procedureUnderstanding).map((graph) => ({
+      ...graph,
+      routeInstances: materializeAllRoutes(graph),
+    }));
+    res.json({ graphs });
+  } catch (error) {
+    next(error);
+  }
+});
+
 function findGroup(groups: ProcedureGroup[], groupId: string) {
   const group = groups.find((item) => item.groupId === groupId || item.packageId === groupId);
   if (!group) throw new Error('分组不存在。');
@@ -841,10 +942,12 @@ async function markRecognitionCancelled(taskId: string, packageId: string) {
   });
 }
 
-function filterSimpleLegs<T extends { procedureName: string; runway: string }>(legs: T[], procedureFilter: string[], runway: string) {
+function filterSimpleLegs<T extends { procedureName: string; runway: string; transitionName?: string }>(legs: T[], procedureFilter: string[], runway: string) {
   return legs.filter((leg) => {
     if (procedureFilter.length && !procedureMatchesFilter(leg.procedureName, procedureFilter)) return false;
-    if (runway && normalizeRunway(leg.runway) !== runway) return false;
+    // 跑道过滤只作用于跑道过渡腿：enroute transition 与 common route 属于整个程序，
+    // 与选定跑道无关，不得因 runway 过滤被整体丢弃（否则 DRAKY/TATEY 等过渡会凭空"缺失 0"）
+    if (runway && leg.runway && !leg.transitionName && normalizeRunway(leg.runway) !== runway) return false;
     return true;
   });
 }
@@ -898,11 +1001,19 @@ export function mergeProcedureUnderstandingResults(
     runway: incoming.runway ?? existing.runway,
     procedureClassification: classification,
     procedures: normalizeMergedProcedureVariants(removeLowConfidencePlaceholders(
-      mergeByKey(existing.procedures ?? [], incoming.procedures ?? [], procedureIdentity),
-    )),
+      mergeByKey(
+        (existing.procedures ?? []) as unknown as Record<string, unknown>[],
+        (incoming.procedures ?? []) as unknown as Record<string, unknown>[],
+        procedureIdentity,
+      ),
+    )) as unknown as ProcedureUnderstandingResult['procedures'],
     tableLegs: removeCoveredTableLegVariants(
-      mergeByKey(existing.tableLegs ?? [], incoming.tableLegs ?? [], tableLegIdentity),
-    ),
+      mergeByKey(
+        (existing.tableLegs ?? []) as unknown as Record<string, unknown>[],
+        (incoming.tableLegs ?? []) as unknown as Record<string, unknown>[],
+        tableLegIdentity,
+      ),
+    ) as unknown as ProcedureUnderstandingResult['tableLegs'],
     fixes: mergeRecordsByKey(existing.fixes ?? [], incoming.fixes ?? [], (item) => normalizedKey(item.identifier ?? item.fixIdentifier)),
     navaids: mergeRecordsByKey(existing.navaids ?? [], incoming.navaids ?? [], (item) => normalizedKey(item.identifier ?? item.ident)),
     runways: mergeRecordsByKey(existing.runways ?? [], incoming.runways ?? [], (item) => normalizedKey(item.identifier ?? item.runway)),
@@ -1144,6 +1255,25 @@ function validateProcedureUnderstandingResult(value: unknown, schema?: unknown) 
     if (key in record && !Array.isArray(record[key])) errors.push(`Field must be an array: ${key}`);
   }
   return { schemaValid: errors.length === 0, errors };
+}
+
+// 修复 Prompt：把校验错误 + 模型原始输出回喂，只允许修 JSON 结构，不得改动已识别的业务值
+function buildSchemaRepairPrompt(errors: string[], rawOutput: string) {
+  return [
+    'Your previous JSON output failed schema validation. Repair it.',
+    '',
+    'Validation errors:',
+    ...errors.slice(0, 40).map((error) => `- ${error}`),
+    '',
+    'Rules:',
+    '- Return the SAME recognition content as a single valid JSON object matching the schema.',
+    '- Fix structure only (missing required keys, wrong types, illegal enum values).',
+    '- Do NOT invent new procedures, legs, fixes, or values. Fields without evidence stay null.',
+    '- No markdown fences, no prose.',
+    '',
+    'Previous output:',
+    rawOutput.slice(0, 60000),
+  ].join('\n');
 }
 
 function schemaValidationMessage(errors: string[]) {

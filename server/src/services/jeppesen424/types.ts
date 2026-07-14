@@ -1,3 +1,5 @@
+import type { JeppesenLegExtension } from '../../types/procedure';
+
 export type SimpleLegSource = 'AI' | 'JEPPESEN_424';
 export type CompareStatus = 'MATCH' | 'PARTIAL' | 'MISMATCH' | 'MISSING_AI' | 'MISSING_JEPPESEN';
 export type CompareSeverity = 'INFO' | 'WARNING' | 'ERROR';
@@ -7,6 +9,10 @@ export interface SimpleProcedureLeg {
   runway: string;
   transitionName?: string;
   routeKey: string;
+  /** 424 路线类型列（第 20 列，0 基 19）：区分 runway/common/enroute transition 记录 */
+  routeType?: string;
+  /** 记录所属分支角色（由路线段限定符解析而来） */
+  branchRole?: 'RUNWAY' | 'COMMON' | 'ENROUTE';
   sequence: string;
   fix: string;
   pathTerminator?: string;
@@ -34,6 +40,11 @@ export interface SimpleProcedureLeg {
   fixSection?: string;
   /** 推荐导航台（AF/CI 在 51-54 列，IF 在 107-110 列，如弧心 VJB） */
   recommendedNavaid?: string;
+  /**
+   * Continuation 记录（2P/3E 等）的结构化保留：原文、解释值、是否可与 AIP 对比。
+   * 注意 distanceNm 来自 2P 供应商扩展时不能直接视为 AIP 发布距离。
+   */
+  extensions?: JeppesenLegExtension[];
   source: SimpleLegSource;
   rawRecord?: string;
 }
@@ -79,12 +90,17 @@ export interface Jeppesen424CompareSummary {
   missingJeppesenLegs: number;
   fieldMismatchCount: number;
   issueCount: number;
-  overallScore: number;
+  /** 程序身份未匹配时为 null，禁止显示总体匹配率 */
+  overallScore: number | null;
+  comparisonStatus?: 'MATCHED' | 'PARTIAL_COMPARISON' | 'PARTIALLY_IDENTIFIED' | 'NOT_COMPARABLE' | 'SOURCE_MISMATCH';
+  reason?: string;
 }
 
 export interface Jeppesen424CompareResponse {
   ok: true;
   summary: Jeppesen424CompareSummary;
+  /** 四阶段程序图对比结果（身份/拓扑/腿段/字段 + 覆盖率），每个 AI 程序一条 */
+  graphComparisons?: import('../procedureGraph/graphComparator').GraphCompareResult[];
   procedureResults: ProcedureCompareResult[];
   parsedJeppesenLegs: SimpleProcedureLeg[];
   aiLegs: SimpleProcedureLeg[];

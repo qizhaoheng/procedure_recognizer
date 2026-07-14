@@ -28,7 +28,7 @@ const tangentSourceId = 'tangentSource';
 
 const layerMap: Record<keyof LayerVisibility, string[]> = {
   procedureTrack: ['procedure-track'],
-  procedureLeg: ['procedure-leg'],
+  procedureLeg: ['procedure-leg', 'procedure-leg-schematic'],
   procedureFix: ['procedure-fix'],
   derivedFix: ['derived-fix', 'sid-altitude-point'],
   navaid: ['navaid'],
@@ -49,6 +49,7 @@ const popupLayers = [
   'procedure-fix',
   'sid-altitude-point',
   'procedure-leg',
+  'procedure-leg-schematic',
   'direction-arrow-layer',
   'procedure-track',
   'lead-radial',
@@ -202,11 +203,12 @@ function addSourcesAndLayers() {
       'line-opacity': 0.42,
     },
   });
+  // 精确几何腿（TF 双端具名坐标等）：实线
   addLayer({
     id: 'procedure-leg',
     type: 'line',
     source: sourceId,
-    filter: typedFilter('ProcedureLeg'),
+    filter: ['all', typedFilter('ProcedureLeg'), ['!=', ['get', 'schematic'], true]],
     paint: {
       'line-color': [
         'match',
@@ -225,6 +227,19 @@ function addSourcesAndLayers() {
       ],
       'line-width': 4,
       'line-opacity': 0.92,
+    },
+  });
+  // 示意几何腿（VA 无固定终点 / DF 起点未定等）：虚线独立分层，不与精确几何混淆
+  addLayer({
+    id: 'procedure-leg-schematic',
+    type: 'line',
+    source: sourceId,
+    filter: ['all', typedFilter('ProcedureLeg'), ['==', ['get', 'schematic'], true]],
+    paint: {
+      'line-color': '#d97706',
+      'line-width': 3,
+      'line-opacity': 0.85,
+      'line-dasharray': [3, 2],
     },
   });
   addLayer({
@@ -548,7 +563,8 @@ function updateReviewFilters() {
     'lead-radial': typedFilter('LeadRadial'),
     'runway-line': typedFilter('Runway'),
     'procedure-track': typedFilter('ProcedureTrack'),
-    'procedure-leg': typedFilter('ProcedureLeg'),
+    'procedure-leg': ['all', typedFilter('ProcedureLeg'), ['!=', ['get', 'schematic'], true]],
+    'procedure-leg-schematic': ['all', typedFilter('ProcedureLeg'), ['==', ['get', 'schematic'], true]],
     'procedure-fix': typedFilter('ProcedureFix'),
     'derived-fix': inTypeFilter(['DerivedFix', 'LeadRadialPoint']),
     'sid-altitude-point': typedFilter('SIDAltitudePoint'),
