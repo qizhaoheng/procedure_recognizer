@@ -51,6 +51,7 @@ export function normalizeProcedureUnderstandingResult(
     navigationType,
     runway: stringOrNull(input.runway) ?? stringOrNull(classification.runway) ?? group.runway ?? null,
     procedureClassification: normalizeClassification(classification, group),
+    procedureStructure: normalizeProcedureStructure(input.procedureStructure),
     chartTexts,
     geometrySemantics,
     labelPlan: array(input.labelPlan).map((item) => normalizeLabelPlanItem(record(item) ?? {})),
@@ -67,6 +68,29 @@ export function normalizeProcedureUnderstandingResult(
     warnings,
     confidence: numberOr(input.confidence, 0.5),
     reviewRequired: booleanOr(input.reviewRequired, false) || usedLegFallback,
+  };
+}
+
+function normalizeProcedureStructure(value: unknown) {
+  const input = record(value);
+  if (!input) return null;
+  const branch = (item: unknown) => {
+    const raw = record(item) ?? {};
+    return {
+      id: String(raw.id ?? '').trim().toUpperCase(),
+      displayName: stringOrNull(raw.displayName),
+      runway: stringOrNull(raw.runway),
+      procedureRef: stringOrNull(raw.procedureRef),
+      entryFix: stringOrNull(raw.entryFix)?.toUpperCase() ?? null,
+      exitFix: stringOrNull(raw.exitFix)?.toUpperCase() ?? null,
+    };
+  };
+  return {
+    procedureName: stringOrNull(input.procedureName),
+    procedureId: stringOrNull(input.procedureId),
+    runwayTransitions: array(input.runwayTransitions).map(branch).filter((item) => item.id),
+    commonRoutes: array(input.commonRoutes).map(branch).filter((item) => item.id),
+    enrouteTransitions: array(input.enrouteTransitions).map(branch).filter((item) => item.id),
   };
 }
 
@@ -152,6 +176,7 @@ function normalizeTableLeg(input: JsonRecord) {
     distanceNm: numberOrNull(input.distanceNm),
     altitudeConstraint: stringOrNull(input.altitudeConstraint),
     turnDirection: enumString(input.turnDirection, ['L', 'R', 'NONE', 'UNKNOWN'], 'UNKNOWN'),
+    flyOver: typeof input.flyOver === 'boolean' ? input.flyOver : null,
     recommendedNavaid: stringOrNull(input.recommendedNavaid),
     remarks: stringOrNull(input.remarks),
     sourcePageNo: integerOrNull(input.sourcePageNo),
@@ -320,6 +345,7 @@ function synthesizedLeg(
     courseDegMag,
     distanceNm,
     turnDirection,
+    flyOver: null,
     altitudeConstraint: null,
     speedLimitKias: null,
     navigationSpec: null,
@@ -376,6 +402,7 @@ function normalizeLeg(input: ReturnType<typeof normalizeTableLeg>, evidenceIds: 
     courseDegMag: input.courseDeg,
     distanceNm: input.distanceNm,
     turnDirection: legTurnDirection(input.turnDirection),
+    flyOver: input.flyOver ?? null,
     altitudeConstraint: parseAltitudeConstraint(input.altitudeConstraint),
     speedLimitKias: null,
     navigationSpec: inferNavigationSpec([input]),

@@ -128,6 +128,8 @@ export interface PdfPageAsset {
   groupingReason?: string[];
   // 多文件合并任务里该页来自哪个原始文件（日式 AIP 文件名承载 AD 2.24 小节结构）
   sourceFileName?: string;
+  /** 页面级程序识别：名称候选（带来源优先级）、确认名、过渡名。分组必须用它而非图面大字 */
+  pageClassification?: ProcedurePageClassification;
 }
 
 export interface ProcedureGroup {
@@ -174,6 +176,10 @@ export interface ProcedureGroup {
   jeppesen424Source?: Jeppesen424PackageSource;
   geojsonRenderMode?: GeoJsonRenderMode;
   geojsonRenderSummary?: GeoJsonRenderSummary;
+  /** 地图展示模式：程序拓扑（默认）或单条航路实例 */
+  geojsonViewMode?: 'TOPOLOGY' | 'ROUTE_INSTANCE';
+  geojsonInstanceRunway?: string;
+  geojsonInstanceEnrouteTransition?: string;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'ERROR';
   geojsonGeneratedAt?: string;
@@ -510,6 +516,25 @@ export interface TableLegItem {
   confidence?: number;
 }
 
+export interface ProcedureStructureBranch {
+  id: string;
+  displayName?: string | null;
+  runway?: string | null;
+  /** 指向 procedures[].procedureName 的引用 */
+  procedureRef?: string | null;
+  entryFix?: string | null;
+  exitFix?: string | null;
+}
+
+/** 模型输出的分支拓扑声明：每个 procedures[] 条目在程序图中的角色 */
+export interface ProcedureStructureDeclaration {
+  procedureName?: string | null;
+  procedureId?: string | null;
+  runwayTransitions: ProcedureStructureBranch[];
+  commonRoutes: ProcedureStructureBranch[];
+  enrouteTransitions: ProcedureStructureBranch[];
+}
+
 export interface ProcedureUnderstandingResult {
   airportIcao?: string | null;
   airportName?: string | null;
@@ -518,6 +543,7 @@ export interface ProcedureUnderstandingResult {
   navigationType?: string | null;
   runway?: string | null;
   procedureClassification?: ProcedureClassificationResult | null;
+  procedureStructure?: ProcedureStructureDeclaration | null;
   chartTexts?: ChartTextItem[];
   geometrySemantics?: GeometrySemanticItem[];
   /** 识别阶段规划的图面标签：文字、类型、锚定节点/航段、放置方位 */
@@ -589,4 +615,184 @@ export interface CandidateExtractionResult {
   geometryCandidates: GeometryCandidate[];
   waypointCandidates: WaypointCandidate[];
   tableCandidates: TableCandidate[];
+}
+
+// ==================== 程序图数据模型（SID/STAR 多分支拓扑） ====================
+// 取代"一个程序 = 一组扁平 tableLegs"的假设：一个 SID 由多条跑道过渡、可选公共航路、
+// 多条航路过渡组成，在 merge point 汇合/分流；可飞航路由 materializer 按需拼接。
+// tableLegs 仍作为兼容字段保留（见 procedureGraph/tableLegsAdapter），新代码不得依赖它。
+
+export type ProcedureSegmentType = 'RUNWAY_TRANSITION' | 'COMMON_ROUTE' | 'ENROUTE_TRANSITION';
+
+export type LegDistanceSource = 'AIP_TABLE' | 'AIP_CHART' | 'JEPPESEN_EXTENSION' | 'COMPUTED' | 'UNKNOWN';
+
+export type LegGeometryStatus =
+  | 'EXACT_FROM_FIXES'
+  | 'CONDITIONAL_FROM_PREVIOUS_LEG'
+  | 'INDETERMINATE'
+  | 'SCHEMATIC'
+  | 'MISSING_FIX_COORDINATE';
+
+export interface GraphSourceEvidence {
+  sourceType:
+    | 'AIP_TITLE'
+    | 'AIP_NARRATIVE'
+    | 'AIP_LEG_TABLE'
+    | 'AIP_CHART'
+    | 'AIP_COORDINATE_TABLE'
+    | 'JEPPESEN_424';
+  pageNumber?: number;
+  bbox?: number[];
+  rawText?: string;
+  /** 424 来源时的原始定宽记录（含 continuation） */
+  recordNumber?: string;
+}
+
+export interface GraphAltitudeConstraint {
+  type: 'AT' | 'AT_OR_ABOVE' | 'AT_OR_BELOW' | 'BETWEEN' | 'NONE';
+  lowerFt?: number | null;
+  upperFt?: number | null;
+  flightLevel?: string | null;
+  rawText?: string | null;
+}
+
+export interface GraphSpeedConstraint {
+  type: 'AT' | 'AT_OR_BELOW' | 'AT_OR_ABOVE' | 'NONE';
+  valueKias?: number | null;
+}
+
+export interface ProcedureGraphLeg {
+  /** 来源数据中的原始序号（424 序号或 AIP 表序号），跳号合法 */
+  sequence?: number;
+  pathTerminator: string;
+  fromFix?: string | null;
+  toFix?: string | null;
+  courseMagneticDeg?: number | null;
+  courseTrueDeg?: number | null;
+  turnDirection?: 'L' | 'R' | null;
+  flyOver?: boolean | null;
+  altitudeConstraint?: GraphAltitudeConstraint;
+  speedConstraint?: GraphSpeedConstraint;
+  /** AIP 表格/图上明确发布的距离；未发布时必须为 null，不得回填供应商值 */
+  publishedDistanceNm?: number | null;
+  /** Jeppesen 2P 等供应商扩展距离；默认不参与 AIP 识别准确率 */
+  jeppesenDistanceNm?: number | null;
+  /** 由坐标计算出的距离 */
+  computedDistanceNm?: number | null;
+  distanceSource?: LegDistanceSource;
+  geometryStatus?: LegGeometryStatus;
+  recommendedNavaid?: string | null;
+  /** 供应商扩展记录（2P/3E 等）的结构化保留 */
+  extensions?: JeppesenLegExtension[];
+  sourceEvidence: GraphSourceEvidence[];
+  confidence?: number;
+  /** 推断值（非直接读取）时必须标记 */
+  inferred?: boolean;
+}
+
+export interface JeppesenLegExtension {
+  /** continuation 类型，如 "2P"、"3E" */
+  continuationType: string;
+  rawValue?: string;
+  interpretedValue?: number | string | null;
+  interpretedAs?: 'DISTANCE' | 'VENDOR_EXTENSION' | 'UNKNOWN';
+  /** 是否可与 AIP 发布值直接对比 */
+  comparableToAip: boolean;
+}
+
+export interface ProcedureTransition {
+  id: string;
+  type: 'RUNWAY' | 'ENROUTE';
+  displayName?: string;
+  runway?: string;
+  entryFix?: string;
+  exitFix?: string;
+  legs: ProcedureGraphLeg[];
+  sourceEvidence: GraphSourceEvidence[];
+  confidence?: number;
+}
+
+export interface ProcedureRoute {
+  id: string;
+  type: 'COMMON';
+  entryFix?: string;
+  exitFix?: string;
+  legs: ProcedureGraphLeg[];
+  sourceEvidence?: GraphSourceEvidence[];
+}
+
+export interface ProcedureMergePoint {
+  fix: string;
+  /** 汇入该点的 transition id 列表 */
+  inboundTransitionIds: string[];
+  /** 自该点分流的 transition id 列表 */
+  outboundTransitionIds: string[];
+}
+
+export interface MaterializedRouteLeg extends ProcedureGraphLeg {
+  /** 实例内重新编号的连续显示序号 */
+  displaySequence: number;
+  segmentType: ProcedureSegmentType;
+  sourceTransitionId: string;
+}
+
+export interface MaterializedRoute {
+  procedureId: string;
+  runway?: string;
+  enrouteTransition?: string;
+  legs: MaterializedRouteLeg[];
+  warnings: string[];
+}
+
+export interface ProcedureSourcePage {
+  pageNumber: number;
+  pageRole?: string;
+  aipPageNo?: string;
+}
+
+export interface SidProcedureGraph {
+  airportIcao: string;
+  procedureType: 'SID' | 'STAR';
+  /** 标准化程序标识，如 VAMOS4 / RUTAS4 */
+  procedureId: string;
+  /** 原始正式名称，如 VAMOS FOUR DEPARTURE */
+  procedureName: string;
+  navigationSpecification?: string;
+  sourcePages: ProcedureSourcePage[];
+  runwayTransitions: ProcedureTransition[];
+  commonRoutes: ProcedureRoute[];
+  enrouteTransitions: ProcedureTransition[];
+  mergePoints: ProcedureMergePoint[];
+  routeInstances?: MaterializedRoute[];
+  /** 构图来源：AI 识别 / 424 数据 / 兼容 tableLegs 派生 */
+  builtFrom: 'AI_UNDERSTANDING' | 'JEPPESEN_424' | 'LEGACY_TABLE_LEGS';
+  warnings: string[];
+}
+
+// ==================== 程序页面分类（分组前的页面级识别） ====================
+
+export interface ProcedureNameCandidate {
+  value: string;
+  /** 候选来源：TITLE_BLOCK > TABLE_TITLE > NARRATIVE_TITLE > PAGE_HEADER > OTHER */
+  source: 'TITLE_BLOCK' | 'TABLE_TITLE' | 'NARRATIVE_TITLE' | 'PAGE_HEADER' | 'OTHER';
+  confidence: number;
+}
+
+export interface ProcedurePageClassification {
+  airportIcao?: string;
+  pageNumber: number;
+  pageRole:
+    | 'PROCEDURE_OVERVIEW'
+    | 'PROCEDURE_DIAGRAM'
+    | 'PROCEDURE_NARRATIVE'
+    | 'LEG_TABLE'
+    | 'WAYPOINT_COORDINATES'
+    | 'NOTES'
+    | 'UNKNOWN';
+  procedureNameCandidates: ProcedureNameCandidate[];
+  confirmedProcedureName?: string;
+  /** 标准化标识候选，如 RUTAS4 */
+  procedureIdCandidate?: string;
+  runways: string[];
+  transitionNames: string[];
 }

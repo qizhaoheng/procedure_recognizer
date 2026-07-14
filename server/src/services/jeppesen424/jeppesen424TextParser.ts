@@ -1,3 +1,4 @@
+import type { JeppesenLegExtension } from '../../types/procedure';
 import type { SimpleProcedureLeg } from './types';
 
 export const ROUTE_CODE_TO_PROCEDURE: Record<string, string> = {
@@ -46,6 +47,8 @@ interface PartialLeg {
   runway: string;
   transitionName?: string;
   routeKey: string;
+  routeType?: string;
+  branchRole?: 'RUNWAY' | 'COMMON' | 'ENROUTE';
   sequence: string;
   fix: string;
   pathTerminator?: string;
@@ -63,6 +66,7 @@ interface PartialLeg {
   endOfProcedure?: boolean;
   fixSection?: string;
   recommendedNavaid?: string;
+  extensions: JeppesenLegExtension[];
   rawRecords: string[];
 }
 
@@ -85,8 +89,11 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       runway: route.runway,
       transitionName: route.transitionName,
       routeKey: route.routeCode,
+      routeType: route.routeType,
+      branchRole: route.branchRole,
       sequence: leg.sequence,
       fix: leg.fix,
+      extensions: [],
       rawRecords: [],
     };
 
@@ -115,7 +122,28 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
     }
 
     if (leg.recordPart === '2P') {
-      current.distanceNm = extractDistance(line, leg.recordText) ?? current.distanceNm;
+      // 2P 是供应商 continuation：数值保留为扩展值，同时为兼容旧展示写入 distanceNm。
+      // 它不是 AIP 发布距离——对比器必须按 comparableToAip 判定是否计分。
+      const distance = extractDistance(line, leg.recordText);
+      current.distanceNm = distance ?? current.distanceNm;
+      current.extensions.push({
+        continuationType: '2P',
+        rawValue: line.length >= 120 ? line.slice(74, 78) : undefined,
+        interpretedValue: distance ?? null,
+        interpretedAs: distance === undefined ? 'UNKNOWN' : 'DISTANCE',
+        comparableToAip: false,
+      });
+    }
+
+    if (leg.recordPart === 'EXT') {
+      // 其他 continuation（3E 等规划/供应商记录）：不参与腿段业务字段，仅结构化保留
+      current.extensions.push({
+        continuationType: ('continuationType' in leg ? leg.continuationType : undefined) ?? 'UNKNOWN',
+        rawValue: line,
+        interpretedValue: null,
+        interpretedAs: 'VENDOR_EXTENSION',
+        comparableToAip: false,
+      });
     }
 
     merged.set(key, current);
@@ -128,6 +156,8 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       runway: item.runway,
       transitionName: item.transitionName,
       routeKey: item.routeKey,
+      routeType: item.routeType,
+      branchRole: item.branchRole,
       sequence: item.sequence,
       fix: item.fix,
       pathTerminator: item.pathTerminator,
@@ -145,13 +175,15 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       endOfProcedure: item.endOfProcedure ?? false,
       fixSection: item.fixSection,
       recommendedNavaid: item.recommendedNavaid,
+      extensions: item.extensions.length ? item.extensions : undefined,
       source: 'JEPPESEN_424',
       rawRecord: item.rawRecords.join('\n'),
     }));
 }
 
 // 路由段按固定列位解析（0 基）：机场 6-9 | ICAO 区域 10-11 | subsection 12（D=SID/E=STAR/F=进近）
-// | 路线代码 13-18 | 路线类型 19（RNAV SID 为 N、常规为数字）| 过渡跑道 20 起（RWxx[LRC]）。
+// | 路线类型 19（1/4=跑道过渡，2/5=公共航路，3/6=航路过渡；部分导出为 N 或省略）
+// | 过渡限定符 20-24（RWxx[LRC] / 过渡名 / 公共航路留空）。
 function parseRoute(line: string) {
   const airport = line.slice(6, 10);
   const region = line.slice(10, 12);
@@ -161,14 +193,18 @@ function parseRoute(line: string) {
   if (!/^[DEF]$/.test(subsection)) return undefined;
   if (!/^[A-Z0-9]{4,6}$/.test(routeCode)) return undefined;
 
-  // Runway branches carry RWxx; route-type 3 records carry a named enroute
+  // Runway branches carry RWxx; enroute-transition records carry a named
   // transition in the same qualifier field (for example a five-letter fix).
+  const routeType = /^[0-9A-Z]$/.test(line[19] ?? '') ? line[19] : undefined;
   const runwayStart = line[19] === 'R' && line[20] === 'W' ? 19 : 20;
   const runwayMatch = line.slice(runwayStart, runwayStart + 6).match(/^RW\d{2}[A-Z]?/);
-  const transitionName = !runwayMatch && line[19] === '3'
-    ? line.slice(20, 25).trim()
-    : '';
-  if (!runwayMatch && !/^[A-Z0-9]{2,5}$/.test(transitionName)) return undefined;
+  const qualifierField = line.slice(20, 25).trim();
+  const isEnrouteType = line[19] === '3' || line[19] === '6';
+  const transitionName = !runwayMatch && isEnrouteType ? qualifierField : '';
+  // 公共航路记录：限定符留空（或 ALL），全宽行才能可靠判定（短格式无列位保证）
+  const isCommon = !runwayMatch && !transitionName && line.length >= 120
+    && (qualifierField === '' || qualifierField === 'ALL');
+  if (!runwayMatch && !isCommon && !/^[A-Z0-9]{2,5}$/.test(transitionName)) return undefined;
   const qualifier = runwayMatch?.[0] ?? transitionName;
   const qualifierStart = runwayMatch ? runwayStart : 20;
 
@@ -176,15 +212,18 @@ function parseRoute(line: string) {
     // routeText 是记录中的原文片段，供后续按位置截取腿段区
     routeText: line.slice(6, qualifierStart) + qualifier,
     routeCode,
+    routeType,
     runway: runwayMatch?.[0] ?? '',
     transitionName: transitionName || undefined,
+    branchRole: (runwayMatch ? 'RUNWAY' : transitionName ? 'ENROUTE' : 'COMMON') as 'RUNWAY' | 'COMMON' | 'ENROUTE',
     procedureName: ROUTE_CODE_TO_PROCEDURE[routeCode] ?? procedureNameFromRouteCode(routeCode),
   };
 }
 
 function parseLegRecord(line: string, routeText: string) {
   // 全宽行（132 列）按列位解析：序号 27-29 | Fix 30-34（导航台型短 Fix 空格补齐，如 "PU   "）
-  // | 区域+section 35-38 | 续行号 39 | 航路点描述 40-43。3E 等规划续行不参与腿段合并。
+  // | 区域+section 35-38 | 续行号 39 | 航路点描述 40-43。
+  // 1E 主记录与 2P continuation 合并为一条腿；3E 等其他续行结构化保留为扩展记录。
   if (line.length >= 120) {
     const sequence = line.slice(26, 29);
     if (!/^\d{3}$/.test(sequence)) return undefined;
@@ -200,6 +239,14 @@ function parseLegRecord(line: string, routeText: string) {
     }
     if (continuation === '1') {
       return { ...base, recordPart: '1E' as const, endOfProcedure: line[40] === 'E' };
+    }
+    if (/^[2-9]$/.test(continuation ?? '')) {
+      return {
+        ...base,
+        recordPart: 'EXT' as const,
+        continuationType: `${continuation}${(line[39] ?? '').trim()}`,
+        endOfProcedure: false,
+      };
     }
     return undefined;
   }

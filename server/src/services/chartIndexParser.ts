@@ -1,4 +1,5 @@
 import type { ChartIndexItem, NavigationType, PackageType, PdfPageAsset, ProcedureCategory } from '../types/procedure';
+import { normalizeProcedureName as normalizeProcedureId } from './procedureGraph/procedureNames';
 
 // AD 与 2 之间允许连字符：新加坡等 AIP 写作 AD-2-WSSS-…
 const CHART_NO_PATTERN = /A\s*D\s*-?\s*2\s*-\s*([A-Z]\s*[A-Z]\s*[A-Z]\s*[A-Z])\s*-\s*(\d{1,2})\s*-\s*(\d{1,2}(?:\s+\d(?!\d))?)/i;
@@ -385,11 +386,13 @@ function normalizeProcedureName(value: string) {
 }
 
 function normalizeProcedureLabel(value: string) {
-  return value
+  const cleaned = value
     .toUpperCase()
     .replace(/\(TABULAR\s*\d+\)/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+  // 标准化标识优先（RUTAS FOUR DEPARTURE 与 RUTAS 4 归同一键）；解析不出代号结构时保留原文
+  return normalizeProcedureId(cleaned) ?? cleaned;
 }
 
 function uniqueMatches(text: string, regex: RegExp) {

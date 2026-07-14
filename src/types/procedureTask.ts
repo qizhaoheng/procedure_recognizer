@@ -124,6 +124,10 @@ export interface ProcedureGroup {
   jeppesen424Source?: Jeppesen424PackageSource;
   geojsonRenderMode?: GeoJsonRenderMode;
   geojsonRenderSummary?: GeoJsonRenderSummary;
+  /** 地图展示模式：程序拓扑（默认）或单条航路实例 */
+  geojsonViewMode?: 'TOPOLOGY' | 'ROUTE_INSTANCE';
+  geojsonInstanceRunway?: string;
+  geojsonInstanceEnrouteTransition?: string;
   geojson?: FeatureCollection<Geometry | null, GeoJsonProperties>;
   geojsonStatus?: 'NOT_GENERATED' | 'GENERATING' | 'GENERATED' | 'GENERATED_WITHOUT_GEOMETRY' | 'ERROR';
   geojsonGeneratedAt?: string;
@@ -478,7 +482,10 @@ export type Jeppesen424CompareSeverity = 'INFO' | 'WARNING' | 'ERROR';
 export interface SimpleProcedureLeg {
   procedureName: string;
   runway: string;
+  transitionName?: string;
   routeKey: string;
+  routeType?: string;
+  branchRole?: 'RUNWAY' | 'COMMON' | 'ENROUTE';
   sequence: string;
   fix: string;
   pathTerminator?: string;
@@ -496,6 +503,14 @@ export interface SimpleProcedureLeg {
   endOfProcedure?: boolean;
   fixSection?: string;
   recommendedNavaid?: string;
+  /** Jeppesen continuation（2P/3E 等）结构化保留；2P 数值不是 AIP 发布距离 */
+  extensions?: Array<{
+    continuationType: string;
+    rawValue?: string;
+    interpretedValue?: number | string | null;
+    interpretedAs?: 'DISTANCE' | 'VENDOR_EXTENSION' | 'UNKNOWN';
+    comparableToAip: boolean;
+  }>;
   source: 'AI' | 'JEPPESEN_424';
   rawRecord?: string;
 }
@@ -529,6 +544,89 @@ export interface ProcedureCompareResult {
   legResults: LegCompareResult[];
 }
 
+// ==================== 四阶段程序图对比（与 server/procedureGraph/graphComparator 对应） ====================
+
+export type GraphCompareStatus = 'MATCHED' | 'PARTIALLY_IDENTIFIED' | 'NOT_COMPARABLE' | 'SOURCE_MISMATCH';
+export type GraphOverallStatus = 'MATCHED' | 'PARTIAL_COMPARISON' | 'FULL_COMPARISON' | 'SOURCE_MISMATCH' | 'NOT_COMPARABLE';
+export type GraphFieldCategory = 'AIP_RECOGNIZABLE' | 'COMPUTED' | 'VENDOR_ONLY';
+export type GraphLegStatus = 'MATCH' | 'PARTIAL' | 'MISMATCH' | 'MISSING_AI' | 'MISSING_JEPPESEN' | 'MERGED_ANCHOR';
+
+export interface GraphIdentitySummary {
+  airportIcao?: string;
+  procedureType?: string;
+  procedureId?: string;
+  procedureName?: string;
+  runwayTransitionIds: string[];
+  enrouteTransitionIds: string[];
+}
+
+export interface GraphFieldCompareResult {
+  field: string;
+  aiValue: unknown;
+  jeppesenValue: unknown;
+  category: GraphFieldCategory;
+  comparable: boolean;
+  matched: boolean | null;
+  toleranceApplied?: boolean;
+  reason?: string;
+}
+
+export interface GraphLegCompareResult {
+  aiSequence?: number;
+  jeppesenSequence?: number;
+  pathTerminator?: string;
+  toFix?: string | null;
+  status: GraphLegStatus;
+  fields: GraphFieldCompareResult[];
+}
+
+export interface GraphBranchCompareResult {
+  transitionId: string;
+  displayName?: string;
+  segmentType: 'RUNWAY_TRANSITION' | 'COMMON_ROUTE' | 'ENROUTE_TRANSITION';
+  status: 'COMPARED' | 'MISSING_AI' | 'MISSING_JEPPESEN';
+  legResults: GraphLegCompareResult[];
+}
+
+export interface GraphTopologyDiff {
+  runwayTransitions: { matched: string[]; missingInAi: string[]; extraInAi: string[] };
+  enrouteTransitions: { matched: string[]; missingInAi: string[]; extraInAi: string[] };
+  commonRoute: { ai: boolean; jeppesen: boolean; matched: boolean };
+  mergePoints: { ai: string[]; jeppesen: string[]; missingInAi: string[]; extraInAi: string[] };
+  entryExitDiffs: Array<{ transitionId: string; field: 'entryFix' | 'exitFix'; aiValue?: string; jeppesenValue?: string }>;
+}
+
+export interface GraphCompareCoverage {
+  comparedRunwayTransitions: string[];
+  totalRunwayTransitions: number;
+  comparedEnrouteTransitions: string[];
+  totalEnrouteTransitions: number;
+  commonRouteCompared: boolean;
+  coveragePercent: number | null;
+}
+
+export interface GraphCompareScores {
+  identityScore: number;
+  topologyScore: number | null;
+  legSequenceScore: number | null;
+  comparableFieldScore: number | null;
+  geometryValidationScore: number | null;
+  overallScore: number | null;
+}
+
+export interface GraphCompareResult {
+  comparisonStatus: GraphCompareStatus;
+  overallStatus: GraphOverallStatus;
+  reason?: string;
+  aiProcedure?: GraphIdentitySummary;
+  jeppesenProcedure?: GraphIdentitySummary;
+  topology?: GraphTopologyDiff;
+  coverage?: GraphCompareCoverage;
+  branches: GraphBranchCompareResult[];
+  scores: GraphCompareScores;
+  warnings: string[];
+}
+
 export interface Jeppesen424CompareResponse {
   ok: true;
   summary: {
@@ -542,8 +640,12 @@ export interface Jeppesen424CompareResponse {
     missingJeppesenLegs: number;
     fieldMismatchCount: number;
     issueCount: number;
-    overallScore: number;
+    /** 程序身份未匹配时为 null，前端必须显示状态而非分数 */
+    overallScore: number | null;
+    comparisonStatus?: GraphCompareStatus | 'PARTIAL_COMPARISON';
+    reason?: string;
   };
+  graphComparisons?: GraphCompareResult[];
   procedureResults: ProcedureCompareResult[];
   parsedJeppesenLegs: SimpleProcedureLeg[];
   aiLegs: SimpleProcedureLeg[];
@@ -559,6 +661,33 @@ export interface Jeppesen424CompareResponse {
   geojsonRenderMode?: ProcedureGroup['geojsonRenderMode'];
   geojsonRenderSummary?: ProcedureGroup['geojsonRenderSummary'];
   geojsonGeneratedAt?: string;
+}
+
+// 程序图结构（server /procedure-graph 端点）：跑道过渡 / 航路过渡 / 汇合点 / 可飞实例
+export interface ProcedureGraphBranchSummary {
+  id: string;
+  type: 'RUNWAY' | 'ENROUTE';
+  displayName?: string;
+  runway?: string;
+  entryFix?: string;
+  exitFix?: string;
+}
+
+export interface ProcedureGraphSummary {
+  airportIcao: string;
+  procedureType: 'SID' | 'STAR';
+  procedureId: string;
+  procedureName: string;
+  navigationSpecification?: string;
+  runwayTransitions: ProcedureGraphBranchSummary[];
+  enrouteTransitions: ProcedureGraphBranchSummary[];
+  commonRoutes: Array<{ id: string; entryFix?: string; exitFix?: string }>;
+  mergePoints: Array<{ fix: string; inboundTransitionIds: string[]; outboundTransitionIds: string[] }>;
+  warnings: string[];
+}
+
+export interface ProcedureGraphResponse {
+  graphs: ProcedureGraphSummary[];
 }
 
 export interface AiRequestPreview {

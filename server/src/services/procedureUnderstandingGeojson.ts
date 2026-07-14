@@ -4,6 +4,8 @@ import { withBbox } from './geojsonValidator';
 import { buildProcedureRenderPlan, type ProcedureRenderPlan } from './rendering/procedureRenderPlan';
 import type { SimpleProcedureLeg } from './jeppesen424/types';
 import { decodeEmbeddedPdfText } from './pdfTextDecoder';
+import { buildGraphsFromUnderstanding } from './procedureGraph/buildProcedureGraph';
+import { materializeRoute } from './procedureGraph/materializeRoute';
 
 type ProcedureFeature = Feature<Geometry | null, GeoJsonProperties>;
 type FixRecord = {
@@ -37,6 +39,9 @@ type LegRecord = {
   thetaDegMag?: number | null;
   rhoNm?: number | null;
   remarks?: string | null;
+  /** 航路实例模式：该腿来自 runway/common/enroute 哪个分段 */
+  segmentType?: string | null;
+  sourceTransitionId?: string | null;
   altitudeConstraint?: {
     type?: string | null;
     altitudeFt?: number | null;
@@ -52,6 +57,14 @@ export interface ProcedureGeoJsonBuildOptions {
   renderMode?: 'AUTO' | 'JEPPESEN_424' | 'AI';
   canonical424Legs?: SimpleProcedureLeg[];
   renderPlan?: ProcedureRenderPlan;
+  /**
+   * 地图展示模式：
+   * - TOPOLOGY（默认）：全程序拓扑——所有跑道过渡 + 公共航路 + 所有航路过渡；
+   * - ROUTE_INSTANCE：单条可飞航路实例——按 instanceRunway + instanceEnrouteTransition 物化。
+   */
+  viewMode?: 'TOPOLOGY' | 'ROUTE_INSTANCE';
+  instanceRunway?: string;
+  instanceEnrouteTransition?: string;
 }
 
 type ChartTextRecord = {
@@ -128,7 +141,12 @@ export function buildGeoJsonFromProcedureUnderstanding(
     options.canonical424Legs,
     options.renderMode,
   );
-  const procedures = renderPlan.procedures as ProcedureRecord[];
+  const viewMode = options.viewMode ?? 'TOPOLOGY';
+  // 航路实例模式：物化 跑道 + 过渡 的单条可飞航路，只渲染选中路径；
+  // 拓扑模式：渲染全部分支与过渡（这是"程序拓扑图"，标题不得写成某跑道的航路）
+  const procedures = viewMode === 'ROUTE_INSTANCE'
+    ? materializedInstanceProcedures(understanding, renderPlan, options)
+    : (renderPlan.procedures as ProcedureRecord[]);
   const geometrySemantics = (understanding.geometrySemantics ?? []) as GeometrySemanticRecord[];
   const chartTexts = (understanding.chartTexts ?? []) as ChartTextRecord[];
   const fixMap = new Map(
@@ -148,7 +166,7 @@ export function buildGeoJsonFromProcedureUnderstanding(
   const finalCommonFeatures = finalCommonSegmentFeatures(procedures, fixMap, fixMetadata, understanding, group);
 
   const features: ProcedureFeature[] = [
-    procedureChartFeature(understanding, group, renderPlan),
+    procedureChartFeature(understanding, group, renderPlan, viewMode, options),
     ...runwayFeatures(runwayMap),
     ...sidAltitudePointFeatures(procedures, runwayMap, understanding, group),
     ...navaidFeatures(navaidMap),
@@ -186,7 +204,15 @@ function procedureChartFeature(
   understanding: ProcedureUnderstandingResult,
   group: ProcedureGroup,
   renderPlan: ProcedureRenderPlan,
+  viewMode: 'TOPOLOGY' | 'ROUTE_INSTANCE',
+  options: ProcedureGeoJsonBuildOptions,
 ): ProcedureFeature {
+  // 展示标题必须区分"全程序拓扑"与"某跑道 + 某过渡的可飞实例"：
+  // 拓扑模式的标题不得带跑道（避免"RWY16R VAMOS FOUR 航路"式混淆）
+  const primaryName = primaryProcedureDisplayName(understanding, group);
+  const displayTitle = viewMode === 'ROUTE_INSTANCE'
+    ? `${primaryName} · ${[options.instanceRunway, options.instanceEnrouteTransition].filter(Boolean).join(' + ') || '航路实例'}`
+    : `${primaryName} · 程序拓扑`;
   return {
     type: 'Feature',
     geometry: null,
@@ -199,10 +225,14 @@ function procedureChartFeature(
       review_required: understanding.reviewRequired === true,
       confidence: understanding.confidence ?? group.confidence ?? 0.5,
       procedure_names: group.procedureNames,
-      runway: understanding.runway ?? group.runway,
+      runway: viewMode === 'ROUTE_INSTANCE' ? (options.instanceRunway ?? null) : (understanding.runway ?? group.runway),
       navigation_type: understanding.navigationType ?? group.navigationType,
       procedure_category: understanding.procedureCategory ?? group.procedureCategory,
       airport_icao: understanding.airportIcao,
+      display_mode: viewMode,
+      display_title: displayTitle,
+      instance_runway: viewMode === 'ROUTE_INSTANCE' ? options.instanceRunway ?? null : null,
+      instance_enroute_transition: viewMode === 'ROUTE_INSTANCE' ? options.instanceEnrouteTransition ?? null : null,
       render_mode: renderPlan.requestedMode,
       render_source: renderPlan.source,
       canonical_424_procedure_count: renderPlan.canonicalProcedureCount,
@@ -210,6 +240,65 @@ function procedureChartFeature(
       render_warnings: renderPlan.warnings,
     }),
   };
+}
+
+function primaryProcedureDisplayName(understanding: ProcedureUnderstandingResult, group: ProcedureGroup) {
+  const structureName = understanding.procedureStructure?.procedureName;
+  if (structureName) return structureName;
+  // 取第一个非过渡 procedures 条目的名称；再退回分组名
+  const procedure = (understanding.procedures ?? []).find((item) => !item.transitionName);
+  return procedure?.procedureName
+    ?? understanding.procedures?.[0]?.procedureName
+    ?? group.packageName
+    ?? group.groupName;
+}
+
+// 航路实例：基于识别结果构建程序图，物化 runway + enrouteTransition 的连续航路
+function materializedInstanceProcedures(
+  understanding: ProcedureUnderstandingResult,
+  renderPlan: ProcedureRenderPlan,
+  options: ProcedureGeoJsonBuildOptions,
+): ProcedureRecord[] {
+  const planUnderstanding = { ...understanding, procedures: renderPlan.procedures };
+  const graphs = buildGraphsFromUnderstanding(planUnderstanding);
+  if (!graphs.length) return renderPlan.procedures as ProcedureRecord[];
+  const graph = graphs[0];
+  const route = materializeRoute(graph, {
+    runway: options.instanceRunway,
+    enrouteTransition: options.instanceEnrouteTransition,
+  });
+  const instanceName = [graph.procedureName, options.instanceRunway, options.instanceEnrouteTransition]
+    .filter(Boolean)
+    .join(' ');
+  return [{
+    procedureName: instanceName,
+    runway: options.instanceRunway ?? null,
+    navigationSpec: graph.navigationSpecification ?? null,
+    legs: route.legs.map((leg) => ({
+      sequence: leg.displaySequence,
+      pathTerminator: leg.pathTerminator,
+      fromFix: leg.fromFix ?? null,
+      fixIdentifier: leg.toFix ?? null,
+      courseDegMag: leg.courseMagneticDeg ?? null,
+      distanceNm: leg.publishedDistanceNm ?? null,
+      turnDirection: leg.turnDirection ?? null,
+      recommendedNavaid: leg.recommendedNavaid ?? null,
+      segmentType: leg.segmentType,
+      sourceTransitionId: leg.sourceTransitionId,
+      altitudeConstraint: leg.altitudeConstraint
+        ? {
+          type: leg.altitudeConstraint.type,
+          altitudeFt: leg.altitudeConstraint.lowerFt ?? leg.altitudeConstraint.upperFt ?? null,
+          lowerFt: leg.altitudeConstraint.lowerFt ?? null,
+          upperFt: leg.altitudeConstraint.upperFt ?? null,
+          rawText: leg.altitudeConstraint.rawText ?? null,
+        }
+        : null,
+      confidence: leg.confidence,
+    })),
+    confidence: understanding.confidence,
+    reviewRequired: understanding.reviewRequired,
+  }];
 }
 
 interface FixMetadata {
@@ -291,17 +380,52 @@ function procedureFeatures(
   let lastDmeNm: number | undefined;
   let lastCourseDeg: number | undefined;
   let usedDerivedGeometry = false;
+  // 几何确定性追踪：起点来自真实坐标（Fix/跑道）时为 true；
+  // 一旦经过示意/推算腿（VA 终点、默认距离外推），后续 DF 等条件几何都降级为 schematic
+  let currentExact = false;
 
   for (let legIndex = 0; legIndex < orderedLegs.length; legIndex += 1) {
     const leg = orderedLegs[legIndex];
     const nextLeg = orderedLegs[legIndex + 1];
     const pathTerminator = String(leg.pathTerminator ?? '').toUpperCase();
     const start = resolveLegStart(leg, fixMap, runwayMap, procedure.runway ?? understanding.runway ?? group.runway);
-    if (!current && start) current = start.coordinate;
+    if (!current && start) {
+      current = start.coordinate;
+      currentExact = true;
+    }
     const resolved = resolveLegTarget(leg, fixMap, arcContext, runwayMap, navaidMap, syntheticFixes, current, lastDmeNm);
     let target = resolved?.coordinate;
     let geometry: number[][] | undefined;
     let quality = resolved?.quality ?? 'derived_from_fix_coordinates';
+
+    // 命名 Fix 存在但全部坐标源都解析不到：显式标记缺坐标，绝不用默认坐标或机场中心替代
+    const identWanted = String(leg.fixIdentifier ?? '').trim();
+    if (identWanted && !target) {
+      features.push(legFeature(procedureName, leg, undefined, 'missing_fix_coordinate', {
+        geometryStatus: 'MISSING_FIX_COORDINATE',
+        schematic: false,
+      }));
+      currentExact = false;
+      continue;
+    }
+
+    // VA/VI/VM：保持航向直到高度/截获/雷达引导，无固定地理终点（INDETERMINATE）。
+    // 只画短示意航向线（schematic 分层），不生成伪精确终点，不参与航迹精度
+    if (['VA', 'VI', 'VM'].includes(pathTerminator) && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
+      const schematicEnd = destinationPoint(pointRecord(current), Number(leg.courseDegMag), legDistanceOrDefault(leg.distanceNm, 2));
+      geometry = [current, schematicEnd];
+      features.push(legFeature(procedureName, leg, geometry, 'schematic_course_to_altitude', {
+        geometryStatus: 'INDETERMINATE',
+        schematic: true,
+      }));
+      if (!chain.length) chain.push(geometry[0]);
+      chain.push(...geometry.slice(1));
+      current = schematicEnd;
+      currentExact = false;
+      usedDerivedGeometry = true;
+      lastCourseDeg = Number(leg.courseDegMag);
+      continue;
+    }
 
     if (pathTerminator === 'CA' && !target && current && Number.isFinite(Number(leg.courseDegMag))) {
       const runway = runwayMap.get(normalizeRunwayName(procedure.runway ?? understanding.runway ?? group.runway));
@@ -385,11 +509,16 @@ function procedureFeatures(
 
     if (geometry) {
       if (quality !== 'derived_from_fix_coordinates') usedDerivedGeometry = true;
-      features.push(legFeature(procedureName, leg, geometry, quality));
+      const targetExact = Boolean(resolved && !resolved.synthetic);
+      const { geometryStatus, schematic } = legGeometryStatus(pathTerminator, quality, currentExact, targetExact);
+      features.push(legFeature(procedureName, leg, geometry, quality, { geometryStatus, schematic }));
       if (!chain.length) chain.push(geometry[0]);
       chain.push(...geometry.slice(1));
+      // 下一腿起点的确定性 = 本腿终点是否为真实坐标
+      currentExact = targetExact;
     } else if (target && !chain.length) {
       chain.push(target);
+      currentExact = Boolean(resolved && !resolved.synthetic);
     }
     if (target) current = target;
     if (Number.isFinite(Number(leg.courseDegMag)) && Number(leg.courseDegMag) > 0) {
@@ -1107,10 +1236,40 @@ function dmeLegFeature(
   };
 }
 
-function legFeature(procedureName: string, leg: LegRecord, coordinates: number[][], quality: string): ProcedureFeature {
+// 按 Path Terminator 的几何策略：
+// TF（双端具名坐标）→ EXACT_FROM_FIXES；DF → CONDITIONAL_FROM_PREVIOUS_LEG（起点取决于前腿）；
+// VA/VI/VM/CA → INDETERMINATE（示意线）；坐标缺失 → MISSING_FIX_COORDINATE（不画、不替代）。
+function legGeometryStatus(pathTerminator: string, quality: string, startExact: boolean, targetExact: boolean) {
+  if (pathTerminator === 'DF') {
+    return { geometryStatus: 'CONDITIONAL_FROM_PREVIOUS_LEG', schematic: !startExact };
+  }
+  if (['VA', 'VI', 'VM', 'CA', 'CI', 'CR', 'FM'].includes(pathTerminator)) {
+    return { geometryStatus: 'INDETERMINATE', schematic: true };
+  }
+  if (startExact && targetExact && quality === 'derived_from_fix_coordinates') {
+    return { geometryStatus: 'EXACT_FROM_FIXES', schematic: false };
+  }
+  if (targetExact) {
+    return { geometryStatus: 'CONDITIONAL_FROM_PREVIOUS_LEG', schematic: !startExact };
+  }
+  return { geometryStatus: 'SCHEMATIC', schematic: true };
+}
+
+interface LegFeatureExtras {
+  geometryStatus: string;
+  schematic: boolean;
+}
+
+function legFeature(
+  procedureName: string,
+  leg: LegRecord,
+  coordinates: number[][] | undefined,
+  quality: string,
+  extras: LegFeatureExtras = { geometryStatus: 'SCHEMATIC', schematic: quality !== 'derived_from_fix_coordinates' },
+): ProcedureFeature {
   return {
     type: 'Feature',
-    geometry: line(coordinates),
+    geometry: coordinates ? line(coordinates) : null,
     properties: baseProps({
       object_type: 'ProcedureLeg',
       feature_id: `leg_${slug(procedureName)}_${leg.sequence ?? 'x'}_${slug(leg.fixIdentifier ?? '')}`,
@@ -1128,6 +1287,10 @@ function legFeature(procedureName: string, leg: LegRecord, coordinates: number[]
       altitude_ft: leg.altitudeConstraint?.altitudeFt ?? null,
       lower_ft: leg.altitudeConstraint?.lowerFt ?? null,
       upper_ft: leg.altitudeConstraint?.upperFt ?? null,
+      geometry_status: extras.geometryStatus,
+      schematic: extras.schematic,
+      segment_type: leg.segmentType ?? null,
+      source_transition_id: leg.sourceTransitionId ?? null,
       source_page: null,
       source_text: [procedureName, leg.pathTerminator ?? '', leg.fromFix ?? '', '->', leg.fixIdentifier ?? '', leg.remarks ?? ''].filter(Boolean).join(' ').trim(),
       coordinate_quality: quality,
