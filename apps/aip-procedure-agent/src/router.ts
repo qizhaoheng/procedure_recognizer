@@ -120,6 +120,20 @@ agentRouter.get("/tasks/:id/documents/:documentId/file", async (req, res) => {
   );
   res.sendFile(path.resolve(document.filePath));
 });
+agentRouter.get(
+  "/tasks/:id/documents/:documentId/pages/:pageNumber/image",
+  async (req, res) => {
+    const task = await readAgentTask(req.params.id);
+    const page = task.pages.find(
+      (item) =>
+        item.documentId === req.params.documentId &&
+        item.pageNumber === Number(req.params.pageNumber),
+    );
+    if (!page?.renderedImagePath)
+      return res.status(404).json({ error: "页面图像不存在。" });
+    res.sendFile(path.resolve(page.renderedImagePath));
+  },
+);
 agentRouter.delete("/tasks/:id/documents/:documentId", async (req, res) => {
   const task = await readAgentTask(req.params.id);
   if (task.stage !== "UPLOAD")
