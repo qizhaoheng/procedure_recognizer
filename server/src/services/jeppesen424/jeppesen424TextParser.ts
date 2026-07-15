@@ -74,7 +74,9 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
   const merged = new Map<string, PartialLeg>();
 
   for (const sourceLine of text.split(/\r?\n/)) {
-    const line = sourceLine.trim();
+    // 全宽记录（≥120 列且无前导空白）必须保留尾部空格：公共航路/进近 Final 的 2P 续行
+    // 限定符与路线限定符列全空，trim 后会掉到短格式分支并被误判丢弃。
+    const line = sourceLine.length >= 120 && !/^\s/.test(sourceLine) ? sourceLine : sourceLine.trim();
     // 记录头 = S + 3位区域码 + P(机场section)，如 WMKJ 的 SSPAP、VHHH 的 SPACP
     if (!line || !/^S[A-Z]{3}P\s/.test(line)) continue;
 
@@ -199,7 +201,8 @@ function parseRoute(line: string) {
   const runwayStart = line[19] === 'R' && line[20] === 'W' ? 19 : 20;
   const runwayMatch = line.slice(runwayStart, runwayStart + 6).match(/^RW\d{2}[A-Z]?/);
   const qualifierField = line.slice(20, 25).trim();
-  const isEnrouteType = line[19] === '3' || line[19] === '6';
+  // 3/6 = SID/STAR 命名过渡；A = 进近过渡（限定符为过渡入口 Fix 名）
+  const isEnrouteType = line[19] === '3' || line[19] === '6' || line[19] === 'A';
   const transitionName = !runwayMatch && isEnrouteType ? qualifierField : '';
   // 公共航路记录：限定符留空（或 ALL），全宽行才能可靠判定（短格式无列位保证）
   const isCommon = !runwayMatch && !transitionName && line.length >= 120

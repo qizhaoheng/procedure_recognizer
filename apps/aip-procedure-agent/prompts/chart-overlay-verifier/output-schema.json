@@ -1,0 +1,75 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "deviations",
+  "overallAssessment",
+  "decisionSummary"
+ ],
+ "properties": {
+  "deviations": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "kind",
+     "severity",
+     "legId",
+     "fixIdentifier",
+     "note"
+    ],
+    "properties": {
+     "kind": {
+      "type": "string",
+      "enum": [
+       "MISSING_LEG",
+       "EXTRA_LEG",
+       "WRONG_TURN",
+       "WRONG_FIX",
+       "MISSING_BRANCH",
+       "WRONG_BRANCH",
+       "RUNWAY_CONNECTION_ERROR",
+       "GEOMETRY_MISMATCH"
+      ]
+     },
+     "severity": {
+      "type": "string",
+      "enum": [
+       "WARNING",
+       "ERROR",
+       "BLOCKER"
+      ]
+     },
+     "legId": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "fixIdentifier": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "note": {
+      "type": "string"
+     }
+    }
+   }
+  },
+  "overallAssessment": {
+   "type": "string",
+   "enum": [
+    "MATCHES_CHART",
+    "MINOR_DEVIATIONS",
+    "MAJOR_DEVIATIONS",
+    "NOT_COMPARABLE"
+   ]
+  },
+  "decisionSummary": {
+   "type": "string"
+  }
+ }
+}

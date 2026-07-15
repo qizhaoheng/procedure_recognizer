@@ -11,8 +11,21 @@ const selectedId = ref("");
 const checked = ref<string[]>([]);
 const error = ref("");
 const saving = ref(false);
-const resultTab = ref<"legs" | "424">("legs");
+const resultTab = ref<"legs" | "424" | "quality" | "overlay">("legs");
 const resultBundles = ref<Record<string, any>>({});
+const overlayBundles = ref<Record<string, any>>({});
+const compareState = ref<{ open: boolean; text: string; running: boolean; report?: any; error?: string }>({ open: false, text: "", running: false });
+const debugOpen = ref(false);
+const ROUTE_TYPES = [
+  { value: "RUNWAY_TRANSITION", label: "跑道过渡" },
+  { value: "COMMON_ROUTE", label: "公共航段" },
+  { value: "ENROUTE_TRANSITION", label: "航路过渡" },
+  { value: "APPROACH_TRANSITION", label: "进近过渡" },
+  { value: "FINAL_APPROACH", label: "最后进近" },
+  { value: "MISSED_APPROACH", label: "复飞" },
+  { value: "OTHER", label: "其他" },
+];
+const visibleRouteTypes = ref<string[]>(ROUTE_TYPES.map((t) => t.value));
 const resultLoading = ref(false);
 const selectedLegId = ref("");
 const pdfPreview = ref<{
@@ -46,6 +59,20 @@ const selectedBundle = computed(() =>
 );
 const selectedResult = computed(() => selectedBundle.value?.result);
 const selectedPir = computed(() => selectedResult.value?.pir);
+const selectedOverlay = computed(() =>
+  selectedResult.value ? overlayBundles.value[selectedResult.value.procedureId] : undefined,
+);
+const selectedValidations = computed(() => selectedResult.value?.validations || []);
+const validationCounts = computed(() => {
+  const counts: Record<string, number> = { BLOCKER: 0, ERROR: 0, WARNING: 0, INFO: 0 };
+  for (const v of selectedValidations.value) counts[v.severity] = (counts[v.severity] || 0) + 1;
+  return counts;
+});
+const openConflicts = computed(() => (selectedPir.value?.conflicts || []).filter((c: any) => c.status === "OPEN"));
+const usedRouteTypes = computed(() => {
+  const present = new Set((selectedPir.value?.routes || []).map((r: any) => r.routeType));
+  return ROUTE_TYPES.filter((t) => present.has(t.value));
+});
 const selectedLeg = computed(() =>
   selectedPir.value?.legs?.find(
     (leg: any) => leg.legId === selectedLegId.value,
@@ -228,11 +255,46 @@ async function loadResult(packageId: string) {
     const bundle = await agentRequest(`/packages/${packageId}/result`);
     resultBundles.value[packageId] = bundle;
     selectedLegId.value = bundle?.result?.pir?.legs?.[0]?.legId || "";
+    if (bundle?.result?.procedureId) void loadOverlays(bundle.result.procedureId);
   } catch (e) {
     error.value = msg(e);
   } finally {
     resultLoading.value = false;
   }
+}
+async function loadOverlays(procedureId: string) {
+  try {
+    overlayBundles.value[procedureId] = await agentRequest(`/procedures/${procedureId}/overlays`);
+  } catch {
+    /* overlay artifacts are optional */
+  }
+}
+function evidenceOf(ids?: string[]) {
+  const all = selectedPir.value?.sourceEvidence || [];
+  return (ids || []).map((id: string) => all.find((e: any) => e.evidenceId === id)).filter(Boolean);
+}
+function openEvidence(evidence: any) {
+  if (evidence?.documentId && evidence?.pageNumber) openPage(evidence.documentId, evidence.pageNumber);
+}
+async function runCompare424() {
+  if (!selectedResult.value || !compareState.value.text.trim()) return;
+  compareState.value.running = true;
+  compareState.value.error = undefined;
+  try {
+    compareState.value.report = await agentRequest(
+      `/procedures/${selectedResult.value.procedureId}/compare-424`,
+      { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ referenceText: compareState.value.text }) },
+    );
+  } catch (e) {
+    compareState.value.error = msg(e);
+  } finally {
+    compareState.value.running = false;
+  }
+}
+function toggleRouteType(value: string) {
+  visibleRouteTypes.value = visibleRouteTypes.value.includes(value)
+    ? visibleRouteTypes.value.filter((v) => v !== value)
+    : [...visibleRouteTypes.value, value];
 }
 function openPdf(documentId: string, pageNumber: number) {
   pdfPreview.value = {
@@ -259,7 +321,9 @@ function fixName(fixId?: string) {
   );
 }
 function hasResult(pkg: any) {
-  return ["COMPLETED", "COMPLETED_WITH_WARNINGS"].includes(pkg.status);
+  return ["COMPLETED", "COMPLETED_WITH_WARNINGS", "REQUIRES_REVIEW"].includes(
+    pkg.status,
+  );
 }
 function isPackageRunning(pkg: any) {
   return ["STARTING", "PLANNING", "RECOGNIZING", "VALIDATING"].includes(
@@ -272,6 +336,7 @@ function anotherPackageRunning(pkg: any) {
   );
 }
 function packageAction(pkg: any) {
+  if (pkg.status === "REQUIRES_REVIEW") return "需复核";
   if (hasResult(pkg)) return "识别完成";
   if (isPackageRunning(pkg)) return "识别中…";
   if (pkg.status === "FAILED") return "重新识别";
@@ -286,7 +351,8 @@ function statusText(status: string) {
     RECOGNIZING: "AI 正在识别",
     VALIDATING: "正在校验并生成结果",
     COMPLETED: "识别完成",
-    COMPLETED_WITH_WARNINGS: "识别完成，需复核",
+    COMPLETED_WITH_WARNINGS: "识别完成，有警告",
+    REQUIRES_REVIEW: "需复核（存在校验错误）",
     FAILED: "识别失败",
   };
   return labels[status] || status;
@@ -410,7 +476,10 @@ function msg(e: unknown) {
             </button>
             <button
               class="package-action"
-              :class="{ result: hasResult(pkg) }"
+              :class="{
+                result: hasResult(pkg) && pkg.status !== 'REQUIRES_REVIEW',
+                review: pkg.status === 'REQUIRES_REVIEW',
+              }"
               :disabled="isPackageRunning(pkg) || anotherPackageRunning(pkg)"
               @click="actOnPackage(pkg)"
             >
@@ -543,11 +612,36 @@ function msg(e: unknown) {
                 ]"
                 >{{ selectedResult.candidate424?.status }}</span
               >
+              <span
+                v-if="validationCounts.BLOCKER || validationCounts.ERROR"
+                class="quality-flag bad"
+                >⛔ {{ validationCounts.BLOCKER }} BLOCKER ·
+                {{ validationCounts.ERROR }} ERROR</span
+              >
+              <span v-else-if="validationCounts.WARNING" class="quality-flag warn"
+                >⚠ {{ validationCounts.WARNING }} 警告</span
+              >
+              <span
+                v-if="selectedPir?.quality?.unresolvedFields?.length"
+                class="quality-flag warn"
+                >{{ selectedPir.quality.unresolvedFields.length }} 个未解决字段</span
+              >
+            </div>
+            <div v-if="usedRouteTypes.length > 1" class="route-layers">
+              <label v-for="t in usedRouteTypes" :key="t.value">
+                <input
+                  type="checkbox"
+                  :checked="visibleRouteTypes.includes(t.value)"
+                  @change="toggleRouteType(t.value)"
+                />
+                {{ t.label }}
+              </label>
             </div>
             <div class="result-map">
               <AgentResultMap
                 :geojson="selectedResult.geojson"
                 :selected-leg-id="selectedLegId"
+                :visible-route-types="visibleRouteTypes"
                 @select-leg="selectedLegId = $event"
               />
             </div>
@@ -572,6 +666,18 @@ function msg(e: unknown) {
             @click="resultTab = '424'"
           >
             ARINC 424
+          </button>
+          <button
+            :class="{ active: resultTab === 'quality', alert: validationCounts.BLOCKER + validationCounts.ERROR > 0 }"
+            @click="resultTab = 'quality'"
+          >
+            校验 {{ selectedValidations.length || "" }}
+          </button>
+          <button
+            :class="{ active: resultTab === 'overlay' }"
+            @click="resultTab = 'overlay'"
+          >
+            原图叠加
           </button>
         </nav>
         <section v-if="resultLoading" class="result-loading">正在加载…</section>
@@ -606,11 +712,23 @@ function msg(e: unknown) {
             <dd>{{ selectedLeg.confidence ?? "—" }}</dd>
           </dl>
         </section>
-        <section v-else-if="selectedResult" class="inline-424">
-          <span
-            :class="['candidate-state', selectedResult.candidate424?.status]"
-            >{{ selectedResult.candidate424?.status }}</span
-          >
+        <section v-else-if="selectedResult && resultTab === '424'" class="inline-424">
+          <div class="candidate-head">
+            <span
+              :class="['candidate-state', selectedResult.candidate424?.status]"
+              >{{ selectedResult.candidate424?.status }}</span
+            >
+            <small v-if="selectedResult.candidate424?.roundTrip">
+              Round-trip {{ selectedResult.candidate424.roundTrip.parsedLegs }}/{{
+                selectedResult.candidate424.roundTrip.emittedLegs
+              }}
+              腿 ·
+              {{
+                selectedResult.candidate424.roundTrip.fieldMismatches?.length || 0
+              }}
+              字段差异
+            </small>
+          </div>
           <pre>{{
             selectedResult.candidate424?.text || "尚未生成 424 Candidate"
           }}</pre>
@@ -622,9 +740,129 @@ function msg(e: unknown) {
               {{ field }}
             </li>
           </ul>
+          <details v-if="selectedResult.candidate424?.roundTrip?.fieldMismatches?.length" class="mismatch-list">
+            <summary>Round-trip 字段差异</summary>
+            <p v-for="(m, i) in selectedResult.candidate424.roundTrip.fieldMismatches" :key="i">
+              {{ m.key }} · {{ m.field }}：导出 {{ m.emitted ?? "—" }} / 回读 {{ m.reparsed ?? "—" }}
+            </p>
+          </details>
+          <section class="compare-block">
+            <button
+              class="compare"
+              :disabled="!selectedResult.candidate424?.text"
+              @click="compareState.open = !compareState.open"
+            >
+              与 Jeppesen 424 参考数据对比
+            </button>
+            <template v-if="compareState.open">
+              <textarea
+                v-model="compareState.text"
+                rows="5"
+                placeholder="粘贴参考 424 静态文本（132 列记录）"
+              ></textarea>
+              <button
+                class="primary"
+                :disabled="compareState.running || !compareState.text.trim()"
+                @click="runCompare424"
+              >
+                {{ compareState.running ? "对比中…" : "运行对比" }}
+              </button>
+              <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
+              <div v-if="compareState.report" class="compare-report">
+                <p>
+                  <b>匹配率
+                    {{
+                      compareState.report.matchRate == null
+                        ? "—"
+                        : Math.round(compareState.report.matchRate * 100) + "%"
+                    }}</b>
+                  · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
+                  {{ compareState.report.partialLegs }} 部分 ·
+                  {{ compareState.report.mismatchedLegs }} 不匹配
+                </p>
+                <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
+                  <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
+                  <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
+                    #{{ legResult.sequence }} {{ legResult.status }}：
+                    {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
+                  </p>
+                </div>
+              </div>
+            </template>
+          </section>
+        </section>
+        <section v-else-if="selectedResult && resultTab === 'quality'" class="inline-quality">
+          <p v-if="!selectedValidations.length && !openConflicts.length && !selectedPir?.quality?.unresolvedFields?.length" class="quality-ok">
+            全部校验通过，无未解决字段。
+          </p>
+          <article v-for="(v, i) in selectedValidations" :key="i" :class="['validation', v.severity]">
+            <header>
+              <span class="severity">{{ v.severity }}</span>
+              <b>{{ v.ruleCode }}</b>
+            </header>
+            <p>{{ v.message }}</p>
+            <small v-if="v.fieldPath">{{ v.fieldPath }}</small>
+            <div v-if="evidenceOf(v.evidence).length" class="evidence-links">
+              <button v-for="ev in evidenceOf(v.evidence)" :key="ev.evidenceId" @click="openEvidence(ev)">
+                查看证据 P{{ ev.pageNumber }}
+              </button>
+            </div>
+          </article>
+          <section v-if="openConflicts.length">
+            <h3>提取冲突（{{ openConflicts.length }}）</h3>
+            <article v-for="conflict in openConflicts" :key="conflict.conflictId" class="validation WARNING">
+              <header><span class="severity">CONFLICT</span><b>{{ conflict.fieldPath }}</b></header>
+              <p>{{ conflict.reason }}</p>
+              <p v-for="(candidate, ci) in conflict.candidates" :key="ci" class="candidate-row">
+                候选 {{ ci + 1 }}（{{ candidate.source }}）：{{ JSON.stringify(candidate.value) }}
+              </p>
+            </article>
+          </section>
+          <section v-if="selectedPir?.quality?.unresolvedFields?.length">
+            <h3>未解决字段（{{ selectedPir.quality.unresolvedFields.length }}）</h3>
+            <p v-for="field in selectedPir.quality.unresolvedFields" :key="field" class="unresolved-field">{{ field }}</p>
+          </section>
+        </section>
+        <section v-else-if="selectedResult && resultTab === 'overlay'" class="inline-overlay">
+          <template v-if="selectedOverlay?.overlays?.length">
+            <div v-for="(v, i) in selectedOverlay.verifications" :key="i" class="overlay-meta">
+              <span :class="['candidate-state', v.status === 'VERIFIED' ? '' : '424_INCOMPLETE']">{{ v.status }}</span>
+              <small v-if="v.georeference">控制点 {{ v.georeference.controlPoints }} · 残差 {{ v.georeference.meanResidualPx?.toFixed?.(1) ?? "—" }}px</small>
+              <small v-if="v.overallAssessment"> · {{ v.overallAssessment }}</small>
+            </div>
+            <img
+              v-for="name in selectedOverlay.overlays"
+              :key="name"
+              :src="`/api/agent/procedures/${selectedResult.procedureId}/files/${name}`"
+              :alt="name"
+              class="overlay-img"
+            />
+          </template>
+          <p v-else class="result-loading">
+            {{ selectedOverlay?.verifications?.length ? "叠加未完成配准（控制点不足），已标记 NOT_GEOREFERENCED。" : "该程序尚未生成原图叠加。重新识别后自动执行配准与叠加校验。" }}
+          </p>
         </section>
       </aside>
     </section>
+    <details class="debug-drawer" :open="debugOpen" @toggle="debugOpen = ($event.target as HTMLDetailsElement).open">
+      <summary>开发调试信息（模型调用 {{ task.modelCalls?.length || 0 }} · 步骤 {{ task.steps?.length || 0 }}）</summary>
+      <div class="debug-columns">
+        <section>
+          <h4>模型调用</h4>
+          <p v-for="call in (task.modelCalls || []).slice().reverse().slice(0, 40)" :key="call.callId">
+            <b>{{ call.promptName }}</b> v{{ call.promptVersion }} · {{ call.toolName || call.stepName }}
+            <em v-if="call.error" class="failed">{{ call.error }}</em>
+          </p>
+        </section>
+        <section>
+          <h4>执行步骤</h4>
+          <p v-for="s in (task.steps || []).slice().reverse().slice(0, 30)" :key="s.stepId">
+            {{ s.name }} · {{ s.status }} · {{ s.durationMs || 0 }}ms
+            <em v-if="s.error" class="failed">{{ s.error }}</em>
+          </p>
+        </section>
+      </div>
+    </details>
     <div
       v-if="pdfPreview"
       class="pdf-modal"
@@ -861,6 +1099,11 @@ function msg(e: unknown) {
   background: #e7f5ed;
   border-color: #a7d7b9;
   color: #237a4b;
+}
+.package-action.review {
+  background: #fff7e6;
+  border-color: #f3d19e;
+  color: #b45309;
 }
 .package-action:disabled,
 button:disabled {
@@ -1203,6 +1446,193 @@ button:disabled {
   flex: 1;
   width: 100%;
   border: 0;
+}
+.quality-flag {
+  padding: 6px 9px;
+  border-radius: 6px;
+  font-size: 11px;
+}
+.quality-flag.bad {
+  background: #feeceb;
+  color: #b42318;
+}
+.quality-flag.warn {
+  background: #fff7e6;
+  color: #b45309;
+}
+.route-layers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 6px 2px;
+  font-size: 12px;
+  color: #334e68;
+  flex: 0 0 auto;
+}
+.route-layers label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.result-tabs button.alert {
+  color: #b42318;
+  font-weight: 700;
+}
+.candidate-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.candidate-head small {
+  color: #627d98;
+}
+.mismatch-list {
+  background: #fff7e6;
+  padding: 8px;
+  border-radius: 7px;
+  font-size: 11px;
+  margin-top: 8px;
+}
+.compare-block {
+  margin-top: 14px;
+  border-top: 1px solid #edf1f5;
+  padding-top: 10px;
+}
+.compare-block .compare {
+  width: 100%;
+  border: 1px solid #c8d2df;
+  background: #fff;
+  padding: 8px;
+  border-radius: 7px;
+}
+.compare-block textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0;
+  font-family: monospace;
+  font-size: 10px;
+  border: 1px solid #ccd6e0;
+  border-radius: 7px;
+  padding: 8px;
+}
+.compare-report {
+  background: #f5f8fb;
+  padding: 10px;
+  border-radius: 7px;
+  margin-top: 8px;
+  font-size: 12px;
+}
+.compare-diff {
+  color: #b45309;
+  margin: 3px 0;
+  font-size: 11px;
+}
+.inline-quality .validation {
+  border: 1px solid #e2e8f0;
+  border-left: 4px solid #94a3b8;
+  border-radius: 7px;
+  padding: 9px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+.inline-quality .validation.BLOCKER {
+  border-left-color: #b42318;
+  background: #fef2f2;
+}
+.inline-quality .validation.ERROR {
+  border-left-color: #ea580c;
+  background: #fff7ed;
+}
+.inline-quality .validation.WARNING {
+  border-left-color: #d97706;
+}
+.inline-quality .validation header {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+}
+.inline-quality .severity {
+  font-size: 10px;
+  background: #e2e8f0;
+  padding: 2px 5px;
+  border-radius: 4px;
+}
+.inline-quality .validation p {
+  margin: 5px 0 0;
+}
+.inline-quality .validation small {
+  color: #829ab1;
+}
+.evidence-links button {
+  border: 1px solid #aac4e6;
+  background: #eff6ff;
+  color: #174ea6;
+  border-radius: 5px;
+  padding: 3px 7px;
+  font-size: 10px;
+  margin: 6px 4px 0 0;
+  cursor: pointer;
+}
+.candidate-row {
+  font-size: 11px;
+  color: #52606d;
+}
+.unresolved-field {
+  font-size: 11px;
+  color: #b45309;
+  margin: 3px 0;
+  font-family: monospace;
+}
+.quality-ok {
+  color: #237a4b;
+  background: #e7f5ed;
+  padding: 10px;
+  border-radius: 7px;
+}
+.inline-overlay .overlay-img {
+  width: 100%;
+  border: 1px solid #dbe4ee;
+  border-radius: 7px;
+  margin-top: 8px;
+}
+.overlay-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: #627d98;
+}
+.debug-drawer {
+  margin-top: 10px;
+  flex: 0 0 auto;
+  background: #fff;
+  border-radius: 10px;
+  padding: 8px 14px;
+  color: #52606d;
+  font-size: 12px;
+}
+.debug-drawer summary {
+  cursor: pointer;
+  color: #829ab1;
+}
+.debug-columns {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  max-height: 260px;
+  overflow: auto;
+  margin-top: 8px;
+}
+.debug-columns p {
+  margin: 4px 0;
+  border-bottom: 1px solid #f1f5f9;
+  padding-bottom: 4px;
+}
+.debug-columns .failed {
+  color: #b42318;
+  display: block;
+  font-style: normal;
 }
 .pdf-modal .page-image {
   flex: 1;
