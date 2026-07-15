@@ -16,12 +16,19 @@ import {
   startTaskAnalysis,
 } from "./orchestrator";
 import { compile424Candidate, compileGeoJson, validatePir } from "./compiler";
+import { applyQualityGate } from "./validation";
+import { parseJeppesen424Text } from "../../../server/src/services/jeppesen424/jeppesen424TextParser";
+import {
+  alignJeppesenProcedureNames,
+  compareSimpleProcedureLegs,
+} from "../../../server/src/services/jeppesen424/simpleProcedureComparator";
 import {
   agentDataRoot,
   ensureAgentStorage,
   listAgentTasks,
   readAgentTask,
   saveAgentTask,
+  writeArtifact,
 } from "./storage";
 
 export const agentRouter = express.Router();
@@ -369,6 +376,114 @@ agentRouter.post("/procedures/:id/compile-geojson", async (req, res) =>
 agentRouter.post("/procedures/:id/compile-424", async (req, res) =>
   recompile(req.params.id, res, "424"),
 );
+// —— 原图叠加图片 / 证据裁剪图 / Plan 执行记录 ——
+agentRouter.get("/procedures/:id/overlays", async (req, res) => {
+  const found = await findProcedure(req.params.id);
+  if (!found) return res.status(404).json({ error: "程序不存在。" });
+  const dir = path.join(
+    agentDataRoot(),
+    found.task.taskId,
+    "procedures",
+    found.procedure.procedureId,
+  );
+  let entries: string[] = [];
+  try {
+    entries = await fs.readdir(dir);
+  } catch {
+    /* no artifacts yet */
+  }
+  const overlays = entries.filter((f) => /^overlay-p\d+\.png$/.test(f));
+  const verifications = [];
+  for (const file of entries
+    .filter((f) => /^overlay-verification-r\d+\.json$/.test(f))
+    .sort()) {
+    try {
+      verifications.push(
+        JSON.parse(await fs.readFile(path.join(dir, file), "utf8")),
+      );
+    } catch {
+      /* skip corrupt round file */
+    }
+  }
+  res.json({ overlays, verifications });
+});
+agentRouter.get("/procedures/:id/files/:name", async (req, res) => {
+  const found = await findProcedure(req.params.id);
+  if (!found) return res.status(404).json({ error: "程序不存在。" });
+  const name = String(req.params.name);
+  if (!/^[\w.-]+$/.test(name) || name.includes(".."))
+    return res.status(400).json({ error: "非法文件名。" });
+  const file = path.join(
+    agentDataRoot(),
+    found.task.taskId,
+    "procedures",
+    found.procedure.procedureId,
+    name,
+  );
+  try {
+    await fs.access(file);
+  } catch {
+    return res.status(404).json({ error: "文件不存在。" });
+  }
+  res.sendFile(path.resolve(file));
+});
+agentRouter.get(
+  "/procedures/:id/evidence/:evidenceId/image",
+  async (req, res) => {
+    const found = await findProcedure(req.params.id);
+    const evidence = found?.procedure.pir?.sourceEvidence.find(
+      (e) => e.evidenceId === req.params.evidenceId,
+    );
+    if (!evidence?.imageCropPath)
+      return res.status(404).json({ error: "证据裁剪图不存在。" });
+    res.sendFile(path.resolve(evidence.imageCropPath));
+  },
+);
+// —— Jeppesen 424 参考对比 ——
+agentRouter.post("/procedures/:id/compare-424", async (req, res) => {
+  const found = await findProcedure(req.params.id);
+  if (!found?.procedure.candidate424?.text)
+    return res
+      .status(409)
+      .json({ error: "该程序尚无 424 Candidate，无法对比。" });
+  const referenceText = String(req.body?.referenceText || "");
+  if (!referenceText.trim())
+    return res.status(400).json({ error: "请提供参考 424 文本。" });
+  const jeppesenLegs = parseJeppesen424Text(referenceText);
+  if (!jeppesenLegs.length)
+    return res
+      .status(422)
+      .json({ error: "参考文本未解析出任何 424 腿段记录。" });
+  const aiLegs = parseJeppesen424Text(found.procedure.candidate424.text);
+  const aligned = alignJeppesenProcedureNames(aiLegs, jeppesenLegs);
+  const procedureResults = compareSimpleProcedureLegs(aiLegs, aligned);
+  const totals = procedureResults.reduce(
+    (acc, item) => ({
+      totalLegs: acc.totalLegs + item.totalLegs,
+      matchedLegs: acc.matchedLegs + item.matchedLegs,
+      partialLegs: acc.partialLegs + item.partialLegs,
+      mismatchedLegs: acc.mismatchedLegs + item.mismatchedLegs,
+    }),
+    { totalLegs: 0, matchedLegs: 0, partialLegs: 0, mismatchedLegs: 0 },
+  );
+  const report = {
+    comparedAt: new Date().toISOString(),
+    procedureId: found.procedure.procedureId,
+    matchRate: totals.totalLegs
+      ? Number((totals.matchedLegs / totals.totalLegs).toFixed(3))
+      : null,
+    ...totals,
+    procedureResults,
+    referenceLegCount: jeppesenLegs.length,
+    aiLegCount: aiLegs.length,
+  };
+  await writeArtifact(
+    found.task.taskId,
+    `procedures/${found.procedure.procedureId}/compare-424-${Date.now()}.json`,
+    report,
+  );
+  res.json(report);
+});
 agentRouter.patch("/procedures/:id/fields", async (req, res) => {
   const found = await findProcedure(req.params.id);
   if (!found?.procedure.pir)
@@ -376,9 +491,18 @@ agentRouter.patch("/procedures/:id/fields", async (req, res) => {
   for (const edit of req.body.edits || [])
     applyManualEdit(found.procedure.pir as any, edit.path, edit.value);
   found.procedure.version += 1;
-  found.procedure.validations = validatePir(found.procedure.pir);
+  const pkg = found.task.packages.find(
+    (p) => p.packageId === found.procedure.packageId,
+  );
+  const validations = validatePir(found.procedure.pir, pkg?.recognitionPlan);
+  found.procedure.validations = validations;
+  found.procedure.pir.validation.results = validations;
   found.procedure.geojson = compileGeoJson(found.procedure.pir);
-  found.procedure.candidate424 = compile424Candidate(found.procedure.pir);
+  found.procedure.candidate424 = compile424Candidate(
+    found.procedure.pir,
+    validations,
+  );
+  if (pkg) pkg.status = applyQualityGate(found.procedure.pir, validations);
   await saveAgentTask(found.task);
   res.json(found.procedure);
 });

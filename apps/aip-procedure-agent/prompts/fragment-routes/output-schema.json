@@ -1,0 +1,222 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "routes",
+  "sourceEvidence",
+  "toolRequests",
+  "needsMoreContext",
+  "decisionSummary"
+ ],
+ "properties": {
+  "routes": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "routeId",
+     "routeType",
+     "identifier",
+     "runway",
+     "transitionFix",
+     "fixSequence",
+     "sequence"
+    ],
+    "properties": {
+     "routeId": {
+      "type": "string"
+     },
+     "routeType": {
+      "type": "string",
+      "enum": [
+       "RUNWAY_TRANSITION",
+       "COMMON_ROUTE",
+       "ENROUTE_TRANSITION",
+       "APPROACH_TRANSITION",
+       "FINAL_APPROACH",
+       "MISSED_APPROACH",
+       "OTHER"
+      ]
+     },
+     "identifier": {
+      "type": "string"
+     },
+     "runway": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "transitionFix": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "fixSequence": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "sequence": {
+      "type": "integer"
+     }
+    }
+   }
+  },
+  "sourceEvidence": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/evidence"
+   }
+  },
+  "toolRequests": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/toolRequest"
+   }
+  },
+  "needsMoreContext": {
+   "type": "boolean"
+  },
+  "decisionSummary": {
+   "type": "string"
+  }
+ },
+ "$defs": {
+  "evidence": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "evidenceId",
+    "documentId",
+    "pageNumber",
+    "sourceType",
+    "bbox",
+    "rawText",
+    "extractionMethod",
+    "confidence"
+   ],
+   "properties": {
+    "evidenceId": {
+     "type": "string"
+    },
+    "documentId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "pageNumber": {
+     "type": "integer"
+    },
+    "sourceType": {
+     "type": "string"
+    },
+    "bbox": {
+     "type": "array",
+     "minItems": 4,
+     "maxItems": 4,
+     "items": {
+      "type": "number"
+     }
+    },
+    "rawText": {
+     "type": "string"
+    },
+    "extractionMethod": {
+     "type": "string",
+     "enum": [
+      "NATIVE_TEXT",
+      "OCR",
+      "VISION",
+      "DERIVED"
+     ]
+    },
+    "confidence": {
+     "type": "number"
+    }
+   }
+  },
+  "toolRequest": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "arguments",
+    "reason"
+   ],
+   "properties": {
+    "name": {
+     "type": "string",
+     "enum": [
+      "extract_text",
+      "crop_page",
+      "search_document"
+     ]
+    },
+    "arguments": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "documentId",
+      "pageNumber",
+      "bbox",
+      "keyword"
+     ],
+     "properties": {
+      "documentId": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "pageNumber": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "bbox": {
+       "anyOf": [
+        {
+         "type": "null"
+        },
+        {
+         "type": "array",
+         "minItems": 4,
+         "maxItems": 4,
+         "items": {
+          "type": "number"
+         }
+        }
+       ]
+      },
+      "keyword": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     }
+    },
+    "reason": {
+     "type": "string"
+    }
+   }
+  },
+  "status": {
+   "type": "string",
+   "enum": [
+    "CONFIRMED",
+    "DERIVED",
+    "AI_INFERRED",
+    "CONFLICTED",
+    "UNRESOLVED",
+    "MANUALLY_EDITED"
+   ]
+  }
+ }
+}

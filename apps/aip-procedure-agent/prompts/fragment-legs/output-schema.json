@@ -1,0 +1,503 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "legs",
+  "sourceEvidence",
+  "toolRequests",
+  "needsMoreContext",
+  "decisionSummary"
+ ],
+ "properties": {
+  "legs": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/leg"
+   }
+  },
+  "sourceEvidence": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/evidence"
+   }
+  },
+  "toolRequests": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/toolRequest"
+   }
+  },
+  "needsMoreContext": {
+   "type": "boolean"
+  },
+  "decisionSummary": {
+   "type": "string"
+  }
+ },
+ "$defs": {
+  "status": {
+   "type": "string",
+   "enum": [
+    "CONFIRMED",
+    "DERIVED",
+    "AI_INFERRED",
+    "CONFLICTED",
+    "UNRESOLVED",
+    "MANUALLY_EDITED"
+   ]
+  },
+  "altitude": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "type",
+    "lowerFt",
+    "upperFt",
+    "rawText"
+   ],
+   "properties": {
+    "type": {
+     "type": "string",
+     "enum": [
+      "AT",
+      "AT_OR_ABOVE",
+      "AT_OR_BELOW",
+      "BETWEEN",
+      "NONE"
+     ]
+    },
+    "lowerFt": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "upperFt": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "rawText": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
+  },
+  "speed": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "type",
+    "valueKias"
+   ],
+   "properties": {
+    "type": {
+     "type": "string",
+     "enum": [
+      "AT",
+      "AT_OR_ABOVE",
+      "AT_OR_BELOW",
+      "NONE"
+     ]
+    },
+    "valueKias": {
+     "type": [
+      "number",
+      "null"
+     ]
+    }
+   }
+  },
+  "holding": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "holdingFixId",
+    "inboundCourse",
+    "courseReference",
+    "turnDirection",
+    "legTimeMin",
+    "legDistanceNm",
+    "minimumAltitudeFt",
+    "maximumAltitudeFt",
+    "speedLimitKias",
+    "rawText"
+   ],
+   "properties": {
+    "holdingFixId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "inboundCourse": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "courseReference": {
+     "type": "string",
+     "enum": [
+      "MAGNETIC",
+      "TRUE"
+     ]
+    },
+    "turnDirection": {
+     "type": "string",
+     "enum": [
+      "L",
+      "R"
+     ]
+    },
+    "legTimeMin": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "legDistanceNm": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "minimumAltitudeFt": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "maximumAltitudeFt": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "speedLimitKias": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "rawText": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
+  },
+  "evidence": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "evidenceId",
+    "documentId",
+    "pageNumber",
+    "sourceType",
+    "bbox",
+    "rawText",
+    "extractionMethod",
+    "confidence"
+   ],
+   "properties": {
+    "evidenceId": {
+     "type": "string"
+    },
+    "documentId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "pageNumber": {
+     "type": "integer"
+    },
+    "sourceType": {
+     "type": "string"
+    },
+    "bbox": {
+     "type": "array",
+     "minItems": 4,
+     "maxItems": 4,
+     "items": {
+      "type": "number"
+     }
+    },
+    "rawText": {
+     "type": "string"
+    },
+    "extractionMethod": {
+     "type": "string",
+     "enum": [
+      "NATIVE_TEXT",
+      "OCR",
+      "VISION",
+      "DERIVED"
+     ]
+    },
+    "confidence": {
+     "type": "number"
+    }
+   }
+  },
+  "toolRequest": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "arguments",
+    "reason"
+   ],
+   "properties": {
+    "name": {
+     "type": "string",
+     "enum": [
+      "extract_text",
+      "crop_page",
+      "search_document"
+     ]
+    },
+    "arguments": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "documentId",
+      "pageNumber",
+      "bbox",
+      "keyword"
+     ],
+     "properties": {
+      "documentId": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "pageNumber": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "bbox": {
+       "anyOf": [
+        {
+         "type": "null"
+        },
+        {
+         "type": "array",
+         "minItems": 4,
+         "maxItems": 4,
+         "items": {
+          "type": "number"
+         }
+        }
+       ]
+      },
+      "keyword": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     }
+    },
+    "reason": {
+     "type": "string"
+    }
+   }
+  },
+  "leg": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "legId",
+    "sequence",
+    "routeId",
+    "pathTerminator",
+    "fromFixId",
+    "toFixId",
+    "centerFixId",
+    "recommendedNavaidId",
+    "course",
+    "courseReference",
+    "distanceNm",
+    "radiusNm",
+    "turnDirection",
+    "altitudeConstraint",
+    "speedConstraint",
+    "verticalAngle",
+    "holding",
+    "openEnded",
+    "evidence",
+    "confidence",
+    "fieldStatus",
+    "warnings"
+   ],
+   "properties": {
+    "legId": {
+     "type": "string"
+    },
+    "sequence": {
+     "type": "integer"
+    },
+    "routeId": {
+     "type": "string"
+    },
+    "pathTerminator": {
+     "type": "string",
+     "enum": [
+      "IF",
+      "TF",
+      "CF",
+      "DF",
+      "RF",
+      "AF",
+      "FA",
+      "FC",
+      "FD",
+      "FM",
+      "CA",
+      "CD",
+      "CI",
+      "CR",
+      "VA",
+      "VD",
+      "VI",
+      "VM",
+      "VR",
+      "HA",
+      "HF",
+      "HM",
+      "PI"
+     ]
+    },
+    "fromFixId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "toFixId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "centerFixId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "recommendedNavaidId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "course": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "courseReference": {
+     "type": "string",
+     "enum": [
+      "MAGNETIC",
+      "TRUE"
+     ]
+    },
+    "distanceNm": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "radiusNm": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "turnDirection": {
+     "type": [
+      "string",
+      "null"
+     ],
+     "enum": [
+      "L",
+      "R",
+      null
+     ]
+    },
+    "altitudeConstraint": {
+     "anyOf": [
+      {
+       "type": "null"
+      },
+      {
+       "$ref": "#/$defs/altitude"
+      }
+     ]
+    },
+    "speedConstraint": {
+     "anyOf": [
+      {
+       "type": "null"
+      },
+      {
+       "$ref": "#/$defs/speed"
+      }
+     ]
+    },
+    "verticalAngle": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "holding": {
+     "anyOf": [
+      {
+       "type": "null"
+      },
+      {
+       "$ref": "#/$defs/holding"
+      }
+     ]
+    },
+    "openEnded": {
+     "type": "boolean"
+    },
+    "evidence": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    },
+    "confidence": {
+     "type": "number"
+    },
+    "fieldStatus": {
+     "type": "object",
+     "additionalProperties": {
+      "$ref": "#/$defs/status"
+     }
+    },
+    "warnings": {
+     "type": "array",
+     "items": {
+      "type": "string"
+     }
+    }
+   }
+  }
+ }
+}

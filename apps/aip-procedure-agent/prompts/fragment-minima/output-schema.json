@@ -1,0 +1,245 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "minima",
+  "sourceEvidence",
+  "toolRequests",
+  "needsMoreContext",
+  "decisionSummary"
+ ],
+ "properties": {
+  "minima": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "minimaId",
+     "type",
+     "valueFt",
+     "valueMeters",
+     "aircraftCategory",
+     "runway",
+     "condition",
+     "rawText",
+     "evidence",
+     "status"
+    ],
+    "properties": {
+     "minimaId": {
+      "type": "string"
+     },
+     "type": {
+      "type": "string",
+      "enum": [
+       "DA",
+       "MDA",
+       "OCA",
+       "OCH",
+       "RVR",
+       "VIS"
+      ]
+     },
+     "valueFt": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "valueMeters": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "aircraftCategory": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "runway": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "condition": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "rawText": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "evidence": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     },
+     "status": {
+      "$ref": "#/$defs/status"
+     }
+    }
+   }
+  },
+  "sourceEvidence": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/evidence"
+   }
+  },
+  "toolRequests": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/toolRequest"
+   }
+  },
+  "needsMoreContext": {
+   "type": "boolean"
+  },
+  "decisionSummary": {
+   "type": "string"
+  }
+ },
+ "$defs": {
+  "status": {
+   "type": "string",
+   "enum": [
+    "CONFIRMED",
+    "DERIVED",
+    "AI_INFERRED",
+    "CONFLICTED",
+    "UNRESOLVED",
+    "MANUALLY_EDITED"
+   ]
+  },
+  "evidence": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "evidenceId",
+    "documentId",
+    "pageNumber",
+    "sourceType",
+    "bbox",
+    "rawText",
+    "extractionMethod",
+    "confidence"
+   ],
+   "properties": {
+    "evidenceId": {
+     "type": "string"
+    },
+    "documentId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "pageNumber": {
+     "type": "integer"
+    },
+    "sourceType": {
+     "type": "string"
+    },
+    "bbox": {
+     "type": "array",
+     "minItems": 4,
+     "maxItems": 4,
+     "items": {
+      "type": "number"
+     }
+    },
+    "rawText": {
+     "type": "string"
+    },
+    "extractionMethod": {
+     "type": "string",
+     "enum": [
+      "NATIVE_TEXT",
+      "OCR",
+      "VISION",
+      "DERIVED"
+     ]
+    },
+    "confidence": {
+     "type": "number"
+    }
+   }
+  },
+  "toolRequest": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "arguments",
+    "reason"
+   ],
+   "properties": {
+    "name": {
+     "type": "string",
+     "enum": [
+      "extract_text",
+      "crop_page",
+      "search_document"
+     ]
+    },
+    "arguments": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "documentId",
+      "pageNumber",
+      "bbox",
+      "keyword"
+     ],
+     "properties": {
+      "documentId": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "pageNumber": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "bbox": {
+       "anyOf": [
+        {
+         "type": "null"
+        },
+        {
+         "type": "array",
+         "minItems": 4,
+         "maxItems": 4,
+         "items": {
+          "type": "number"
+         }
+        }
+       ]
+      },
+      "keyword": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     }
+    },
+    "reason": {
+     "type": "string"
+    }
+   }
+  }
+ }
+}

@@ -1,0 +1,281 @@
+{
+ "type": "object",
+ "additionalProperties": false,
+ "required": [
+  "legConstraints",
+  "sourceEvidence",
+  "toolRequests",
+  "needsMoreContext",
+  "decisionSummary"
+ ],
+ "properties": {
+  "legConstraints": {
+   "type": "array",
+   "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [
+     "legId",
+     "altitudeConstraint",
+     "speedConstraint",
+     "verticalAngle",
+     "evidence"
+    ],
+    "properties": {
+     "legId": {
+      "type": "string"
+     },
+     "altitudeConstraint": {
+      "anyOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/$defs/altitude"
+       }
+      ]
+     },
+     "speedConstraint": {
+      "anyOf": [
+       {
+        "type": "null"
+       },
+       {
+        "$ref": "#/$defs/speed"
+       }
+      ]
+     },
+     "verticalAngle": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "evidence": {
+      "type": "array",
+      "items": {
+       "type": "string"
+      }
+     }
+    }
+   }
+  },
+  "sourceEvidence": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/evidence"
+   }
+  },
+  "toolRequests": {
+   "type": "array",
+   "items": {
+    "$ref": "#/$defs/toolRequest"
+   }
+  },
+  "needsMoreContext": {
+   "type": "boolean"
+  },
+  "decisionSummary": {
+   "type": "string"
+  }
+ },
+ "$defs": {
+  "altitude": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "type",
+    "lowerFt",
+    "upperFt",
+    "rawText"
+   ],
+   "properties": {
+    "type": {
+     "type": "string",
+     "enum": [
+      "AT",
+      "AT_OR_ABOVE",
+      "AT_OR_BELOW",
+      "BETWEEN",
+      "NONE"
+     ]
+    },
+    "lowerFt": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "upperFt": {
+     "type": [
+      "number",
+      "null"
+     ]
+    },
+    "rawText": {
+     "type": [
+      "string",
+      "null"
+     ]
+    }
+   }
+  },
+  "speed": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "type",
+    "valueKias"
+   ],
+   "properties": {
+    "type": {
+     "type": "string",
+     "enum": [
+      "AT",
+      "AT_OR_ABOVE",
+      "AT_OR_BELOW",
+      "NONE"
+     ]
+    },
+    "valueKias": {
+     "type": [
+      "number",
+      "null"
+     ]
+    }
+   }
+  },
+  "evidence": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "evidenceId",
+    "documentId",
+    "pageNumber",
+    "sourceType",
+    "bbox",
+    "rawText",
+    "extractionMethod",
+    "confidence"
+   ],
+   "properties": {
+    "evidenceId": {
+     "type": "string"
+    },
+    "documentId": {
+     "type": [
+      "string",
+      "null"
+     ]
+    },
+    "pageNumber": {
+     "type": "integer"
+    },
+    "sourceType": {
+     "type": "string"
+    },
+    "bbox": {
+     "type": "array",
+     "minItems": 4,
+     "maxItems": 4,
+     "items": {
+      "type": "number"
+     }
+    },
+    "rawText": {
+     "type": "string"
+    },
+    "extractionMethod": {
+     "type": "string",
+     "enum": [
+      "NATIVE_TEXT",
+      "OCR",
+      "VISION",
+      "DERIVED"
+     ]
+    },
+    "confidence": {
+     "type": "number"
+    }
+   }
+  },
+  "toolRequest": {
+   "type": "object",
+   "additionalProperties": false,
+   "required": [
+    "name",
+    "arguments",
+    "reason"
+   ],
+   "properties": {
+    "name": {
+     "type": "string",
+     "enum": [
+      "extract_text",
+      "crop_page",
+      "search_document"
+     ]
+    },
+    "arguments": {
+     "type": "object",
+     "additionalProperties": false,
+     "required": [
+      "documentId",
+      "pageNumber",
+      "bbox",
+      "keyword"
+     ],
+     "properties": {
+      "documentId": {
+       "type": [
+        "string",
+        "null"
+       ]
+      },
+      "pageNumber": {
+       "type": [
+        "integer",
+        "null"
+       ]
+      },
+      "bbox": {
+       "anyOf": [
+        {
+         "type": "null"
+        },
+        {
+         "type": "array",
+         "minItems": 4,
+         "maxItems": 4,
+         "items": {
+          "type": "number"
+         }
+        }
+       ]
+      },
+      "keyword": {
+       "type": [
+        "string",
+        "null"
+       ]
+      }
+     }
+    },
+    "reason": {
+     "type": "string"
+    }
+   }
+  },
+  "status": {
+   "type": "string",
+   "enum": [
+    "CONFIRMED",
+    "DERIVED",
+    "AI_INFERRED",
+    "CONFLICTED",
+    "UNRESOLVED",
+    "MANUALLY_EDITED"
+   ]
+  }
+ }
+}

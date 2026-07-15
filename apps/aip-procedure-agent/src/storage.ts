@@ -151,6 +151,19 @@ async function renameWithRetry(source: string, destination: string) {
 }
 function normalizeStoredTask(raw: AgentTask): AgentTask {
   raw.taskName ||= raw.fileName || "AIP AD-2 自主识别任务";
+  // PIR 1.0.0 → 1.1.0 兼容：补齐新集合字段，历史 conflicts（自由对象）转为带候选的规范结构
+  for (const procedure of raw.procedures || []) {
+    const pir: any = procedure.pir;
+    if (!pir) continue;
+    pir.runwayData ||= [];
+    pir.minima ||= [];
+    pir.conflicts = (pir.conflicts || []).map((conflict: any, index: number) =>
+      conflict && typeof conflict.fieldPath === "string" && Array.isArray(conflict.candidates)
+        ? conflict
+        : { conflictId: conflict?.conflictId || `LEGACY-${index}`, fieldPath: conflict?.fieldPath || "", reason: conflict?.reason || JSON.stringify(conflict).slice(0, 200), status: "OPEN", candidates: [] },
+    );
+    if (pir.procedure && pir.procedure.approachType === undefined) pir.procedure.approachType = null;
+  }
   raw.documents ||= raw.filePath
     ? [
         {

@@ -40,6 +40,12 @@ export interface SimpleProcedureLeg {
   fixSection?: string;
   /** 推荐导航台（AF/CI 在 51-54 列，IF 在 107-110 列，如弧心 VJB） */
   recommendedNavaid?: string;
+  /** 程序类别：决定 424 子节（D=SID / E=STAR / F=APPROACH）。缺省按历史行为视为 STAR(E)。 */
+  category?: 'SID' | 'STAR' | 'APPROACH';
+  /** 预先推导好的 424 程序代码（进近如 I15L/R15LZ；SID/STAR 缺省由程序名推导）。 */
+  procedureCode?: string;
+  /** 显式路线类型字符（进近过渡 A、最后进近按类型 I/R/V/N/L 等）；缺省按 2/3 规则。 */
+  routeTypeChar?: string;
   /**
    * Continuation 记录（2P/3E 等）的结构化保留：原文、解释值、是否可与 AIP 对比。
    * 注意 distanceNm 来自 2P 供应商扩展时不能直接视为 AIP 发布距离。
