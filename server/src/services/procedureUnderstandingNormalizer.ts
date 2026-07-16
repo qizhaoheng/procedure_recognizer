@@ -594,6 +594,7 @@ function stringOrNull(value: unknown) {
 }
 
 function numberOrNull(value: unknown) {
+  if (value === null || value === undefined || (typeof value === 'string' && !value.trim())) return null;
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : null;
 }

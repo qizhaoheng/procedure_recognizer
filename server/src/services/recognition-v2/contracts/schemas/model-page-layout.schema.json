@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-model-page-layout.schema.json",
+  "title": "Recognition V2 Model Page Layout Observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pageNo", "pageRoles", "regions", "warnings"],
+  "properties": {
+    "pageNo": { "type": "integer", "minimum": 1 },
+    "pageRoles": {
+      "type": "array",
+      "items": {
+        "enum": ["PROCEDURE_DIAGRAM", "PROCEDURE_LEG_TABLE", "WAYPOINT_COORDINATE_TABLE", "PROCEDURE_TITLE", "PROCEDURE_NOTES", "PROFILE_VIEW", "MINIMA_TABLE", "MSA", "SUPPORTING_INFORMATION", "UNKNOWN"]
+      },
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "bbox", "rotationDeg", "readingOrder", "confidence"],
+        "properties": {
+          "type": {
+            "enum": ["PROCEDURE_DIAGRAM", "PROCEDURE_LEG_TABLE", "WAYPOINT_COORDINATE_TABLE", "PROCEDURE_TITLE", "PROCEDURE_NOTES", "PROFILE_VIEW", "MINIMA_TABLE", "MSA", "SUPPORTING_INFORMATION", "UNKNOWN"]
+          },
+          "bbox": {
+            "type": "array",
+            "prefixItems": [
+              { "type": "number", "minimum": 0, "maximum": 1 },
+              { "type": "number", "minimum": 0, "maximum": 1 },
+              { "type": "number", "minimum": 0, "maximum": 1 },
+              { "type": "number", "minimum": 0, "maximum": 1 }
+            ],
+            "items": false,
+            "minItems": 4,
+            "maxItems": 4
+          },
+          "rotationDeg": { "enum": [0, 90, 180, 270] },
+          "readingOrder": { "type": "integer", "minimum": 0 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

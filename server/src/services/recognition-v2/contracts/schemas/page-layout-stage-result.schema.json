@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-page-layout-stage-result.schema.json",
+  "title": "Recognition V2 Page Layout Stage Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "pages", "warnings", "completedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-page-layout-stage-result.schema.json" },
+    "pages": {
+      "type": "array",
+      "items": { "$ref": "recognition-v2-page-layout-result.schema.json" },
+      "minItems": 1
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "completedAt": { "type": "string", "format": "date-time" }
+  }
+}

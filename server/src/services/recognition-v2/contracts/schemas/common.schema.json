@@ -1,0 +1,249 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-common.schema.json",
+  "title": "Recognition V2 Common Contracts",
+  "$defs": {
+    "bbox": {
+      "type": "array",
+      "prefixItems": [
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 },
+        { "type": "number", "minimum": 0, "maximum": 1 }
+      ],
+      "items": false,
+      "minItems": 4,
+      "maxItems": 4
+    },
+    "pageRole": {
+      "type": "string",
+      "enum": [
+        "PROCEDURE_DIAGRAM",
+        "PROCEDURE_LEG_TABLE",
+        "WAYPOINT_COORDINATE_TABLE",
+        "PROCEDURE_TITLE",
+        "PROCEDURE_NOTES",
+        "PROFILE_VIEW",
+        "MINIMA_TABLE",
+        "MSA",
+        "SUPPORTING_INFORMATION",
+        "UNKNOWN"
+      ]
+    },
+    "extractionTask": {
+      "type": "string",
+      "enum": ["PROCEDURE_IDENTITY", "PROCEDURE_TABLE", "WAYPOINT_NAVAID", "NOTES_CONSTRAINTS", "CHART_TOPOLOGY"]
+    },
+    "evidenceStatus": {
+      "type": "string",
+      "enum": ["OBSERVED", "DERIVED", "CONFLICTED", "UNRESOLVED"]
+    },
+    "entityType": {
+      "type": "string",
+      "enum": ["AIRPORT", "RUNWAY", "FIX", "NAVAID", "PROCEDURE", "LEG", "CONSTRAINT", "TOPOLOGY"]
+    },
+    "modelExecution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["model", "promptId", "promptVersion", "schemaId", "schemaVersion", "inputHash", "runId"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": { "type": "string", "minLength": 1 },
+        "promptId": { "type": "string", "minLength": 1 },
+        "promptVersion": { "type": "string", "minLength": 1 },
+        "schemaId": { "type": "string", "minLength": 1 },
+        "schemaVersion": { "type": "string", "minLength": 1 },
+        "inputHash": { "type": "string", "minLength": 1 },
+        "runId": { "type": "string", "minLength": 1 }
+      }
+    },
+    "sourceEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "evidenceId",
+        "fileName",
+        "pageNo",
+        "sourceType",
+        "extractionTask",
+        "confidence",
+        "status"
+      ],
+      "properties": {
+        "evidenceId": { "type": "string", "minLength": 1 },
+        "fileName": { "type": "string", "minLength": 1 },
+        "pageNo": { "type": "integer", "minimum": 1 },
+        "aipPageNo": { "type": "string" },
+        "regionId": { "type": "string", "minLength": 1 },
+        "bbox": { "$ref": "#/$defs/bbox" },
+        "sourceType": {
+          "oneOf": [
+            { "$ref": "#/$defs/pageRole" },
+            { "enum": ["TEXT_LAYER", "DOCUMENT_METADATA"] }
+          ]
+        },
+        "rawText": { "type": "string" },
+        "visualDescription": { "type": "string" },
+        "extractionTask": { "$ref": "#/$defs/extractionTask" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "status": { "$ref": "#/$defs/evidenceStatus" },
+        "modelExecution": { "$ref": "#/$defs/modelExecution" }
+      },
+      "anyOf": [
+        { "required": ["rawText"] },
+        { "required": ["visualDescription"] }
+      ]
+    },
+    "derivation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ruleId", "ruleVersion", "inputCandidateIds"],
+      "properties": {
+        "ruleId": { "type": "string", "minLength": 1 },
+        "ruleVersion": { "type": "string", "minLength": 1 },
+        "inputCandidateIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      }
+    },
+    "fieldCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "candidateId",
+        "entityType",
+        "entityKey",
+        "fieldName",
+        "value",
+        "status",
+        "sourceEvidenceIds",
+        "confidence",
+        "reviewRequired"
+      ],
+      "properties": {
+        "candidateId": { "type": "string", "minLength": 1 },
+        "entityType": { "$ref": "#/$defs/entityType" },
+        "entityKey": { "type": "string", "minLength": 1 },
+        "fieldName": { "type": "string", "minLength": 1 },
+        "value": true,
+        "normalizedValue": true,
+        "unit": { "type": "string", "minLength": 1 },
+        "status": { "$ref": "#/$defs/evidenceStatus" },
+        "sourceEvidenceIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "derivation": { "$ref": "#/$defs/derivation" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewRequired": { "type": "boolean" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "OBSERVED" } }, "required": ["status"] },
+          "then": { "properties": { "sourceEvidenceIds": { "minItems": 1 } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "DERIVED" } }, "required": ["status"] },
+          "then": { "required": ["derivation"] }
+        },
+        {
+          "if": { "properties": { "status": { "const": "UNRESOLVED" } }, "required": ["status"] },
+          "then": { "properties": { "reviewRequired": { "const": true } } }
+        }
+      ]
+    },
+    "conflict": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["conflictId", "entityKey", "fieldName", "candidateIds", "severity", "resolution"],
+      "properties": {
+        "conflictId": { "type": "string", "minLength": 1 },
+        "entityKey": { "type": "string", "minLength": 1 },
+        "fieldName": { "type": "string", "minLength": 1 },
+        "candidateIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "minItems": 2,
+          "uniqueItems": true
+        },
+        "severity": { "enum": ["INFO", "WARNING", "BLOCKING"] },
+        "selectedCandidateId": { "type": "string", "minLength": 1 },
+        "selectionReason": { "type": "string", "minLength": 1 },
+        "resolution": { "enum": ["AUTO_RESOLVED", "HUMAN_RESOLVED", "OPEN"] }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "resolution": { "enum": ["AUTO_RESOLVED", "HUMAN_RESOLVED"] } }, "required": ["resolution"] },
+          "then": { "required": ["selectedCandidateId", "selectionReason"] }
+        }
+      ]
+    },
+    "unresolvedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unresolvedId", "entityKey", "fieldName", "reasonCode", "candidateIds", "blockingFor424"],
+      "properties": {
+        "unresolvedId": { "type": "string", "minLength": 1 },
+        "entityKey": { "type": "string", "minLength": 1 },
+        "fieldName": { "type": "string", "minLength": 1 },
+        "reasonCode": { "type": "string", "minLength": 1 },
+        "candidateIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "requiredEvidence": { "type": "string", "minLength": 1 },
+        "blockingFor424": { "type": "boolean" }
+      }
+    },
+    "fieldProvenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sourceEvidenceIds", "status", "confidence"],
+      "properties": {
+        "selectedCandidateId": { "type": "string", "minLength": 1 },
+        "sourceEvidenceIds": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "status": { "$ref": "#/$defs/evidenceStatus" },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+      }
+    },
+    "canonicalEntity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["entityType", "entityKey", "fields", "fieldEvidence"],
+      "properties": {
+        "entityType": { "$ref": "#/$defs/entityType" },
+        "entityKey": { "type": "string", "minLength": 1 },
+        "fields": { "type": "object" },
+        "fieldEvidence": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/fieldProvenance" }
+        }
+      }
+    },
+    "validationIssue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issueId", "ruleId", "ruleVersion", "severity", "status", "entityKeys", "fieldNames", "candidateIds", "message"],
+      "properties": {
+        "issueId": { "type": "string", "minLength": 1 },
+        "ruleId": { "type": "string", "minLength": 1 },
+        "ruleVersion": { "type": "string", "minLength": 1 },
+        "severity": { "enum": ["INFO", "WARNING", "BLOCKING"] },
+        "status": { "enum": ["OPEN", "AUTO_RESOLVED", "HUMAN_RESOLVED", "WAIVED"] },
+        "entityKeys": { "type": "array", "items": { "type": "string", "minLength": 1 }, "minItems": 1, "uniqueItems": true },
+        "fieldNames": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "candidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-fusion-stage-result.schema.json",
+  "title": "Recognition V2 Fusion Stage Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "entities", "conflicts", "unresolvedItems", "selectedCandidateIds", "completedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-fusion-stage-result.schema.json" },
+    "entities": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/canonicalEntity" } },
+    "conflicts": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/conflict" } },
+    "unresolvedItems": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/unresolvedItem" } },
+    "selectedCandidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "completedAt": { "type": "string", "format": "date-time" }
+  }
+}

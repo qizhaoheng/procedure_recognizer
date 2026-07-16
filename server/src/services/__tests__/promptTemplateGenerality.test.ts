@@ -39,10 +39,14 @@ const AIRPORT_SPECIFIC_TOKENS = [
 const FORBIDDEN_PHRASES = [/424 comparison target for/i];
 
 const promptDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'prompt');
+const recognitionV2PromptDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', 'recognition-v2', 'prompts');
 
 describe('prompt template generality', () => {
   it('templates and sections contain no airport-specific identifiers', async () => {
-    const files = await listMarkdownFiles(path.join(promptDir, 'templates'));
+    const files = [
+      ...(await listMarkdownFiles(path.join(promptDir, 'templates'))),
+      ...(await listMarkdownFiles(recognitionV2PromptDir)),
+    ];
     assert.ok(files.length > 0, 'no template files found');
     const violations: string[] = [];
     for (const file of files) {

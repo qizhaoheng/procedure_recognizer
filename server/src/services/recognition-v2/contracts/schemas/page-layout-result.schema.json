@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-page-layout-result.schema.json",
+  "title": "Recognition V2 Page Layout Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "pageNo", "pageRoles", "regions", "missingExpectedRoles", "analysisMethod", "warnings"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-page-layout-result.schema.json" },
+    "pageNo": { "type": "integer", "minimum": 1 },
+    "pageRoles": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/pageRole" }, "minItems": 1, "uniqueItems": true },
+    "regions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["regionId", "pageNo", "type", "bbox", "rotationDeg", "readingOrder", "confidence", "reviewRequired"],
+        "properties": {
+          "regionId": { "type": "string", "minLength": 1 },
+          "pageNo": { "type": "integer", "minimum": 1 },
+          "type": { "$ref": "recognition-v2-common.schema.json#/$defs/pageRole" },
+          "bbox": { "$ref": "recognition-v2-common.schema.json#/$defs/bbox" },
+          "rotationDeg": { "enum": [0, 90, 180, 270] },
+          "readingOrder": { "type": "integer", "minimum": 0 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "reviewRequired": { "type": "boolean" }
+        }
+      }
+    },
+    "missingExpectedRoles": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/pageRole" }, "uniqueItems": true },
+    "analysisMethod": { "enum": ["RULES_ONLY", "VISION_MODEL", "HYBRID"] },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "layoutProfileId": { "type": "string", "minLength": 1 },
+    "modelExecution": { "$ref": "recognition-v2-common.schema.json#/$defs/modelExecution" }
+  }
+}

@@ -30,6 +30,26 @@ export type NavigationType =
   | 'UNKNOWN';
 
 export type GroupStatus = 'GROUPED' | 'CANDIDATES_EXTRACTED' | 'AI_READY' | 'AI_RUNNING' | 'AI_COMPLETED' | 'AI_CANCELLED' | 'ERROR';
+export type RecognitionV2RunStatus =
+  | 'CREATED'
+  | 'LAYOUT_RUNNING'
+  | 'EXTRACTION_RUNNING'
+  | 'FUSION_RUNNING'
+  | 'VALIDATION_RUNNING'
+  | 'REVIEW_REQUIRED'
+  | 'APPROVED'
+  | 'COMPLETED'
+  | 'CANCELLED'
+  | 'FAILED';
+
+/** Lightweight cache only; the versioned V2 manifest and artifacts live outside task.json. */
+export interface RecognitionV2RunSummary {
+  activeRunId: string;
+  status: RecognitionV2RunStatus;
+  sourcePackageHash: string;
+  runRef: string;
+  updatedAt: string;
+}
 export type PackageType = 'STAR' | 'SID' | 'APPROACH' | 'AERODROME' | 'AIRSPACE' | 'OTHER';
 export type PackageSource = 'AD_2_24_CHART_INDEX' | 'PAGE_HEADER_RULE' | 'TITLE_MATCH_RULE' | 'MANUAL';
 export type SupportType =
@@ -172,6 +192,8 @@ export interface ProcedureGroup {
   aiResponse?: AiResponseRecord;
   /** Persisted before the model request starts so interrupted server runs can be recovered. */
   recognitionStartedAt?: string;
+  /** V2 summary/reference only. Stage outputs and evidence must never be embedded in task.json. */
+  recognitionV2?: RecognitionV2RunSummary;
   procedureUnderstanding?: ProcedureUnderstandingResult;
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;

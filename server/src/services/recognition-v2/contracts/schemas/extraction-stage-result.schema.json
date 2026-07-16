@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-extraction-stage-result.schema.json",
+  "title": "Recognition V2 Extraction Stage Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "taskType", "pageNos", "regionIds", "evidence", "candidates", "warnings", "completedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-extraction-stage-result.schema.json" },
+    "taskType": { "$ref": "recognition-v2-common.schema.json#/$defs/extractionTask" },
+    "pageNos": { "type": "array", "items": { "type": "integer", "minimum": 1 }, "minItems": 1, "uniqueItems": true },
+    "regionIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "evidence": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/sourceEvidence" } },
+    "candidates": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/fieldCandidate" } },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "completedAt": { "type": "string", "format": "date-time" }
+  }
+}
