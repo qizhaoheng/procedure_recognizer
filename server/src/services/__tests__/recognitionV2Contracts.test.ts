@@ -25,6 +25,8 @@ const schemaFiles = [
   'procedure-table-stage-result.schema.json',
   'fusion-stage-result.schema.json',
   'validation-stage-result.schema.json',
+  'canonical-preview.schema.json',
+  'v1-v2-diff-report.schema.json',
   'model-page-layout.schema.json',
   'model-procedure-identity.schema.json',
   'model-table-physical.schema.json',
@@ -88,6 +90,7 @@ describe('recognition V2 contracts', () => {
       conflicts: [],
       unresolvedItems: [],
       selectedCandidateIds: ['candidate-course-145'],
+      policyVersions: { sourcePolicy: '1.0.0' },
       completedAt: '2026-07-16T00:00:03.000Z',
     };
     const validation: ValidationStageResult = {

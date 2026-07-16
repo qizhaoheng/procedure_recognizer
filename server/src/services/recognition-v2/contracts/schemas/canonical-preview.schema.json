@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-canonical-preview.schema.json",
+  "title": "Recognition V2 Canonical ProcedureUnderstanding Preview",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "procedureUnderstanding", "releaseDecision", "warnings", "generatedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-canonical-preview.schema.json" },
+    "procedureUnderstanding": { "type": "object" },
+    "releaseDecision": { "enum": ["BLOCKED", "REVIEW_REQUIRED", "READY"] },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "generatedAt": { "type": "string", "format": "date-time" }
+  }
+}

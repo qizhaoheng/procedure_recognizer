@@ -2,8 +2,15 @@ import express from 'express';
 import crypto from 'node:crypto';
 import { readTask, updateTask } from '../storage/taskStore';
 import type { ProcedureGroup, ProcedureTask } from '../types/procedure';
-import type { RecognitionV2RunManifest, RecognitionV2Stage } from '../services/recognition-v2/contracts/index';
-import type { PageLayoutStageResult } from '../services/recognition-v2/contracts/index';
+import type {
+  ExtractionStageResult,
+  FusionStageResult,
+  PageLayoutStageResult,
+  ProcedureTableStageResult,
+  RecognitionV2RunManifest,
+  RecognitionV2Stage,
+  ValidationStageResult,
+} from '../services/recognition-v2/contracts/index';
 import { RecognitionV2Store, recognitionV2Store } from '../services/recognition-v2/persistence/recognitionV2Store';
 import {
   RecognitionV2StateError,
@@ -12,6 +19,7 @@ import {
   completeStage,
   failStage,
   isRecognitionV2Stage,
+  skipStage,
   STAGE_DEPENDENCIES,
   startStage,
 } from '../services/recognition-v2/orchestration/stateMachine';
@@ -20,9 +28,17 @@ import { executePageLayout } from '../services/recognition-v2/layout/pageLayoutE
 import { executeProcedureIdentity } from '../services/recognition-v2/identity/procedureIdentityExecutor';
 import { executeProcedureTable } from '../services/recognition-v2/tables/procedureTableExecutor';
 import { executeWaypointNavaid } from '../services/recognition-v2/coordinates/waypointNavaidExecutor';
+import { executeEvidenceFusion } from '../services/recognition-v2/fusion/evidenceFusionExecutor';
+import { executeSemanticValidation } from '../services/recognition-v2/validation/semanticValidationExecutor';
+import { buildCanonicalPreview } from '../services/recognition-v2/adapters/canonicalPreviewAdapter';
 import type { VisionStageClient } from '../services/recognition-v2/orchestration/visionStageClient';
 import { getLlmRuntimeConfig } from '../services/llm/llmClient';
-import { assertValidPageLayoutStageResult } from '../services/recognition-v2/contracts/schemaValidation';
+import {
+  assertValidExtractionStageResult,
+  assertValidFusionStageResult,
+  assertValidPageLayoutStageResult,
+  assertValidProcedureTableStageResult,
+} from '../services/recognition-v2/contracts/schemaValidation';
 
 interface RecognitionV2RouterDependencies {
   store: RecognitionV2Store;
@@ -54,7 +70,7 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs', async (req, res,
     res.status(201).json({
       run: manifest,
       runRef: dependencies.store.runReference(manifest.taskId, manifest.packageId, manifest.runId),
-      executorsAvailable: ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID'],
+      executorsAvailable: ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID', 'EVIDENCE_FUSION', 'SEMANTIC_VALIDATION'],
     });
   } catch (error) {
     next(error);
@@ -94,6 +110,32 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/cancel', as
   }
 });
 
+router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:stage/skip', async (req, res, next) => {
+  try {
+    const stageValue = String(req.params.stage ?? '').toUpperCase();
+    if (!isRecognitionV2Stage(stageValue)) {
+      return res.status(400).json({ code: 'UNKNOWN_V2_STAGE', error: `Unknown Recognition V2 stage: ${req.params.stage}` });
+    }
+    if (!['NOTES_CONSTRAINTS', 'CHART_TOPOLOGY'].includes(stageValue)) {
+      return res.status(400).json({ code: 'V2_STAGE_NOT_SKIPPABLE', error: `Stage ${stageValue} cannot be skipped through this API.` });
+    }
+    const reason = String(req.body?.reason ?? '').trim();
+    if (!reason) return res.status(400).json({ code: 'SKIP_REASON_REQUIRED', error: `Stage ${stageValue} requires a non-empty skip reason.` });
+    const { task, group } = await loadPackage(dependencies, req.params.taskId, req.params.packageId);
+    const packageId = packageIdOf(group);
+    const current = await dependencies.store.readRun(task.taskId, packageId, req.params.runId);
+    const currentSourceHash = buildSourcePackageHash(task, group);
+    if (currentSourceHash !== current.sourcePackageHash) {
+      return res.status(409).json({ code: 'SOURCE_PACKAGE_CHANGED', error: 'The procedure package changed after this V2 run was created. Create a new run.' });
+    }
+    const run = await dependencies.store.updateRun(task.taskId, packageId, current.runId, (manifest) => skipStage(manifest, stageValue, { reason }));
+    await updateSummary(dependencies, run);
+    return res.json({ run, stage: stageValue, skipped: true, reason });
+  } catch (error) {
+    sendStateError(error, res, next);
+  }
+});
+
 router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:stage/run', async (req, res, next) => {
   let started = false;
   let stage: RecognitionV2Stage | undefined;
@@ -118,7 +160,7 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
       });
     }
     assertStageCanStart(run, stage);
-    if (!['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID'].includes(stage)) {
+    if (!['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID', 'EVIDENCE_FUSION', 'SEMANTIC_VALIDATION'].includes(stage)) {
       return res.status(501).json({
         code: 'V2_STAGE_EXECUTOR_NOT_AVAILABLE',
         error: `Stage ${stage} is ready, but its executor is not implemented yet.`,
@@ -128,8 +170,9 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
       });
     }
 
-    const model = String(req.body?.model || getLlmRuntimeConfig().model);
-    const useModel = typeof req.body?.useModel === 'boolean' ? req.body.useModel : Boolean(getLlmRuntimeConfig(model).apiKey);
+    const deterministicStage = stage === 'EVIDENCE_FUSION' || stage === 'SEMANTIC_VALIDATION';
+    const model = deterministicStage ? 'deterministic-rules' : String(req.body?.model || getLlmRuntimeConfig().model);
+    const useModel = deterministicStage ? false : typeof req.body?.useModel === 'boolean' ? req.body.useModel : Boolean(getLlmRuntimeConfig(model).apiKey);
     const dependencyFingerprint = STAGE_DEPENDENCIES[stage].map((dependency) => {
       const record = run.stages.find((item) => item.stage === dependency);
       return {
@@ -137,6 +180,8 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
         inputHash: record?.inputHash,
         outputRef: record?.outputRef,
         completedAt: record?.completedAt,
+        status: record?.status,
+        skipReason: record?.skipReason,
       };
     });
     const stageInputHash = hashStageInput(run.sourcePackageHash, stage, model, useModel, dependencyFingerprint);
@@ -169,7 +214,8 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
         visionClient: dependencies.visionClient,
         onAuditArtifact: persistAuditArtifact,
       })
-      : await executeExtractionFromStoredLayout(dependencies, {
+      : ['PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID'].includes(stage)
+        ? await executeExtractionFromStoredLayout(dependencies, {
         task,
         group,
         run: running,
@@ -179,7 +225,10 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
         stageInputHash,
         abortSignal: abortController.signal,
         onAuditArtifact: persistAuditArtifact,
-      });
+      })
+        : stage === 'EVIDENCE_FUSION'
+          ? await executeFusionFromStoredExtractions(dependencies, { task, group, run: running })
+          : await executeValidationFromStoredFusion(dependencies, { task, group, run: running });
 
     for (const artifact of execution.auditArtifacts) {
       await persistAuditArtifact(artifact);
@@ -189,8 +238,14 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
       attempt,
     );
     const outputRef = await dependencies.store.writeArtifact(task.taskId, packageId, run.runId, outputFile, execution.output);
+    const validation = stage === 'SEMANTIC_VALIDATION' ? execution.output as ValidationStageResult : undefined;
+    const fusion = stage === 'EVIDENCE_FUSION' ? execution.output as FusionStageResult : undefined;
     const completed = await dependencies.store.updateRun(task.taskId, packageId, run.runId, (current) =>
-      completeStage(current, stage!, { outputRef }));
+      completeStage(current, stage!, {
+        outputRef,
+        releaseDecision: validation?.releaseDecision,
+        ruleVersions: validation?.ruleVersions ?? fusion?.policyVersions,
+      }));
     await updateSummary(dependencies, completed);
     return res.json({
       run: completed,
@@ -199,7 +254,7 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
       auditRefs,
       result: execution.output,
       modelRequested: useModel,
-      usedModel: auditRefs.length > 0,
+      usedModel: useModel && auditRefs.some((ref) => ref.includes('model')),
     });
   } catch (error) {
     if (started && stage && packageId) {
@@ -291,6 +346,55 @@ async function executeExtractionFromStoredLayout(
   if (input.stage === 'PROCEDURE_TABLE') return executeProcedureTable(common);
   if (input.stage === 'WAYPOINT_NAVAID') return executeWaypointNavaid(common);
   throw new RecognitionV2StateError('V2_STAGE_EXECUTOR_NOT_AVAILABLE', `Stage ${input.stage} does not have an extraction executor.`);
+}
+
+async function executeFusionFromStoredExtractions(
+  dependencies: RecognitionV2RouterDependencies,
+  input: { task: ProcedureTask; group: ProcedureGroup; run: RecognitionV2RunManifest },
+) {
+  const extractions: ExtractionStageResult[] = [];
+  for (const stage of STAGE_DEPENDENCIES.EVIDENCE_FUSION) {
+    const record = input.run.stages.find((item) => item.stage === stage);
+    if (record?.status === 'SKIPPED') continue;
+    if (record?.status !== 'COMPLETED' || !record.outputRef) {
+      throw new RecognitionV2StateError('EXTRACTION_ARTIFACT_MISSING', `${stage} did not provide a completed extraction artifact.`);
+    }
+    if (stage === 'PROCEDURE_TABLE') {
+      const result = await dependencies.store.readArtifact<ProcedureTableStageResult>(input.task.taskId, packageIdOf(input.group), input.run.runId, record.outputRef);
+      await assertValidProcedureTableStageResult(result);
+      extractions.push(result.extraction);
+      continue;
+    }
+    const result = await dependencies.store.readArtifact<ExtractionStageResult>(input.task.taskId, packageIdOf(input.group), input.run.runId, record.outputRef);
+    await assertValidExtractionStageResult(result);
+    extractions.push(result);
+  }
+  return executeEvidenceFusion({ packageId: packageIdOf(input.group), extractions });
+}
+
+async function executeValidationFromStoredFusion(
+  dependencies: RecognitionV2RouterDependencies,
+  input: { task: ProcedureTask; group: ProcedureGroup; run: RecognitionV2RunManifest },
+) {
+  const fusionRef = input.run.stages.find((item) => item.stage === 'EVIDENCE_FUSION')?.outputRef;
+  if (!fusionRef) throw new RecognitionV2StateError('FUSION_ARTIFACT_MISSING', 'EVIDENCE_FUSION completed without an output artifact.');
+  const fusion = await dependencies.store.readArtifact<FusionStageResult>(input.task.taskId, packageIdOf(input.group), input.run.runId, fusionRef);
+  await assertValidFusionStageResult(fusion);
+  const execution = await executeSemanticValidation({ fusion });
+  const { preview, diff } = await buildCanonicalPreview({
+    fusion,
+    releaseDecision: execution.output.releaseDecision,
+    v1: input.group.procedureUnderstanding,
+    now: execution.output.completedAt,
+  });
+  return {
+    output: execution.output,
+    auditArtifacts: [
+      ...execution.auditArtifacts,
+      { fileName: 'canonical-preview.json', value: preview },
+      { fileName: 'v1-v2-diff.json', value: diff },
+    ],
+  };
 }
 
 function stageOutputFile(stage: RecognitionV2Stage) {

@@ -39,6 +39,22 @@ export async function assertValidProcedureTableStageResult(value: unknown): Prom
   await assertSchema('recognition-v2-procedure-table-stage-result.schema.json', value);
 }
 
+export async function assertValidFusionStageResult(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-fusion-stage-result.schema.json', value);
+}
+
+export async function assertValidValidationStageResult(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-validation-stage-result.schema.json', value);
+}
+
+export async function assertValidCanonicalPreview(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-canonical-preview.schema.json', value);
+}
+
+export async function assertValidV1V2DiffReport(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-v1-v2-diff-report.schema.json', value);
+}
+
 export async function assertValidModelPageLayout(value: unknown): Promise<void> {
   await assertSchema('recognition-v2-model-page-layout.schema.json', value);
 }
@@ -81,6 +97,10 @@ async function buildValidator(schemaId: string) {
     'page-layout-stage-result.schema.json',
     'extraction-stage-result.schema.json',
     'procedure-table-stage-result.schema.json',
+    'fusion-stage-result.schema.json',
+    'validation-stage-result.schema.json',
+    'canonical-preview.schema.json',
+    'v1-v2-diff-report.schema.json',
     'model-page-layout.schema.json',
     'model-procedure-identity.schema.json',
     'model-table-physical.schema.json',

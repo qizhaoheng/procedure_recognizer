@@ -1,6 +1,6 @@
 # AIP AD-2 → ARINC 424：V2 分阶段识别实施规划
 
-状态：Phase 3 核心抽取链路完成，准备进入 Phase 4
+状态：Phase 4 核心融合与确定性校验链路完成；尚未进入生产准确率验收
 日期：2026-07-16  
 适用仓库：`procedure_recognizer`
 
@@ -616,7 +616,7 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 
 进入生产验收前仍需补充：按机场整体隔离的真实 AIP 开发集、回归集和盲测集，以及人工标注的表格单元格/坐标基准。本阶段测试使用通用构造样例验证机制和防幻觉边界，不宣称真实机场业务准确率。
 
-### Phase 4：融合 + 确定性校验
+### Phase 4：融合 + 确定性校验（核心链路已完成）
 
 交付：
 
@@ -628,6 +628,19 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 - V1/V2 字段对比报告。
 
 退出条件：无证据字段不能进入 canonical；冲突不静默覆盖；已通过 canonical 可走通现有 GeoJSON 和 424。
+
+完成记录：
+
+- 新增版本化融合输出、只读 canonical 预览和 V1/V2 差异报告 Schema；融合与校验 artifact 均记录策略/规则版本；
+- 候选先按逻辑实体和字段归组：同一规范化值合并来源证据，多值业务字段保留数组，单值字段出现不同值时生成 `OPEN` 冲突且不选择任何一方；
+- 候选必须能引用实际存在的 `SourceEvidence`；派生候选还必须能引用实际存在的输入候选，否则以 `MISSING_SOURCE_EVIDENCE` 进入未解决项；
+- 模型单独支持的值可以进入只读预览，但保持 `MODEL_ONLY` 未解决状态；关键 424 字段因此阻断发布，不能由模型自报置信度解除；
+- 新增确定性身份、ICAO/跑道格式、坐标配对与范围、航段序号、Path Terminator、Fix/Navaid 引用、课程/距离/速度、高度窗口和特殊航段最低几何依据校验；
+- 距离和航向反算只生成校验问题，永不改写 AIP 公布值；
+- 新增只读 `ProcedureUnderstanding` Adapter，可将单程序的 canonical 航段送入现有 SimpleLegs/424 转换入口；多程序但航段归属不明时明确阻断；
+- 新增 `POST .../stages/NOTES_CONSTRAINTS|CHART_TOPOLOGY/skip`，必须填写原因；只有显式跳过尚未实现且不适用的阶段后才允许进入融合；
+- `SEMANTIC_VALIDATION` 返回 `BLOCKED/REVIEW_REQUIRED/READY`；只有 `READY` 才把 run 标记为 `APPROVED`，但 Phase 6 前仍不允许写入 `group.procedureUnderstanding` 或正式 GeoJSON/424；
+- 当前测试仍以通用构造样例验证机制，不代表真实机场字段准确率；真实 AIP 分层标注、盲测和阈值制定仍是生产验收前置条件。
 
 ### Phase 5：Chart 拓扑专项抽取
 
@@ -758,6 +771,16 @@ Phase 3 核心抽取链路完成后的干净基线：
 - TypeScript 检查和前端生产构建通过；
 - V1、GeoJSON、程序图、424 解析/比较/导出回归全部通过。
 
+Phase 4 核心融合与确定性校验完成后的干净基线：
+
+- 总测试：176；
+- 通过：176；
+- 失败：0；
+- 新增同值证据合并、单值冲突不覆盖、多值保留、模型单源阻断、孤立证据拒绝、确定性语义/几何校验、只读 Adapter 和真实 HTTP API 阶段串联测试；
+- V2 canonical 只读预览可进入现有 SimpleLegs 转换入口，V1 正式结果保持不变；
+- TypeScript 检查和前端生产构建通过；
+- V1、GeoJSON、程序图、424 解析/比较/导出回归全部通过。
+
 Phase 0 已交付：
 
 - `recognition-v2/contracts/index.ts`：版本化 TypeScript 契约；
@@ -784,13 +807,10 @@ Phase 0 已交付：
 
 ## 20. 下一步
 
-下一步进入 Phase 4，依次完成：
+Phase 4 核心代码完成后的下一步：
 
-1. 冻结字段来源优先级矩阵，明确表格、坐标表、正文、Chart 和文档元数据各自可以决定哪些字段；
-2. 实现候选去重、来源独立性判断、冲突记录和 `UNRESOLVED` 汇总；
-3. 建立 canonical 实体，但只选择有证据且通过来源策略的候选；
-4. 实现程序身份、腿段顺序、引用完整性、高度窗口和坐标范围等确定性校验；
-5. 增加距离/航向几何反算校验，但不得用反算结果静默覆盖公布值；
-6. 实现 V2 canonical → 现有 `ProcedureUnderstanding` 的只读预览 Adapter 和 V1/V2 差异报告；
-7. 建立真实机场分层标注集并确定字段级验收阈值；
-8. 在发布门禁完成前，继续禁止 V2 写入现有 GeoJSON/424 正式链路。
+1. 用至少三个机场的真实 AIP 建立按机场隔离的开发集、回归集和盲测集，并人工标注字段证据、冲突和预期发布决定；
+2. 针对真实数据补齐来源策略矩阵和字段级验收阈值，不能用构造测试通过代替业务准确率；
+3. 进入 Phase 5，建设 Chart 拓扑、分支/汇合和 DME Arc/RF/Holding 等专项候选，不让 Chart 覆盖正式坐标；
+4. 进入 Phase 6 前继续保持 Adapter 只读，禁止 V2 写入现有正式 GeoJSON/424 链路；
+5. Phase 6 建设证据审阅、冲突裁决、人工决议审计和明确的 publish-canonical 门禁。

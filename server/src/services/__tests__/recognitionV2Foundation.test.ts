@@ -186,7 +186,7 @@ describe('recognition V2 source package hash', () => {
 });
 
 describe('recognition V2 API skeleton', () => {
-  it('runs the available Phase 2/3 rules-only stages and leaves unavailable stages untouched', async () => {
+  it('runs the Phase 2/3 extractors and the deterministic Phase 4 fusion/validation stages', async () => {
     const root = await temporaryRoot();
     const store = new RecognitionV2Store(root);
     let { task } = sourceFixture();
@@ -220,7 +220,7 @@ describe('recognition V2 API skeleton', () => {
       const createResponse = await fetch(`${base}/runs`, { method: 'POST' });
       assert.equal(createResponse.status, 201);
       const created = await createResponse.json() as { run: RecognitionV2RunManifest; executorsAvailable: RecognitionV2Stage[] };
-      assert.deepEqual(created.executorsAvailable, ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID']);
+      assert.deepEqual(created.executorsAvailable, ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID', 'EVIDENCE_FUSION', 'SEMANTIC_VALIDATION']);
       assert.equal(task.groups[0].recognitionV2?.activeRunId, created.run.runId);
 
       const stageResponse = await fetch(`${base}/runs/${created.run.runId}/stages/PAGE_LAYOUT/run`, {
@@ -297,6 +297,38 @@ describe('recognition V2 API skeleton', () => {
       const prematureFusion = await fetch(`${base}/runs/${created.run.runId}/stages/EVIDENCE_FUSION/run`, { method: 'POST' });
       assert.equal(prematureFusion.status, 409);
       assert.equal((await prematureFusion.json() as { code: string }).code, 'DEPENDENCY_NOT_COMPLETED');
+
+      const missingReason = await fetch(`${base}/runs/${created.run.runId}/stages/NOTES_CONSTRAINTS/skip`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reason: '' }),
+      });
+      assert.equal(missingReason.status, 400);
+      assert.equal((await missingReason.json() as { code: string }).code, 'SKIP_REASON_REQUIRED');
+      for (const optionalStage of ['NOTES_CONSTRAINTS', 'CHART_TOPOLOGY']) {
+        const skipped = await fetch(`${base}/runs/${created.run.runId}/stages/${optionalStage}/skip`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ reason: 'This extractor is not implemented in Phase 4.' }),
+        });
+        assert.equal(skipped.status, 200);
+      }
+      const fusionResponse = await fetch(`${base}/runs/${created.run.runId}/stages/EVIDENCE_FUSION/run`, { method: 'POST' });
+      assert.equal(fusionResponse.status, 200);
+      const fusionBody = await fusionResponse.json() as { result: { schemaId: string; policyVersions: Record<string, string> }; usedModel: boolean };
+      assert.equal(fusionBody.result.schemaId, RECOGNITION_V2_SCHEMA_IDS.fusionStageResult);
+      assert.ok(fusionBody.result.policyVersions.sourcePriority);
+      assert.equal(fusionBody.usedModel, false);
+
+      const validationResponse = await fetch(`${base}/runs/${created.run.runId}/stages/SEMANTIC_VALIDATION/run`, { method: 'POST' });
+      assert.equal(validationResponse.status, 200);
+      const validationBody = await validationResponse.json() as { result: { schemaId: string; releaseDecision: string }; auditRefs: string[]; usedModel: boolean };
+      assert.equal(validationBody.result.schemaId, RECOGNITION_V2_SCHEMA_IDS.validationStageResult);
+      assert.equal(validationBody.result.releaseDecision, 'BLOCKED');
+      assert.equal(validationBody.usedModel, false);
+      assert.ok(validationBody.auditRefs.some((ref) => ref.includes('canonical-preview')));
+      assert.ok(validationBody.auditRefs.some((ref) => ref.includes('v1-v2-diff')));
+      assert.equal(task.groups[0].procedureUnderstanding, undefined, 'Phase 4 preview must not overwrite V1 canonical data');
 
       const getResponse = await fetch(`${base}/runs/${created.run.runId}`);
       assert.equal(getResponse.status, 200);

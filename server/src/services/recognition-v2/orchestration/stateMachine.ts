@@ -3,6 +3,7 @@ import {
   RECOGNITION_V2_SCHEMA_IDS,
   type RecognitionV2RunManifest,
   type RecognitionV2Stage,
+  type ReleaseDecision,
   type StageRunRecord,
   type V2RunStatus,
 } from '../contracts/index';
@@ -116,6 +117,8 @@ export function startStage(
   record.completedAt = undefined;
   record.skipReason = undefined;
   record.error = undefined;
+  record.modelExecution = undefined;
+  record.ruleVersions = undefined;
   manifest.activeStage = stage;
   manifest.status = runningStatus(stage);
   manifest.updatedAt = now;
@@ -126,7 +129,7 @@ export function startStage(
 export function completeStage(
   manifestValue: RecognitionV2RunManifest,
   stage: RecognitionV2Stage,
-  input: { outputRef: string; canonicalRef?: string; now?: string },
+  input: { outputRef: string; canonicalRef?: string; releaseDecision?: ReleaseDecision; ruleVersions?: Record<string, string>; now?: string },
 ): RecognitionV2RunManifest {
   if (!input.outputRef.trim()) throw new RecognitionV2StateError('OUTPUT_REF_REQUIRED', `Stage ${stage} requires an output reference.`);
   if (stage === 'PUBLISH_CANONICAL' && !input.canonicalRef?.trim()) {
@@ -143,8 +146,9 @@ export function completeStage(
   record.completedAt = now;
   record.skipReason = undefined;
   record.error = undefined;
+  record.ruleVersions = input.ruleVersions;
   manifest.activeStage = undefined;
-  manifest.status = completedRunStatus(stage);
+  manifest.status = completedRunStatus(stage, input.releaseDecision);
   manifest.updatedAt = now;
   if (input.canonicalRef) manifest.canonicalRef = input.canonicalRef;
   return manifest;
@@ -253,8 +257,8 @@ function runningStatus(stage: RecognitionV2Stage): V2RunStatus {
   return 'EXTRACTION_RUNNING';
 }
 
-function completedRunStatus(stage: RecognitionV2Stage): V2RunStatus {
-  if (stage === 'SEMANTIC_VALIDATION') return 'REVIEW_REQUIRED';
+function completedRunStatus(stage: RecognitionV2Stage, releaseDecision?: ReleaseDecision): V2RunStatus {
+  if (stage === 'SEMANTIC_VALIDATION') return releaseDecision === 'READY' ? 'APPROVED' : 'REVIEW_REQUIRED';
   if (stage === 'HUMAN_REVIEW') return 'APPROVED';
   if (stage === 'PUBLISH_CANONICAL') return 'COMPLETED';
   return 'CREATED';

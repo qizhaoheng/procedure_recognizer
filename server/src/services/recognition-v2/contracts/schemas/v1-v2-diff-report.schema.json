@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-v1-v2-diff-report.schema.json",
+  "title": "Recognition V2 V1/V2 Preview Difference Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "items", "summary", "generatedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-v1-v2-diff-report.schema.json" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "status"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "status": { "enum": ["SAME", "CHANGED", "ONLY_V1", "ONLY_V2"] },
+          "v1Value": true,
+          "v2Value": true
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["same", "changed", "onlyV1", "onlyV2"],
+      "properties": {
+        "same": { "type": "integer", "minimum": 0 },
+        "changed": { "type": "integer", "minimum": 0 },
+        "onlyV1": { "type": "integer", "minimum": 0 },
+        "onlyV2": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "generatedAt": { "type": "string", "format": "date-time" }
+  }
+}

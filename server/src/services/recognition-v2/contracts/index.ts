@@ -12,6 +12,8 @@ export const RECOGNITION_V2_SCHEMA_IDS = {
   procedureTableStageResult: 'recognition-v2-procedure-table-stage-result.schema.json',
   fusionStageResult: 'recognition-v2-fusion-stage-result.schema.json',
   validationStageResult: 'recognition-v2-validation-stage-result.schema.json',
+  canonicalPreview: 'recognition-v2-canonical-preview.schema.json',
+  v1V2DiffReport: 'recognition-v2-v1-v2-diff-report.schema.json',
 } as const;
 
 export type RecognitionV2Stage =
@@ -284,6 +286,7 @@ export interface FusionStageResult extends ContractVersionRef<typeof RECOGNITION
   conflicts: EvidenceConflict[];
   unresolvedItems: UnresolvedItem[];
   selectedCandidateIds: string[];
+  policyVersions: Record<string, string>;
   completedAt: string;
 }
 
@@ -311,4 +314,29 @@ export interface ValidationStageResult extends ContractVersionRef<typeof RECOGNI
   reviewIssueCount: number;
   ruleVersions: Record<string, string>;
   completedAt: string;
+}
+
+export interface CanonicalPreviewArtifact extends ContractVersionRef<typeof RECOGNITION_V2_SCHEMA_IDS.canonicalPreview> {
+  procedureUnderstanding: Record<string, unknown>;
+  releaseDecision: ReleaseDecision;
+  warnings: string[];
+  generatedAt: string;
+}
+
+export interface V1V2DiffItem {
+  path: string;
+  status: 'SAME' | 'CHANGED' | 'ONLY_V1' | 'ONLY_V2';
+  v1Value?: unknown;
+  v2Value?: unknown;
+}
+
+export interface V1V2DiffReport extends ContractVersionRef<typeof RECOGNITION_V2_SCHEMA_IDS.v1V2DiffReport> {
+  items: V1V2DiffItem[];
+  summary: {
+    same: number;
+    changed: number;
+    onlyV1: number;
+    onlyV2: number;
+  };
+  generatedAt: string;
 }

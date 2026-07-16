@@ -4,7 +4,7 @@
   "title": "Recognition V2 Fusion Stage Result",
   "type": "object",
   "additionalProperties": false,
-  "required": ["contractVersion", "schemaId", "entities", "conflicts", "unresolvedItems", "selectedCandidateIds", "completedAt"],
+  "required": ["contractVersion", "schemaId", "entities", "conflicts", "unresolvedItems", "selectedCandidateIds", "policyVersions", "completedAt"],
   "properties": {
     "contractVersion": { "const": "2.0.0-alpha.1" },
     "schemaId": { "const": "recognition-v2-fusion-stage-result.schema.json" },
@@ -12,6 +12,7 @@
     "conflicts": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/conflict" } },
     "unresolvedItems": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/unresolvedItem" } },
     "selectedCandidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+    "policyVersions": { "type": "object", "additionalProperties": { "type": "string", "minLength": 1 } },
     "completedAt": { "type": "string", "format": "date-time" }
   }
 }
