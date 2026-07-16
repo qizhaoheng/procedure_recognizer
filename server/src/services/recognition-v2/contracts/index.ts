@@ -9,6 +9,7 @@ export const RECOGNITION_V2_SCHEMA_IDS = {
   pageLayoutResult: 'recognition-v2-page-layout-result.schema.json',
   pageLayoutStageResult: 'recognition-v2-page-layout-stage-result.schema.json',
   extractionStageResult: 'recognition-v2-extraction-stage-result.schema.json',
+  procedureTableStageResult: 'recognition-v2-procedure-table-stage-result.schema.json',
   fusionStageResult: 'recognition-v2-fusion-stage-result.schema.json',
   validationStageResult: 'recognition-v2-validation-stage-result.schema.json',
 } as const;
@@ -193,6 +194,49 @@ export interface ExtractionStageResult extends ContractVersionRef<typeof RECOGNI
   regionIds: string[];
   evidence: SourceEvidence[];
   candidates: FieldCandidate[];
+  warnings: string[];
+  completedAt: string;
+}
+
+export type PhysicalTableRowType = 'HEADER' | 'DATA' | 'CONTINUATION' | 'NOTE';
+
+export interface PhysicalTableCell {
+  cellId: string;
+  rowIndex: number;
+  columnIndex: number;
+  rowSpan: number;
+  columnSpan: number;
+  rawText: string;
+  bbox?: NormalizedBbox;
+  confidence: number;
+  reviewRequired: boolean;
+}
+
+export interface PhysicalTableRow {
+  rowId: string;
+  rowIndex: number;
+  rowType: PhysicalTableRowType;
+  rawText: string;
+  cells: PhysicalTableCell[];
+  confidence: number;
+  reviewRequired: boolean;
+}
+
+export interface PhysicalTable {
+  tableId: string;
+  pageNo: number;
+  regionId: string;
+  bbox: NormalizedBbox;
+  columnCount: number;
+  rows: PhysicalTableRow[];
+  analysisMethod: 'TEXT_RULES' | 'VISION_MODEL';
+  warnings: string[];
+  modelExecution?: ModelExecutionRef;
+}
+
+export interface ProcedureTableStageResult extends ContractVersionRef<typeof RECOGNITION_V2_SCHEMA_IDS.procedureTableStageResult> {
+  tables: PhysicalTable[];
+  extraction: ExtractionStageResult & { taskType: 'PROCEDURE_TABLE' };
   warnings: string[];
   completedAt: string;
 }

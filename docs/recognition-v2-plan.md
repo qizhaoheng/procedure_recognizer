@@ -1,6 +1,6 @@
 # AIP AD-2 → ARINC 424：V2 分阶段识别实施规划
 
-状态：Phase 2 核心识别链路完成，准备进入 Phase 3  
+状态：Phase 3 核心抽取链路完成，准备进入 Phase 4
 日期：2026-07-16  
 适用仓库：`procedure_recognizer`
 
@@ -584,7 +584,7 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 - V2 Prompt 已纳入机场特例静态检查；当前仍不写入 `group.procedureUnderstanding`，不影响 V1、地图和 424；
 - 人工检查界面不在本次识别内核切片中实现，先通过 artifact API 保留完整检查数据，在 Phase 6 统一建设审核界面。
 
-### Phase 3：表格 + 坐标专项抽取
+### Phase 3：表格 + 坐标专项抽取（核心抽取链路已完成）
 
 首批业务范围优先选择有正式 coding/leg table 和坐标表的 RNAV SID/STAR。
 
@@ -598,6 +598,23 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 - 无 Chart 条件下的 canonical 草案。
 
 退出条件：模型不看 Chart 也能对受支持表格生成带证据的腿段候选；未知字段保持 null/UNRESOLVED。
+
+完成记录：
+
+- 新增 `PROCEDURE_TABLE` 阶段，先保存表格、行、单元格和原始文字，再由确定性程序映射字段候选；
+- 视觉模型只负责物理表格恢复，不直接输出完整腿段或 ARINC 424；缺少明确 Path Terminator 时输出 `UNRESOLVED`，不按上下文猜测；
+- 模型单元格 bbox 从裁剪坐标反算回 PDF 页面归一化坐标，字段候选引用对应单元格或原始行证据；
+- 新增 `WAYPOINT_NAVAID` 阶段，分别保留 FIX 和 NAVAID，程序名/过渡名不得自动转成 Fix；
+- 支持 compact DMS、符号 DMS、空格 DMS、度分和带半球标记的十进制度数；分钟、秒、纬度和经度范围由确定性程序校验；
+- 原始坐标是 `OBSERVED`，十进制度数是带 `AIP_COORDINATE_TO_DECIMAL@1.0.0` 推导链的 `DERIVED`；无法解析时保留原文并输出 `UNRESOLVED`；
+- 坐标模型 Schema 不接受十进制度数字段，模型只能抄录 `coordinateText`，随后仍必须经过确定性解析；
+- 导航台支持可见类型、标识、频率、频道和坐标候选；缺少坐标时明确进入复核；
+- `PROCEDURE_TABLE` 和 `WAYPOINT_NAVAID` 已接入 V2 API、状态机、取消、依赖指纹、attempt 审计文件和 artifact 读取；
+- 模型单独产生的身份、表格语义和坐标候选一律 `reviewRequired=true`，模型不能用自报置信度批准自己；
+- “无 Chart canonical 草案”不在抽取阶段提前生成，统一留到 Phase 4 融合器，避免抽取器越权选择候选；
+- 当前仍不修改 `group.procedureUnderstanding`，不接管 GeoJSON 和 424 输出。
+
+进入生产验收前仍需补充：按机场整体隔离的真实 AIP 开发集、回归集和盲测集，以及人工标注的表格单元格/坐标基准。本阶段测试使用通用构造样例验证机制和防幻觉边界，不宣称真实机场业务准确率。
 
 ### Phase 4：融合 + 确定性校验
 
@@ -731,6 +748,16 @@ Phase 2 核心识别链路完成后的干净基线：
 - TypeScript 检查和前端生产构建通过；
 - V1、GeoJSON、程序图、424 解析/比较/导出回归全部通过。
 
+Phase 3 核心抽取链路完成后的干净基线：
+
+- 总测试：170；
+- 通过：170；
+- 失败：0；
+- 新增表格物理/语义分层、缺失 Path Terminator、单元格页面 bbox、常见坐标格式、非法坐标范围、确定性推导链、导航台缺失坐标、程序名隔离和模型坐标门禁测试；
+- 四个 V2 阶段执行器通过真实 HTTP API 状态与 artifact 测试；
+- TypeScript 检查和前端生产构建通过；
+- V1、GeoJSON、程序图、424 解析/比较/导出回归全部通过。
+
 Phase 0 已交付：
 
 - `recognition-v2/contracts/index.ts`：版本化 TypeScript 契约；
@@ -757,12 +784,13 @@ Phase 0 已交付：
 
 ## 20. 下一步
 
-下一步进入 Phase 3，依次完成：
+下一步进入 Phase 4，依次完成：
 
-1. 冻结首批 RNAV SID/STAR 表格和坐标字段字典；
-2. 将表格物理结构恢复与航空语义映射拆成两个可独立审计的步骤；
-3. 实现 `PROCEDURE_TABLE` 和 `WAYPOINT_NAVAID` 专项执行器；
-4. 用确定性程序解析 DMS/DM/十进制度数和常见高度、航向、距离格式；
-5. 对每个原始单元格和字段候选保留 page/region/bbox 证据；
-6. 建立开发、回归和盲测机场分层数据集；
-7. 继续保持 `group.procedureUnderstanding`、GeoJSON 和 424 输出不变，直到融合与校验阶段通过发布门禁。
+1. 冻结字段来源优先级矩阵，明确表格、坐标表、正文、Chart 和文档元数据各自可以决定哪些字段；
+2. 实现候选去重、来源独立性判断、冲突记录和 `UNRESOLVED` 汇总；
+3. 建立 canonical 实体，但只选择有证据且通过来源策略的候选；
+4. 实现程序身份、腿段顺序、引用完整性、高度窗口和坐标范围等确定性校验；
+5. 增加距离/航向几何反算校验，但不得用反算结果静默覆盖公布值；
+6. 实现 V2 canonical → 现有 `ProcedureUnderstanding` 的只读预览 Adapter 和 V1/V2 差异报告；
+7. 建立真实机场分层标注集并确定字段级验收阈值；
+8. 在发布门禁完成前，继续禁止 V2 写入现有 GeoJSON/424 正式链路。

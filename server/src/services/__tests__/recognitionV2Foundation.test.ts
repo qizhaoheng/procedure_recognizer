@@ -6,6 +6,7 @@ import { afterEach, describe, it } from 'node:test';
 import express from 'express';
 import type { PdfPageAsset, ProcedureGroup, ProcedureTask } from '../../types/procedure';
 import { createRecognitionV2Router } from '../../routes/recognitionV2';
+import { RECOGNITION_V2_SCHEMA_IDS } from '../recognition-v2/contracts/index';
 import type { RecognitionV2RunManifest, RecognitionV2Stage } from '../recognition-v2/contracts/index';
 import {
   RecognitionV2StateError,
@@ -185,7 +186,7 @@ describe('recognition V2 source package hash', () => {
 });
 
 describe('recognition V2 API skeleton', () => {
-  it('runs the Phase 2 rules-only stages and leaves unavailable stages untouched', async () => {
+  it('runs the available Phase 2/3 rules-only stages and leaves unavailable stages untouched', async () => {
     const root = await temporaryRoot();
     const store = new RecognitionV2Store(root);
     let { task } = sourceFixture();
@@ -219,7 +220,7 @@ describe('recognition V2 API skeleton', () => {
       const createResponse = await fetch(`${base}/runs`, { method: 'POST' });
       assert.equal(createResponse.status, 201);
       const created = await createResponse.json() as { run: RecognitionV2RunManifest; executorsAvailable: RecognitionV2Stage[] };
-      assert.deepEqual(created.executorsAvailable, ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY']);
+      assert.deepEqual(created.executorsAvailable, ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID']);
       assert.equal(task.groups[0].recognitionV2?.activeRunId, created.run.runId);
 
       const stageResponse = await fetch(`${base}/runs/${created.run.runId}/stages/PAGE_LAYOUT/run`, {
@@ -266,12 +267,32 @@ describe('recognition V2 API skeleton', () => {
       assert.equal(record(rerunIdentity, 'PROCEDURE_IDENTITY').status, 'COMPLETED');
       assert.equal(record(rerunIdentity, 'PROCEDURE_IDENTITY').attempt, 2);
 
-      const unavailable = await fetch(`${base}/runs/${created.run.runId}/stages/PROCEDURE_TABLE/run`, { method: 'POST' });
+      const tableResponse = await fetch(`${base}/runs/${created.run.runId}/stages/PROCEDURE_TABLE/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useModel: false }),
+      });
+      assert.equal(tableResponse.status, 200);
+      const tableBody = await tableResponse.json() as { outputRef: string; result: { schemaId: string; extraction: { taskType: string } } };
+      assert.match(tableBody.outputRef, /procedure-table-stage-attempt-1\.json$/);
+      assert.equal(tableBody.result.schemaId, RECOGNITION_V2_SCHEMA_IDS.procedureTableStageResult);
+      assert.equal(tableBody.result.extraction.taskType, 'PROCEDURE_TABLE');
+      const waypointResponse = await fetch(`${base}/runs/${created.run.runId}/stages/WAYPOINT_NAVAID/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useModel: false }),
+      });
+      assert.equal(waypointResponse.status, 200);
+      const waypointBody = await waypointResponse.json() as { outputRef: string; result: { taskType: string } };
+      assert.match(waypointBody.outputRef, /waypoint-navaid-stage-attempt-1\.json$/);
+      assert.equal(waypointBody.result.taskType, 'WAYPOINT_NAVAID');
+
+      const unavailable = await fetch(`${base}/runs/${created.run.runId}/stages/NOTES_CONSTRAINTS/run`, { method: 'POST' });
       assert.equal(unavailable.status, 501);
       assert.equal((await unavailable.json() as { code: string }).code, 'V2_STAGE_EXECUTOR_NOT_AVAILABLE');
-      const unchangedTable = await store.readRun('task_1', 'package_1', created.run.runId);
-      assert.equal(record(unchangedTable, 'PROCEDURE_TABLE').status, 'PENDING');
-      assert.equal(record(unchangedTable, 'PROCEDURE_TABLE').outputRef, undefined);
+      const unchangedNotes = await store.readRun('task_1', 'package_1', created.run.runId);
+      assert.equal(record(unchangedNotes, 'NOTES_CONSTRAINTS').status, 'PENDING');
+      assert.equal(record(unchangedNotes, 'NOTES_CONSTRAINTS').outputRef, undefined);
 
       const prematureFusion = await fetch(`${base}/runs/${created.run.runId}/stages/EVIDENCE_FUSION/run`, { method: 'POST' });
       assert.equal(prematureFusion.status, 409);

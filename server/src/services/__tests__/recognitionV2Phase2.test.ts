@@ -164,6 +164,7 @@ describe('Recognition V2 Phase 2 procedure identity', () => {
     const modelCandidate = names.find((candidate) => candidate.sourceEvidenceIds.some((id) =>
       result.output.evidence.find((evidence) => evidence.evidenceId === id)?.modelExecution?.runId === 'identity-model-run'));
     assert.ok(modelCandidate);
+    assert.equal(modelCandidate.reviewRequired, true, 'a model-only identity candidate cannot approve itself');
     const modelEvidence = result.output.evidence.find((evidence) => evidence.modelExecution?.runId === 'identity-model-run');
     assert.deepEqual(modelEvidence?.bbox, [0, 0, 1, 0.25]);
     assert.equal(modelEvidence?.fileName, 'AD2.pdf');

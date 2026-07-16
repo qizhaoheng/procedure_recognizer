@@ -8,6 +8,8 @@ const validatorPromises = new Map<string, Promise<ValidateFunction>>();
 const SCHEMA_FILE_BY_ID: Record<string, string> = {
   'recognition-v2-model-page-layout.schema.json': 'model-page-layout.schema.json',
   'recognition-v2-model-procedure-identity.schema.json': 'model-procedure-identity.schema.json',
+  'recognition-v2-model-table-physical.schema.json': 'model-table-physical.schema.json',
+  'recognition-v2-model-waypoint-navaid.schema.json': 'model-waypoint-navaid.schema.json',
 };
 
 export class RecognitionV2ContractError extends Error {
@@ -33,12 +35,24 @@ export async function assertValidExtractionStageResult(value: unknown): Promise<
   await assertSchema('recognition-v2-extraction-stage-result.schema.json', value);
 }
 
+export async function assertValidProcedureTableStageResult(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-procedure-table-stage-result.schema.json', value);
+}
+
 export async function assertValidModelPageLayout(value: unknown): Promise<void> {
   await assertSchema('recognition-v2-model-page-layout.schema.json', value);
 }
 
 export async function assertValidModelProcedureIdentity(value: unknown): Promise<void> {
   await assertSchema('recognition-v2-model-procedure-identity.schema.json', value);
+}
+
+export async function assertValidModelTablePhysical(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-model-table-physical.schema.json', value);
+}
+
+export async function assertValidModelWaypointNavaid(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-model-waypoint-navaid.schema.json', value);
 }
 
 export async function readRecognitionV2Schema(schemaId: string): Promise<Record<string, unknown>> {
@@ -66,8 +80,11 @@ async function buildValidator(schemaId: string) {
     'page-layout-result.schema.json',
     'page-layout-stage-result.schema.json',
     'extraction-stage-result.schema.json',
+    'procedure-table-stage-result.schema.json',
     'model-page-layout.schema.json',
     'model-procedure-identity.schema.json',
+    'model-table-physical.schema.json',
+    'model-waypoint-navaid.schema.json',
   ];
   const schemas = await Promise.all(schemaNames.map(readSchema));
   const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false });

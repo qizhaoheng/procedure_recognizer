@@ -22,10 +22,13 @@ const schemaFiles = [
   'page-layout-result.schema.json',
   'page-layout-stage-result.schema.json',
   'extraction-stage-result.schema.json',
+  'procedure-table-stage-result.schema.json',
   'fusion-stage-result.schema.json',
   'validation-stage-result.schema.json',
   'model-page-layout.schema.json',
   'model-procedure-identity.schema.json',
+  'model-table-physical.schema.json',
+  'model-waypoint-navaid.schema.json',
 ] as const;
 
 const version = <TSchemaId extends string>(schemaId: TSchemaId) => ({

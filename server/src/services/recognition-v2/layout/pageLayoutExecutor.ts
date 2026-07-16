@@ -148,6 +148,7 @@ function corePages(task: ProcedureTask, group: ProcedureGroup) {
     ...(group.coordinatePages ?? []),
     ...(group.minimaPages ?? []),
     ...(group.textSupplementPages ?? []),
+    ...(group.supportingPages ?? []),
   ]);
   const fallback = coreNos.size ? coreNos : new Set(packagePageNos(group));
   return task.pages.filter((page) => fallback.has(page.pageNo)).sort((a, b) => a.pageNo - b.pageNo);

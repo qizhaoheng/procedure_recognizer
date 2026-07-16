@@ -109,3 +109,43 @@
 [dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
 [dev:server] 15:11:08 [tsx] change in ./server\src\services\recognition-v2\contracts\schemaValidation.ts Restarting...
 [dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:14:25 [tsx] change in ./server\src\services\recognition-v2\contracts\schemaValidation.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:15:41 [tsx] change in ./server\src\services\recognition-v2\prompts\promptResources.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 32
+[dev:server] Warning: TT: undefined function: 21
+[dev:server] Warning: TT: undefined function: 21
+[dev:server] 15:18:52 [tsx] change in ./server\src\services\recognition-v2\layout\pageLayoutExecutor.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:19:05 [tsx] change in ./server\src\routes\recognitionV2.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:22:41 [tsx] change in ./server\src\services\recognition-v2\identity\procedureIdentityExecutor.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:23:16 [tsx] change in ./server\src\services\recognition-v2\tables\procedureTableExecutor.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:23:44 [tsx] change in ./server\src\services\recognition-v2\tables\procedureTableExecutor.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:25:21 [tsx] change in ./server\src\routes\recognitionV2.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:25:43 [tsx] change in ./server\src\services\recognition-v2\coordinates\coordinateParser.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] 15:26:31 [tsx] change in ./server\src\services\recognition-v2\tables\procedureTableExecutor.ts Restarting...
+[dev:server] cProcedure recognizer API listening on http://127.0.0.1:3317
+[dev:server] npm run dev:server exited with code 4294967295
+--> Sending SIGTERM to other processes..
+[dev:web] npm run dev:web exited with code 4294967295

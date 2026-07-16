@@ -296,7 +296,7 @@ function addModelCandidates(
         status: normalized ? 'OBSERVED' : 'UNRESOLVED',
         sourceEvidenceIds: [evidenceId],
         confidence: observation.confidence,
-        reviewRequired: !normalized || observation.confidence < 0.8,
+        reviewRequired: true,
       });
     }
   }

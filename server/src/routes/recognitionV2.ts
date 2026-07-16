@@ -18,6 +18,8 @@ import {
 import { buildSourcePackageHash } from '../services/recognition-v2/orchestration/sourcePackageHash';
 import { executePageLayout } from '../services/recognition-v2/layout/pageLayoutExecutor';
 import { executeProcedureIdentity } from '../services/recognition-v2/identity/procedureIdentityExecutor';
+import { executeProcedureTable } from '../services/recognition-v2/tables/procedureTableExecutor';
+import { executeWaypointNavaid } from '../services/recognition-v2/coordinates/waypointNavaidExecutor';
 import type { VisionStageClient } from '../services/recognition-v2/orchestration/visionStageClient';
 import { getLlmRuntimeConfig } from '../services/llm/llmClient';
 import { assertValidPageLayoutStageResult } from '../services/recognition-v2/contracts/schemaValidation';
@@ -52,7 +54,7 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs', async (req, res,
     res.status(201).json({
       run: manifest,
       runRef: dependencies.store.runReference(manifest.taskId, manifest.packageId, manifest.runId),
-      executorsAvailable: ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY'],
+      executorsAvailable: ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID'],
     });
   } catch (error) {
     next(error);
@@ -116,7 +118,7 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
       });
     }
     assertStageCanStart(run, stage);
-    if (stage !== 'PAGE_LAYOUT' && stage !== 'PROCEDURE_IDENTITY') {
+    if (!['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID'].includes(stage)) {
       return res.status(501).json({
         code: 'V2_STAGE_EXECUTOR_NOT_AVAILABLE',
         error: `Stage ${stage} is ready, but its executor is not implemented yet.`,
@@ -167,10 +169,11 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
         visionClient: dependencies.visionClient,
         onAuditArtifact: persistAuditArtifact,
       })
-      : await executeIdentityFromStoredLayout(dependencies, {
+      : await executeExtractionFromStoredLayout(dependencies, {
         task,
         group,
         run: running,
+        stage,
         model,
         useModel,
         stageInputHash,
@@ -182,14 +185,22 @@ router.post('/:taskId/packages/:packageId/recognition-v2/runs/:runId/stages/:sta
       await persistAuditArtifact(artifact);
     }
     const outputFile = artifactNameForAttempt(
-      stage === 'PAGE_LAYOUT' ? 'page-layout-stage.json' : 'procedure-identity-stage.json',
+      stageOutputFile(stage),
       attempt,
     );
     const outputRef = await dependencies.store.writeArtifact(task.taskId, packageId, run.runId, outputFile, execution.output);
     const completed = await dependencies.store.updateRun(task.taskId, packageId, run.runId, (current) =>
       completeStage(current, stage!, { outputRef }));
     await updateSummary(dependencies, completed);
-    return res.json({ run: completed, stage, outputRef, auditRefs, result: execution.output, usedModel: useModel });
+    return res.json({
+      run: completed,
+      stage,
+      outputRef,
+      auditRefs,
+      result: execution.output,
+      modelRequested: useModel,
+      usedModel: auditRefs.length > 0,
+    });
   } catch (error) {
     if (started && stage && packageId) {
       try {
@@ -247,12 +258,13 @@ function packageIdOf(group: ProcedureGroup) {
   return group.packageId || group.groupId;
 }
 
-async function executeIdentityFromStoredLayout(
+async function executeExtractionFromStoredLayout(
   dependencies: RecognitionV2RouterDependencies,
   input: {
     task: ProcedureTask;
     group: ProcedureGroup;
     run: RecognitionV2RunManifest;
+    stage: Exclude<RecognitionV2Stage, 'PAGE_LAYOUT'>;
     model: string;
     useModel: boolean;
     stageInputHash: string;
@@ -264,7 +276,7 @@ async function executeIdentityFromStoredLayout(
   if (!layoutRef) throw new RecognitionV2StateError('LAYOUT_ARTIFACT_MISSING', 'PAGE_LAYOUT completed without an output artifact.');
   const layout = await dependencies.store.readArtifact<PageLayoutStageResult>(input.task.taskId, packageIdOf(input.group), input.run.runId, layoutRef);
   await assertValidPageLayoutStageResult(layout);
-  return executeProcedureIdentity({
+  const common = {
     task: input.task,
     group: input.group,
     layout,
@@ -274,7 +286,19 @@ async function executeIdentityFromStoredLayout(
     abortSignal: input.abortSignal,
     visionClient: dependencies.visionClient,
     onAuditArtifact: input.onAuditArtifact,
-  });
+  };
+  if (input.stage === 'PROCEDURE_IDENTITY') return executeProcedureIdentity(common);
+  if (input.stage === 'PROCEDURE_TABLE') return executeProcedureTable(common);
+  if (input.stage === 'WAYPOINT_NAVAID') return executeWaypointNavaid(common);
+  throw new RecognitionV2StateError('V2_STAGE_EXECUTOR_NOT_AVAILABLE', `Stage ${input.stage} does not have an extraction executor.`);
+}
+
+function stageOutputFile(stage: RecognitionV2Stage) {
+  if (stage === 'PAGE_LAYOUT') return 'page-layout-stage.json';
+  if (stage === 'PROCEDURE_IDENTITY') return 'procedure-identity-stage.json';
+  if (stage === 'PROCEDURE_TABLE') return 'procedure-table-stage.json';
+  if (stage === 'WAYPOINT_NAVAID') return 'waypoint-navaid-stage.json';
+  return `${stage.toLowerCase().replace(/_/g, '-')}-stage.json`;
 }
 
 function hashStageInput(
