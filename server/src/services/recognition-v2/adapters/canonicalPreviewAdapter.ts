@@ -52,9 +52,15 @@ function adaptEntities(entities: CanonicalEntity[], releaseDecision: ReleaseDeci
     pathTerminator: fields.pathTerminator,
     fromFix: fields.fromFix,
     toFix: fields.toFix,
+    fixIdentifier: fields.toFix,
     courseDeg: fields.courseDegMag ?? fields.courseDeg,
+    courseTrueDeg: fields.courseDegTrue,
+    magneticVariationDeg: fields.magneticVariationDeg,
     distanceNm: fields.distanceNm,
     altitudeConstraint: fields.altitudeConstraint,
+    speedLimitKias: fields.speedLimitKias,
+    navigationSpecification: fields.navigationSpecification,
+    flyOver: fields.flyOver === 'Y' ? true : fields.flyOver === 'N' ? false : fields.flyOver,
     turnDirection: fields.turnDirection,
     recommendedNavaid: fields.recommendedNavaid,
     remarks: fields.remarks,
@@ -62,12 +68,25 @@ function adaptEntities(entities: CanonicalEntity[], releaseDecision: ReleaseDeci
     entityKey: entity.entityKey,
     confidence: entityConfidence(entity),
   })) as TableLegItem[];
+  const navigationType = resolveCanonicalNavigationType(procedure?.fields.navigationType, legs);
+  if (!usableScalar(procedure?.fields.navigationType) && navigationType) {
+    warnings.push(`Navigation type inferred deterministically as ${navigationType} from reviewed leg navigation specifications.`);
+  }
   if (procedureNames.length > 1 && legs.some((leg) => !leg.procedureName)) warnings.push('Some legs cannot be associated with one of multiple procedures; they remain unassigned for review.');
   const fixes = entities.filter((item) => item.entityType === 'FIX').map(entityObject);
   const navaids = entities.filter((item) => item.entityType === 'NAVAID').map((entity) => ({
     ...entityObject(entity),
     type: entity.fields.navaidType ?? entity.fields.type,
   }));
+  const chartTexts = entities.filter((item) => item.entityType === 'CONSTRAINT').map((entity) => compact({
+    text: scalarString(entity.fields.text),
+    normalizedText: scalarString(entity.fields.text),
+    role: scalarString(entity.fields.constraintType),
+    usedInProcedure: true,
+    confidence: entityConfidence(entity),
+    entityKey: entity.entityKey,
+    sourceEvidenceIds: allEvidenceIds(entity),
+  })).filter((item) => item.text);
   const procedures = procedureNames.map((name) => ({
     procedureName: String(name),
     runway: runwayValues.length === 1 ? runwayValues[0] : null,
@@ -83,12 +102,14 @@ function adaptEntities(entities: CanonicalEntity[], releaseDecision: ReleaseDeci
     airportName: scalarString(airport?.fields.airportName),
     packageType: scalarString(procedure?.fields.packageType),
     procedureCategory: scalarString(procedure?.fields.procedureCategory),
-    navigationType: scalarString(procedure?.fields.navigationType),
+    navigationType,
     runway: runwayValues.length === 1 ? runwayValues[0] : undefined,
+    transitionAltitudeFt: airport?.fields.transitionAltitudeFt,
+    magneticVariationDeg: airport?.fields.magneticVariationDeg,
     procedureClassification: compact({
       packageType: scalarString(procedure?.fields.packageType),
       procedureCategory: scalarString(procedure?.fields.procedureCategory),
-      navigationType: scalarString(procedure?.fields.navigationType),
+      navigationType,
       runway: runwayValues.length === 1 ? runwayValues[0] : undefined,
       procedureNames,
       confidence: entityConfidence(procedure),
@@ -98,6 +119,7 @@ function adaptEntities(entities: CanonicalEntity[], releaseDecision: ReleaseDeci
     fixes,
     navaids,
     runways: runwayValues.map((runway) => ({ identifier: runway })),
+    chartTexts,
     sourceEvidence: entities.map((entity) => ({ entityKey: entity.entityKey, fieldEvidence: entity.fieldEvidence })),
     confidence: confidences.length ? confidences.reduce((sum, value) => sum + value, 0) / confidences.length : 0,
     reviewRequired: releaseDecision !== 'READY',
@@ -156,6 +178,21 @@ function entityConfidence(entity: CanonicalEntity | undefined) {
 
 function scalarString(value: unknown) {
   return value === undefined || value === null || Array.isArray(value) ? undefined : String(value);
+}
+
+function usableScalar(value: unknown) {
+  const normalized = scalarString(value)?.trim().toUpperCase();
+  return normalized && !['-', '—', 'UNKNOWN', 'N/A', 'NA', 'NULL'].includes(normalized) ? normalized : undefined;
+}
+
+export function resolveCanonicalNavigationType(value: unknown, legs: TableLegItem[]) {
+  const explicit = usableScalar(value);
+  if (explicit) return explicit;
+  const specifications = legs
+    .map((leg) => String(leg.navigationSpecification ?? '').trim().toUpperCase())
+    .filter(Boolean);
+  if (specifications.some((item) => /^(?:RNP|RNAV)(?:\s|$)/.test(item))) return 'RNAV';
+  return undefined;
 }
 
 function asArray(value: unknown): unknown[] {

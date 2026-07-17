@@ -12,5 +12,9 @@ Hard rules:
 - A blank cell stays blank. A missing row or column must not be invented.
 - bbox values, when supplied, are normalized to this crop, not the original page.
 - The returned pageNo and regionId must exactly match the supplied pair.
+- Required top-level keys are exactly `pageNo`, `regionId`, `columnCount`, `rows`, and `warnings`.
+- Each row includes `rowIndex`, uppercase `rowType`, `rawText`, `cells`, and `confidence`.
+- Each cell includes `columnIndex`, `rowSpan`, `columnSpan`, `rawText`, and `confidence`; `bbox` is optional.
+- All bbox coordinates must be normalized numbers between 0 and 1, never pixels.
 - If structure or text is uncertain, lower confidence and add a warning.
 - Never copy identifiers or values from prompts, other pages, or prior examples.

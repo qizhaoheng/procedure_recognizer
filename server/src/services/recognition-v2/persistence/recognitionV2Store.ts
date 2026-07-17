@@ -150,6 +150,30 @@ export class RecognitionV2Store {
     return JSON.parse(await fs.readFile(filePath, 'utf8')) as T;
   }
 
+  async readPackageArtifact<T>(taskId: string, packageId: string, fileName: string): Promise<T> {
+    const safeName = artifactFileName(fileName);
+    return JSON.parse(await fs.readFile(path.join(this.packageDir(taskId, packageId), safeName), 'utf8')) as T;
+  }
+
+  async updatePackageArtifact<T>(
+    taskId: string,
+    packageId: string,
+    fileName: string,
+    updater: (current: T | undefined) => T | Promise<T>,
+  ): Promise<T> {
+    const safeName = artifactFileName(fileName);
+    const target = path.join(this.packageDir(taskId, packageId), safeName);
+    return this.withUpdateLock(`package-artifact\u0000${taskId}\u0000${packageId}\u0000${safeName}`, async () => {
+      const current = await fs.readFile(target, 'utf8').then((text) => JSON.parse(text) as T).catch((error: NodeJS.ErrnoException) => {
+        if (error.code === 'ENOENT') return undefined;
+        throw error;
+      });
+      const updated = await updater(current);
+      await this.atomicWriteJson(target, updated);
+      return updated;
+    });
+  }
+
   runReference(taskId: string, packageId: string, runId: string) {
     return path.posix.join('recognition-v2', encodeSegment(packageId), encodeSegment(runId), MANIFEST_FILE);
   }

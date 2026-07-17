@@ -10,4 +10,8 @@ Hard rules:
 - Do not infer a region merely because another country usually has it.
 - Existing text/rule hints are non-authoritative hints. Correct them when the image disagrees.
 - Return `UNKNOWN` when the role cannot be determined reliably.
+- Required top-level keys are exactly `pageNo`, `pageRoles`, `regions`, and `warnings`.
+- Every region contains exactly `type`, `bbox`, `rotationDeg`, `readingOrder`, and `confidence`.
+- Never copy internal hint fields such as `regionId`, region `pageNo`, or `reviewRequired` into the response.
+- Use only the role/type enum supplied in the request schema; do not invent narrower table type names.
 - Return only the JSON object required by the supplied schema.

@@ -5,7 +5,7 @@ const DISTANCE_TOLERANCE_NM = 0.1;
 const COURSE_TOLERANCE_DEG = 1;
 
 const FIELD_WEIGHTS = {
-  fix: 25,
+  fix: 23,
   pathTerminator: 18,
   distanceNm: 13,
   altitudeValue: 10,
@@ -15,6 +15,7 @@ const FIELD_WEIGHTS = {
   turnDirection: 5,
   recommendedNavaid: 3,
   speedLimitKias: 3,
+  flyOver: 2,
   holdingAtFix: 2,
   endOfProcedure: 1,
 };
@@ -109,6 +110,7 @@ function compareLeg(sequence: string, ai: SimpleProcedureLeg | undefined, jeppes
     // 推荐导航台只在 IF/AF 腿上要求（本例为弧心 VJB）
     compareField('recommendedNavaid', ai.recommendedNavaid ?? '', jeppesen.recommendedNavaid ?? '', navaidMatches(ai, jeppesen), 'WARNING'),
     compareField('speedLimitKias', ai.speedLimitKias, jeppesen.speedLimitKias, sameOptionalNumber(ai.speedLimitKias, jeppesen.speedLimitKias), 'WARNING'),
+    compareField('flyOver', ai.flyOver ?? false, jeppesen.flyOver ?? false, (ai.flyOver ?? false) === (jeppesen.flyOver ?? false), 'ERROR'),
     // fixSection 不计分：AI 侧是启发式推断（首腿 EA），而 424 中途航路点也可为 EA（如 WSSS 的 BOBAG），
     // 计分只会把我们自己的猜测误记成模型差异。表格“标记”列仍展示两侧取值。
     compareField('holdingAtFix', ai.holdingAtFix ?? false, jeppesen.holdingAtFix ?? false, (ai.holdingAtFix ?? false) === (jeppesen.holdingAtFix ?? false), 'WARNING'),

@@ -7,7 +7,7 @@ import {
   RECOGNITION_V2_SCHEMA_IDS,
   type PageLayoutStageResult,
 } from '../recognition-v2/contracts/index';
-import { executeProcedureIdentity } from '../recognition-v2/identity/procedureIdentityExecutor';
+import { executeProcedureIdentity, extractProcedureNamesFromText } from '../recognition-v2/identity/procedureIdentityExecutor';
 import { renderDynamicRegionCrop } from '../recognition-v2/layout/dynamicRegionCrop';
 import { executePageLayout } from '../recognition-v2/layout/pageLayoutExecutor';
 import { analyzePageLayoutWithRules } from '../recognition-v2/layout/ruleBasedPageLayout';
@@ -78,9 +78,52 @@ describe('Recognition V2 Phase 2 page layout', () => {
       useModel: true,
       stageInputHash: 'sha256:layout',
       visionClient,
-      onAuditArtifact: (artifact) => audits.push(artifact),
+      onAuditArtifact: (artifact) => { audits.push(artifact); },
     }), /failed contract validation/);
     assert.equal(audits.length, 1, 'failed model output must remain auditable');
+  });
+
+  it('normalizes harmless legacy layout fields but still validates the normalized contract', async () => {
+    const { task, group } = fixture();
+    const visionClient: VisionStageClient = async (request) => ({
+      parsedJson: {
+        pageNo: 1,
+        regions: [{
+          regionId: 'p1-r1',
+          type: 'AD_DATA_TABLE',
+          bbox: [0.1, 0.2, 0.9, 0.8],
+          rotationDeg: 0,
+          readingOrder: 0,
+          confidence: 0.95,
+          reviewRequired: false,
+        }],
+      },
+      execution: executionRef(request, 'legacy-layout-run'),
+      audit: auditValue(request),
+    });
+    const result = await executePageLayout({ task, group, model: 'test-vision', useModel: true, stageInputHash: 'sha256:layout', visionClient });
+    assert.ok(result.output.pages[0].pageRoles.includes('SUPPORTING_INFORMATION'));
+    assert.equal(result.output.pages[0].regions[0].type, 'SUPPORTING_INFORMATION');
+    assert.ok(result.output.pages[0].warnings.some((warning) => warning.includes('normalized')));
+  });
+
+  it('does not spend model calls on generic airport supporting pages', async () => {
+    const { task, group, page } = fixture();
+    const supportingPage = { ...page, pageNo: 2, aipPageNo: 'AD 2-ZZZZ-1', chartRole: 'SUPPORTING_INFORMATION' };
+    task.pages.push(supportingPage);
+    group.supportingPages = [2];
+    const requestedPages: number[] = [];
+    const visionClient: VisionStageClient = async (request) => {
+      requestedPages.push(request.images[0].pageNo);
+      return {
+        parsedJson: { pageNo: 1, pageRoles: ['PROCEDURE_DIAGRAM'], regions: [{ type: 'PROCEDURE_DIAGRAM', bbox: [0, 0, 1, 1], rotationDeg: 0, readingOrder: 0, confidence: 0.9 }], warnings: [] },
+        execution: executionRef(request, 'scoped-layout-run'),
+        audit: auditValue(request),
+      };
+    };
+    const result = await executePageLayout({ task, group, model: 'test-vision', useModel: true, stageInputHash: 'sha256:layout', visionClient });
+    assert.deepEqual(requestedPages, [1]);
+    assert.equal(result.output.pages.find((item) => item.pageNo === 2)?.analysisMethod, 'RULES_ONLY');
   });
 
   it('renders a validated arbitrary region crop rather than a fixed named crop', async () => {
@@ -94,6 +137,26 @@ describe('Recognition V2 Phase 2 page layout', () => {
 });
 
 describe('Recognition V2 Phase 2 procedure identity', () => {
+  it('extracts airport transition altitude and magnetic variation from supporting AD pages without a model', async () => {
+    const { task, group, page } = fixture();
+    const support = { ...page, pageNo: 2, chartRole: 'SUPPORT' as const, aipPageNo: 'AD 2-ZZZZ-1', textLayerText: 'MAG VAR / Annual change 3掳W / 4 W. Transition altitude 9 000 ft.' };
+    task.pages.push(support);
+    group.supportingInfoRefs = { airportMetadata: [2], communication: [2] };
+    group.supportingInfoSummary = { airportMetadata: { airportIcao: 'ZZZZ' }, sourcePages: group.supportingInfoRefs };
+    const result = await executeProcedureIdentity({ task, group, layout: layoutFixture(), model: 'none', useModel: false, stageInputHash: 'sha256:airport-master' });
+    assert.ok(result.output.candidates.some((candidate) => candidate.entityKey === 'AIRPORT:ZZZZ' && candidate.fieldName === 'transitionAltitudeFt' && candidate.normalizedValue === 9000));
+    assert.ok(result.output.candidates.some((candidate) => candidate.entityKey === 'AIRPORT:ZZZZ' && candidate.fieldName === 'magneticVariationDeg' && candidate.normalizedValue === 3));
+    assert.ok(result.output.candidates.filter((candidate) => ['transitionAltitudeFt', 'magneticVariationDeg'].includes(candidate.fieldName)).every((candidate) => !candidate.reviewRequired));
+  });
+
+  it('recovers coded procedure designators from chart and tabular titles', () => {
+    const names = extractProcedureNamesFromText([
+      'RNAV (GNSS) MABIX 2A SID RWY 09L',
+      'TABULAR DESCRIPTION: MABIX 2A RWY 09L',
+    ].join('\n'));
+    assert.deepEqual(names, [{ name: 'MABIX 2A', rawText: 'RNAV (GNSS) MABIX 2A SID RWY 09L' }]);
+  });
+
   it('keeps formal procedure names separate from prominent waypoints and transitions', async () => {
     const { task, group, page } = fixture();
     page.textLayerText = [

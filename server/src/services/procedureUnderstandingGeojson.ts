@@ -2067,33 +2067,41 @@ function buildRunwayMap(understanding: ProcedureUnderstandingResult, group: Proc
   for (const summary of summaries) {
     const coordinates = Array.isArray(summary.coordinates) ? summary.coordinates as string[] : [];
     const parsed = coordinates.map((value) => parseCompactLatLon(value));
-    if (parsed.length >= 2 && parsed[0] && parsed[1]) {
-      const bearing = firstBearing(summary, 0);
-      runways.set('RW16', {
-        identifier: 'RW16',
-        threshold: [parsed[0].lon, parsed[0].lat],
-        end: [parsed[1].lon, parsed[1].lat],
-        bearing,
-        rawThreshold: coordinates[0],
-        rawEnd: coordinates[1],
+    const identifiers = runwayIdentifiersFromSummary(summary);
+    identifiers.forEach((identifier, index) => {
+      const threshold = parsed[index];
+      const oppositeIndex = identifiers.findIndex((candidate) => candidate === reciprocalRunway(identifier));
+      const end = oppositeIndex >= 0 ? parsed[oppositeIndex] : undefined;
+      if (!threshold || !end) return;
+      runways.set(identifier, {
+        identifier,
+        threshold: [threshold.lon, threshold.lat],
+        end: [end.lon, end.lat],
+        bearing: firstBearing(summary, index),
+        rawThreshold: coordinates[index],
+        rawEnd: coordinates[oppositeIndex],
         sourcePage: finiteNumber(summary.pageNo),
       });
-    }
-    if (parsed.length >= 4 && parsed[2] && parsed[3]) {
-      const bearing = firstBearing(summary, 1);
-      runways.set('RW34', {
-        identifier: 'RW34',
-        threshold: [parsed[2].lon, parsed[2].lat],
-        end: [parsed[3].lon, parsed[3].lat],
-        bearing,
-        rawThreshold: coordinates[2],
-        rawEnd: coordinates[3],
-        sourcePage: finiteNumber(summary.pageNo),
-      });
-    }
+    });
   }
 
   return runways;
+}
+
+function runwayIdentifiersFromSummary(summary: Record<string, unknown>) {
+  const listed = Array.isArray(summary.runways) ? summary.runways : [];
+  const text = [summary.textSample, ...listed].filter(Boolean).join(' ');
+  return [...new Set([...text.matchAll(/\bRWY\s*(\d{2}[LCR]?)\b/gi)]
+    .map((match) => normalizeRunwayName(match[1]))
+    .filter(Boolean))];
+}
+
+function reciprocalRunway(identifier: string) {
+  const match = identifier.match(/^RW(\d{2})([LCR]?)$/);
+  if (!match) return '';
+  const reciprocalNumber = ((Number(match[1]) + 18 - 1) % 36) + 1;
+  const side = match[2] === 'L' ? 'R' : match[2] === 'R' ? 'L' : match[2];
+  return `RW${String(reciprocalNumber).padStart(2, '0')}${side}`;
 }
 
 function coordinateFromLonLat(lon: unknown, lat: unknown): [number, number] | undefined {

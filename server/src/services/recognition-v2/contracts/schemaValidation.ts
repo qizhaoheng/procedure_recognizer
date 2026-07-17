@@ -10,6 +10,8 @@ const SCHEMA_FILE_BY_ID: Record<string, string> = {
   'recognition-v2-model-procedure-identity.schema.json': 'model-procedure-identity.schema.json',
   'recognition-v2-model-table-physical.schema.json': 'model-table-physical.schema.json',
   'recognition-v2-model-waypoint-navaid.schema.json': 'model-waypoint-navaid.schema.json',
+  'recognition-v2-model-notes-constraints.schema.json': 'model-notes-constraints.schema.json',
+  'recognition-v2-model-chart-topology.schema.json': 'model-chart-topology.schema.json',
 };
 
 export class RecognitionV2ContractError extends Error {
@@ -47,6 +49,10 @@ export async function assertValidValidationStageResult(value: unknown): Promise<
   await assertSchema('recognition-v2-validation-stage-result.schema.json', value);
 }
 
+export async function assertValidHumanReviewStageResult(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-human-review-stage-result.schema.json', value);
+}
+
 export async function assertValidCanonicalPreview(value: unknown): Promise<void> {
   await assertSchema('recognition-v2-canonical-preview.schema.json', value);
 }
@@ -69,6 +75,22 @@ export async function assertValidModelTablePhysical(value: unknown): Promise<voi
 
 export async function assertValidModelWaypointNavaid(value: unknown): Promise<void> {
   await assertSchema('recognition-v2-model-waypoint-navaid.schema.json', value);
+}
+
+export async function assertValidModelNotesConstraints(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-model-notes-constraints.schema.json', value);
+}
+
+export async function assertValidModelChartTopology(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-model-chart-topology.schema.json', value);
+}
+
+export async function assertValidTopologyGoldenCase(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-topology-golden-case.schema.json', value);
+}
+
+export async function assertValidPublicationWorkspace(value: unknown): Promise<void> {
+  await assertSchema('recognition-v2-publication-workspace.schema.json', value);
 }
 
 export async function readRecognitionV2Schema(schemaId: string): Promise<Record<string, unknown>> {
@@ -99,12 +121,17 @@ async function buildValidator(schemaId: string) {
     'procedure-table-stage-result.schema.json',
     'fusion-stage-result.schema.json',
     'validation-stage-result.schema.json',
+    'human-review-stage-result.schema.json',
     'canonical-preview.schema.json',
     'v1-v2-diff-report.schema.json',
     'model-page-layout.schema.json',
     'model-procedure-identity.schema.json',
     'model-table-physical.schema.json',
     'model-waypoint-navaid.schema.json',
+    'model-notes-constraints.schema.json',
+    'model-chart-topology.schema.json',
+    'topology-golden-case.schema.json',
+    'publication-workspace.schema.json',
   ];
   const schemas = await Promise.all(schemaNames.map(readSchema));
   const ajv = new Ajv2020({ allErrors: true, strict: false, validateFormats: false });

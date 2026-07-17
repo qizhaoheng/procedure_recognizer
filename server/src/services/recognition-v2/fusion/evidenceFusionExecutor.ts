@@ -85,7 +85,7 @@ export async function executeEvidenceFusion(input: {
       entity.fieldEvidence[group.fieldName] = provenance(usable, representatives[0], evidenceById, 'OBSERVED');
       const reviewCandidates = representatives.filter((candidate) => requiresReview(candidate, evidenceById));
       if (reviewCandidates.length) {
-        unresolvedItems.push(unresolved(group.entityKey, group.fieldName, 'REVIEW_REQUIRED', reviewCandidates, isBlocking424Field(group.fieldName)));
+        unresolvedItems.push(unresolved(group.entityKey, group.fieldName, 'REVIEW_REQUIRED', reviewCandidates, false));
       }
       continue;
     }
@@ -112,7 +112,10 @@ export async function executeEvidenceFusion(input: {
     selectedCandidateIds.add(representative.candidateId);
     if (agreeing.every((candidate) => requiresReview(candidate, evidenceById))) {
       const reason = agreeing.every((candidate) => candidate.sourceEvidenceIds.every((id) => evidenceById.get(id)?.modelExecution)) ? 'MODEL_ONLY' : 'REVIEW_REQUIRED';
-      unresolvedItems.push(unresolved(group.entityKey, group.fieldName, reason, agreeing, isBlocking424Field(group.fieldName)));
+      // A present, selected value that still needs human confirmation must keep
+      // the run in REVIEW_REQUIRED, but it is not the same as a missing or
+      // conflicting 424 field. Hard blocking is reserved for those cases.
+      unresolvedItems.push(unresolved(group.entityKey, group.fieldName, reason, agreeing, false));
     }
   }
 

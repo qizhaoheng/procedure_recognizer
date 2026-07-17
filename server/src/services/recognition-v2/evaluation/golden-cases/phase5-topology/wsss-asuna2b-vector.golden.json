@@ -1,0 +1,60 @@
+{
+  "contractVersion": "2.0.0-alpha.1",
+  "schemaId": "recognition-v2-topology-golden-case.schema.json",
+  "caseId": "wsss-asuna2b-vector",
+  "category": "VECTOR",
+  "airportIcao": "WSSS",
+  "procedureName": "ASUNA 2B",
+  "procedureType": "STAR",
+  "source": {
+    "publisher": "Civil Aviation Authority Singapore",
+    "fileName": "File_AD-2-WSSS.pdf",
+    "documentSha256": "696482bb2aaf173c1ff558ca2b90265a65ce18f416f3ed24c6df6b08d9c56787",
+    "relativePath": "server/data/uploads/1784184509019-File_AD-2-WSSS.pdf",
+    "reviewedAt": "2026-07-16T08:00:00.000Z",
+    "pages": [
+      {
+        "pageNo": 210,
+        "aipPageNo": "AD-2-WSSS-STAR-4",
+        "role": "PROCEDURE_DIAGRAM",
+        "evidence": [
+          {
+            "evidenceId": "ev_wsss_asuna_vector_text",
+            "modality": "PRINTED_TEXT",
+            "rawText": "FOR APPROACH RWY 20 EXPECT RADAR VECTORS"
+          },
+          {
+            "evidenceId": "ev_wsss_asuna_vector_geometry",
+            "modality": "VISUAL_GEOMETRY",
+            "rawText": "RADAR ROUTE",
+            "reviewedObservation": "A dashed radar route leaves the published route at NYLON; no fixed downstream waypoint is published on this chart."
+          }
+        ]
+      }
+    ]
+  },
+  "expectations": {
+    "nodes": [
+      { "identifier": "NYLON", "nodeType": "FIX", "evidenceIds": ["ev_wsss_asuna_vector_geometry"] }
+    ],
+    "edges": [
+      {
+        "edgeId": "edge_nylon_open_vector",
+        "fromIdentifier": "NYLON",
+        "toIdentifier": null,
+        "relation": "VECTOR",
+        "openEnded": true,
+        "evidenceIds": ["ev_wsss_asuna_vector_text", "ev_wsss_asuna_vector_geometry"]
+      }
+    ],
+    "branchPoints": [],
+    "mergePoints": [],
+    "requiredUnknowns": [
+      {
+        "path": "vector.toIdentifier",
+        "reason": "The downstream clearance is assigned by ATC and is not printed as a fixed endpoint on this chart.",
+        "evidenceIds": ["ev_wsss_asuna_vector_text", "ev_wsss_asuna_vector_geometry"]
+      }
+    ]
+  }
+}

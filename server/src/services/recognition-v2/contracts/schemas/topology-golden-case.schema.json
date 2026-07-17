@@ -1,0 +1,167 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-topology-golden-case.schema.json",
+  "title": "Recognition V2 topology golden case",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contractVersion",
+    "schemaId",
+    "caseId",
+    "category",
+    "airportIcao",
+    "procedureName",
+    "procedureType",
+    "source",
+    "expectations"
+  ],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-topology-golden-case.schema.json" },
+    "caseId": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]+$" },
+    "category": {
+      "enum": ["DME_ARC", "RF", "HOLDING", "VECTOR", "MISSED_APPROACH", "MULTI_BRANCH_MERGE"]
+    },
+    "airportIcao": { "type": "string", "pattern": "^[A-Z]{4}$" },
+    "procedureName": { "type": "string", "minLength": 1 },
+    "procedureType": { "enum": ["SID", "STAR", "APPROACH"] },
+    "source": { "$ref": "#/$defs/source" },
+    "expectations": { "$ref": "#/$defs/expectations" }
+  },
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publisher", "fileName", "documentSha256", "relativePath", "pages", "reviewedAt"],
+      "properties": {
+        "publisher": { "type": "string", "minLength": 1 },
+        "fileName": { "type": "string", "minLength": 1 },
+        "documentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "relativePath": { "type": "string", "minLength": 1 },
+        "reviewedAt": { "type": "string", "format": "date-time" },
+        "pages": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/sourcePage" }
+        }
+      }
+    },
+    "sourcePage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pageNo", "aipPageNo", "role", "evidence"],
+      "properties": {
+        "pageNo": { "type": "integer", "minimum": 1 },
+        "aipPageNo": { "type": "string", "minLength": 1 },
+        "role": { "enum": ["PROCEDURE_DIAGRAM", "PROCEDURE_LEG_TABLE"] },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceId", "modality", "rawText"],
+      "properties": {
+        "evidenceId": { "type": "string", "pattern": "^ev_[a-z0-9_]+$" },
+        "modality": { "enum": ["PRINTED_TEXT", "TABULAR_ROW", "VISUAL_GEOMETRY"] },
+        "rawText": { "type": "string", "minLength": 1 },
+        "reviewedObservation": { "type": "string", "minLength": 1 }
+      }
+    },
+    "expectations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges", "branchPoints", "mergePoints", "requiredUnknowns"],
+      "properties": {
+        "nodes": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/node" }
+        },
+        "edges": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/edge" }
+        },
+        "branchPoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphPoint" }
+        },
+        "mergePoints": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/graphPoint" }
+        },
+        "requiredUnknowns": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/requiredUnknown" }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "nodeType", "evidenceIds"],
+      "properties": {
+        "identifier": { "type": "string", "minLength": 1 },
+        "nodeType": { "enum": ["FIX", "NAVAID", "RUNWAY", "PSEUDO"] },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edgeId", "fromIdentifier", "toIdentifier", "relation", "evidenceIds"],
+      "properties": {
+        "edgeId": { "type": "string", "pattern": "^edge_[a-z0-9_]+$" },
+        "fromIdentifier": { "type": ["string", "null"] },
+        "toIdentifier": { "type": ["string", "null"] },
+        "relation": { "enum": ["TRACK", "ARC", "HOLD", "VECTOR", "MISSED_APPROACH"] },
+        "pathTerminator": { "type": "string" },
+        "turnDirection": { "enum": ["L", "R"] },
+        "centerIdentifier": { "type": "string" },
+        "radiusNm": { "type": "number", "exclusiveMinimum": 0 },
+        "distanceNm": { "type": "number", "exclusiveMinimum": 0 },
+        "inboundCourseDeg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360 },
+        "outboundCourseDeg": { "type": "number", "minimum": 0, "exclusiveMaximum": 360 },
+        "legTimeMinutes": { "type": "number", "exclusiveMinimum": 0 },
+        "minimumAltitudeFt": { "type": "number" },
+        "openEnded": { "type": "boolean" },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" }
+      }
+    },
+    "graphPoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["identifier", "connectedIdentifiers", "evidenceIds"],
+      "properties": {
+        "identifier": { "type": "string", "minLength": 1 },
+        "connectedIdentifiers": {
+          "type": "array",
+          "minItems": 2,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" }
+      }
+    },
+    "requiredUnknown": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "reason", "evidenceIds"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "reason": { "type": "string", "minLength": 1 },
+        "evidenceIds": { "$ref": "#/$defs/evidenceIds" }
+      }
+    },
+    "evidenceIds": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "type": "string", "pattern": "^ev_[a-z0-9_]+$" }
+    }
+  }
+}

@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-human-review-stage-result.schema.json",
+  "title": "Recognition V2 Human Review Stage Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "runId", "packageId", "status", "baselineFusionRef", "baselineValidationRef", "items", "evidence", "auditTrail", "summary", "createdAt", "updatedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-human-review-stage-result.schema.json" },
+    "runId": { "type": "string", "minLength": 1 },
+    "packageId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["IN_PROGRESS", "COMPLETED"] },
+    "baselineFusionRef": { "type": "string", "minLength": 1 },
+    "baselineValidationRef": { "type": "string", "minLength": 1 },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["reviewItemId", "reviewFingerprint", "procedureNames", "entityType", "entityKey", "fieldName", "suggestedValues", "candidateIds", "evidenceIds", "issueIds", "reasonCodes", "ruleIds", "duplicateCount", "critical", "status"],
+        "properties": {
+          "reviewItemId": { "type": "string", "minLength": 1 },
+          "reviewFingerprint": { "type": "string", "pattern": "^sha256:[a-f0-9]{64}$" },
+          "procedureNames": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "entityType": { "$ref": "recognition-v2-common.schema.json#/$defs/entityType" },
+          "entityKey": { "type": "string", "minLength": 1 },
+          "fieldName": { "type": "string", "minLength": 1 },
+          "currentValue": true,
+          "suggestedValues": { "type": "array" },
+          "candidateIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "evidenceIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "issueIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "reasonCodes": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "ruleIds": { "type": "array", "items": { "type": "string", "minLength": 1 }, "uniqueItems": true },
+          "duplicateCount": { "type": "integer", "minimum": 1 },
+          "critical": { "type": "boolean" },
+          "status": { "enum": ["PENDING", "CONFIRMED", "CORRECTED"] },
+          "correctedValue": true,
+          "reviewer": { "type": "string", "minLength": 1 },
+          "note": { "type": "string" },
+          "decidedAt": { "type": "string", "format": "date-time" }
+        }
+      }
+    },
+    "evidence": { "type": "array", "items": { "$ref": "recognition-v2-common.schema.json#/$defs/sourceEvidence" } },
+    "auditTrail": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["eventId", "reviewItemId", "action", "reviewer", "at"],
+        "properties": {
+          "eventId": { "type": "string", "minLength": 1 },
+          "reviewItemId": { "type": "string", "minLength": 1 },
+          "action": { "enum": ["CONFIRMED", "CORRECTED"] },
+          "reviewer": { "type": "string", "minLength": 1 },
+          "previousValue": true,
+          "value": true,
+          "note": { "type": "string" },
+          "at": { "type": "string", "format": "date-time" }
+          ,"reusedFromRunId": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["total", "pending", "confirmed", "corrected", "criticalPending", "mergedSignalCount", "reusedDecisionCount"],
+      "properties": {
+        "total": { "type": "integer", "minimum": 0 },
+        "pending": { "type": "integer", "minimum": 0 },
+        "confirmed": { "type": "integer", "minimum": 0 },
+        "corrected": { "type": "integer", "minimum": 0 },
+        "criticalPending": { "type": "integer", "minimum": 0 },
+        "mergedSignalCount": { "type": "integer", "minimum": 0 },
+        "reusedDecisionCount": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "reviewedValidation": { "$ref": "recognition-v2-validation-stage-result.schema.json" },
+    "reviewedFusionRef": { "type": "string", "minLength": 1 },
+    "reviewedValidationRef": { "type": "string", "minLength": 1 },
+    "canonicalPreviewRef": { "type": "string", "minLength": 1 },
+    "diffRef": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" }
+  }
+}

@@ -48,7 +48,13 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
       const recommendedNavaid = normalizedText(record.recommendedNavaid ?? '')
         || (isSidInitialNoFixCa({ isSid, fix, pathTerminator, sequenceValue, firstSequence }) ? sidInitialNavaid : undefined)
         || (pathTerminator === 'AF' || pathTerminator === 'IF' ? arcCenter : undefined);
+      const centerFix = normalizedText(record.centerFix ?? '')
+        || (pathTerminator === 'RF' ? arcCenter : undefined);
       const courseDegMag = optionalCourse(record.courseDegMag ?? record.courseDeg);
+      const courseDegTrue = optionalCourse(record.courseDegTrue ?? record.courseTrueDeg);
+      const magneticVariationDeg = optionalSignedNumber(record.magneticVariationDeg)
+        ?? courseVariation(courseDegMag, courseDegTrue)
+        ?? optionalSignedNumber(procedureUnderstanding.magneticVariationDeg);
       const holdingAtFix = Boolean(record.holdingAtFix) || holdingFixes.has(fix);
       // 过渡高度（424 第 95-99 列）是机场级信息，不映射进腿段第二高度
       const altitudeUpperFt = altitude.upper;
@@ -65,14 +71,21 @@ export function aiProcedureToSimpleLegs(procedureUnderstanding: ProcedureUnderst
         distanceNm: optionalDistance(record.distanceNm),
         altitudeRaw: altitude.raw,
         altitudeValue: altitude.value,
+        altitudeCode: altitude.code,
+        altitudeSourceUnit: altitude.sourceUnit,
         altitudeSign: altitude.sign,
         altitudeUpperFt,
         courseDegMag,
+        courseDegTrue,
+        magneticVariationDeg,
+        requiredNavigationPerformance: navigationPerformance(record.navigationSpecification),
         speedLimitKias: nonZeroNumberOrUndefined(record.speedLimitKias ?? record.speedLimit),
+        flyOver: record.flyOver === true || normalizedText(record.flyOver) === 'Y',
         holdingAtFix,
         endOfProcedure: Number.isFinite(sequenceValue) && sequenceValue === lastSequence,
         fixSection: inferredFixSection({ isSid, fix, sequenceValue, firstSequence, lastSequence }),
         recommendedNavaid: recommendedNavaid || undefined,
+        centerFix: centerFix || undefined,
         source: 'AI' as const,
         rawRecord: JSON.stringify(record),
       };
@@ -208,9 +221,28 @@ function optionalCourse(value: unknown) {
   return numberValue;
 }
 
+function optionalSignedNumber(value: unknown) {
+  const numberValue = numberOrUndefined(value);
+  return numberValue !== undefined && Math.abs(numberValue) <= 180 ? numberValue : undefined;
+}
+
+function courseVariation(magnetic: number | undefined, truth: number | undefined) {
+  if (magnetic === undefined || truth === undefined) return undefined;
+  const difference = ((magnetic - truth + 540) % 360) - 180;
+  return Math.abs(difference) <= 30 ? difference : undefined;
+}
+
+function navigationPerformance(value: unknown) {
+  const match = normalizedText(value).match(/\b(?:RNP|RNAV)\s*([0-9]+(?:\.[0-9]+)?)/);
+  const parsed = Number(match?.[1]);
+  return Number.isFinite(parsed) && parsed > 0 && parsed < 100 ? parsed : undefined;
+}
+
 interface AltitudeParts {
   raw?: string;
   value?: number;
+  code?: string;
+  sourceUnit?: 'FT' | 'M' | 'FL';
   sign?: '+' | '-' | '';
   upper?: number;
 }
@@ -243,6 +275,29 @@ function altitudeParts(value: unknown): AltitudeParts {
 
 function altitudeFromRaw(rawInput: string): AltitudeParts {
   const raw = rawInput.trim().toUpperCase();
+  const metric = raw.match(/([+-]?)\s*(\d{3,5}(?:\.\d+)?)\s*M(?:ETRES?|ETERS?)?\b/);
+  if (metric) {
+    const feet = Number(metric[2]) * 3.280839895;
+    const flightLevel = Math.round(feet / 100);
+    return {
+      raw: `${metric[1] || ''}${metric[2]}M`,
+      value: flightLevel * 100,
+      code: `FL${String(flightLevel).padStart(3, '0')}`,
+      sourceUnit: 'M',
+      sign: (metric[1] as '+' | '-' | '') || '',
+    };
+  }
+  const flightLevel = raw.match(/([+-]?)\s*FL\s*(\d{2,3})\b/);
+  if (flightLevel) {
+    const level = Number(flightLevel[2]);
+    return {
+      raw: `${flightLevel[1] || ''}FL${String(level).padStart(3, '0')}`,
+      value: level * 100,
+      code: `FL${String(level).padStart(3, '0')}`,
+      sourceUnit: 'FL',
+      sign: (flightLevel[1] as '+' | '-' | '') || '',
+    };
+  }
   const match = raw.match(/([+-]?)\s*(\d{3,5})/);
   if (!match) return { raw };
   // rawText 里跟在主高度后的第二个数字（如 "+01000 11000"）是机场过渡高度，
@@ -250,6 +305,8 @@ function altitudeFromRaw(rawInput: string): AltitudeParts {
   return {
     raw: `${match[1] || ''}${match[2]}`,
     value: Number(match[2]),
+    code: String(Number(match[2])).padStart(5, '0'),
+    sourceUnit: 'FT',
     sign: (match[1] as '+' | '-' | '') || '',
   };
 }

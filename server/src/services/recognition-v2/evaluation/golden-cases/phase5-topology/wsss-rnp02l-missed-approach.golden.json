@@ -1,0 +1,64 @@
+{
+  "contractVersion": "2.0.0-alpha.1",
+  "schemaId": "recognition-v2-topology-golden-case.schema.json",
+  "caseId": "wsss-rnp02l-missed-approach",
+  "category": "MISSED_APPROACH",
+  "airportIcao": "WSSS",
+  "procedureName": "RNP RWY 02L",
+  "procedureType": "APPROACH",
+  "source": {
+    "publisher": "Civil Aviation Authority Singapore",
+    "fileName": "File_AD-2-WSSS.pdf",
+    "documentSha256": "696482bb2aaf173c1ff558ca2b90265a65ce18f416f3ed24c6df6b08d9c56787",
+    "relativePath": "server/data/uploads/1784184509019-File_AD-2-WSSS.pdf",
+    "reviewedAt": "2026-07-16T08:00:00.000Z",
+    "pages": [
+      {
+        "pageNo": 254,
+        "aipPageNo": "AD-2-WSSS-IAC-9",
+        "role": "PROCEDURE_DIAGRAM",
+        "evidence": [
+          {
+            "evidenceId": "ev_wsss_missed_text",
+            "modality": "PRINTED_TEXT",
+            "rawText": "MISSED APPROACH: CLIMB DIRECT TO ENSUN. TURN LEFT TO AKOMA TO JOIN THE HOLDING AT 4000FT OR ABOVE OR AS DIRECTED BY ATC."
+          },
+          {
+            "evidenceId": "ev_wsss_missed_geometry",
+            "modality": "VISUAL_GEOMETRY",
+            "rawText": "RW02L -> ENSUN -> AKOMA",
+            "reviewedObservation": "The dashed missed-approach track starts at MAPT RW02L, climbs direct to ENSUN and continues left to AKOMA."
+          }
+        ]
+      }
+    ]
+  },
+  "expectations": {
+    "nodes": [
+      { "identifier": "RW02L", "nodeType": "RUNWAY", "evidenceIds": ["ev_wsss_missed_geometry"] },
+      { "identifier": "ENSUN", "nodeType": "FIX", "evidenceIds": ["ev_wsss_missed_text", "ev_wsss_missed_geometry"] },
+      { "identifier": "AKOMA", "nodeType": "FIX", "evidenceIds": ["ev_wsss_missed_text", "ev_wsss_missed_geometry"] }
+    ],
+    "edges": [
+      {
+        "edgeId": "edge_rw02l_ensun_missed",
+        "fromIdentifier": "RW02L",
+        "toIdentifier": "ENSUN",
+        "relation": "MISSED_APPROACH",
+        "evidenceIds": ["ev_wsss_missed_text", "ev_wsss_missed_geometry"]
+      },
+      {
+        "edgeId": "edge_ensun_akoma_missed",
+        "fromIdentifier": "ENSUN",
+        "toIdentifier": "AKOMA",
+        "relation": "MISSED_APPROACH",
+        "turnDirection": "L",
+        "minimumAltitudeFt": 4000,
+        "evidenceIds": ["ev_wsss_missed_text", "ev_wsss_missed_geometry"]
+      }
+    ],
+    "branchPoints": [],
+    "mergePoints": [],
+    "requiredUnknowns": []
+  }
+}

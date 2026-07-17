@@ -105,6 +105,51 @@ describe('Recognition V2 Phase 3 procedure table', () => {
     const toFixEvidence = result.output.extraction.evidence.find((item) => toFix?.sourceEvidenceIds.includes(item.evidenceId));
     assert.deepEqual(toFixEvidence?.bbox, [0.5, 0.32, 0.82, 0.38]);
   });
+
+  it('preserves magnetic and true course, magnetic variation, and turn as separate 424 fields', async () => {
+    const { task, group } = fixture();
+    const headers = ['SEQ', 'PATH TERM', 'FIX', 'COURSE', 'MAGNETIC VARIATION', 'TURN DIRECTION'];
+    const values = ['10', 'CF', 'HH311', '( ) 183 180', '3 0 +', 'R'];
+    const visionClient: VisionStageClient = async (request) => ({
+      parsedJson: {
+        pageNo: 1, regionId: 'p1-table', columnCount: headers.length,
+        rows: [
+          { rowIndex: 0, rowType: 'HEADER', rawText: headers.join(' | '), confidence: 0.99, cells: headers.map((rawText, columnIndex) => ({ columnIndex, rowSpan: 1, columnSpan: 1, rawText, confidence: 0.99 })) },
+          { rowIndex: 1, rowType: 'DATA', rawText: values.join(' | '), confidence: 0.98, cells: values.map((rawText, columnIndex) => ({ columnIndex, rowSpan: 1, columnSpan: 1, rawText, confidence: 0.98 })) },
+        ], warnings: [],
+      },
+      execution: executionRef(request, 'course-pair-model-run'), audit: auditValue(request),
+    });
+    const result = await executeProcedureTable({ task, group, layout: layout([tableRegion()]), model: 'test-vision', useModel: true, stageInputHash: 'sha256:course-pair', visionClient });
+    const fields = new Map(result.output.extraction.candidates.map((candidate) => [candidate.fieldName, candidate.normalizedValue]));
+    assert.equal(fields.get('courseDegMag'), 183);
+    assert.equal(fields.get('courseDegTrue'), 180);
+    assert.equal(fields.get('magneticVariationDeg'), 3);
+    assert.equal(fields.get('turnDirection'), 'R');
+  });
+
+  it('rejects an invalid model table and completes with deterministic recovery', async () => {
+    const { task, group, tablePage } = fixture();
+    tablePage.textLayerText = [
+      'SEQ  PATH TERM  WAYPOINT  COURSE  DISTANCE  ALTITUDE',
+      '10  TF  ALPHA  145°  12.5 NM  AT OR ABOVE 3000 FT',
+      '20  TF  BRAVO  160°  8.0 NM  5000 FT',
+    ].join('\n');
+    const visionClient: VisionStageClient = async (request) => ({
+      parsedJson: {
+        pageNo: 1,
+        regionId: 'p1-table',
+        rows: [{ rowType: 'header', cells: [{ rawText: 'PAGE HEADER', bbox: [0, 0, 120, 40] }] }],
+      },
+      execution: executionRef(request, 'invalid-table-model-run'),
+      audit: auditValue(request),
+    });
+    const result = await executeProcedureTable({ task, group, layout: layout([tableRegion()]), model: 'test-vision', useModel: true, stageInputHash: 'sha256:table', visionClient });
+    assert.equal(result.output.tables[0].analysisMethod, 'TEXT_RULES');
+    assert.ok(result.output.extraction.candidates.some((item) => item.fieldName === 'toFix' && item.normalizedValue === 'ALPHA'));
+    assert.ok(result.output.warnings.some((warning) => warning.includes('model result was rejected') || warning.includes('restoration was rejected')));
+    assert.equal(result.auditArtifacts.length, 1, 'invalid model response remains auditable');
+  });
 });
 
 describe('Recognition V2 Phase 3 waypoint and navaid extraction', () => {
@@ -151,6 +196,27 @@ describe('Recognition V2 Phase 3 waypoint and navaid extraction', () => {
     assert.ok(result.output.candidates.some((item) => item.entityKey === 'NAVAID:NDBX' && item.fieldName === 'latitude' && item.status === 'UNRESOLVED'));
   });
 
+  it('keeps vertically listed navaid rows separate and combines LOC plus DME for one identifier', async () => {
+    const { task, group, navaidPage } = fixture();
+    navaidPage.textLayerText = [
+      'Navaid', 'Frequency', 'Coordinates',
+      'SMT DVOR/DME', '114.8 MHZ', '(CH 95X)', '222015.43N 1135855.46E',
+      'IZSR DME', 'CH 46X', '221747.78N 1135409.48E',
+      'ITFR LOC', '108.75 MHZ',
+      'ITFR DME', 'CH 24Y', '221955.16N 1135438.56E',
+    ].join('\n');
+    const result = await executeWaypointNavaid({
+      task, group, layout: layout([navaidRegion()]), model: 'none', useModel: false, stageInputHash: 'sha256:navaid-table',
+    });
+    const value = (entity: string, field: string) => result.output.candidates.find((item) => item.entityKey === entity && item.fieldName === field)?.normalizedValue;
+    assert.equal(value('NAVAID:SMT', 'navaidType'), 'DVOR/DME');
+    assert.equal(value('NAVAID:IZSR', 'navaidType'), 'DME');
+    assert.equal(value('NAVAID:IZSR', 'frequency'), undefined);
+    assert.equal(value('NAVAID:ITFR', 'navaidType'), 'LOC/DME');
+    assert.equal(value('NAVAID:ITFR', 'frequency'), '108.75 MHZ');
+    assert.equal(value('NAVAID:ITFR', 'channel'), 'CH24Y');
+  });
+
   it('never accepts model-provided decimal coordinates without deterministic parsing of printed coordinate text', async () => {
     const { task, group } = fixture();
     const visionClient: VisionStageClient = async (request) => ({
@@ -186,6 +252,39 @@ describe('Recognition V2 Phase 3 waypoint and navaid extraction', () => {
     assert.ok(!result.output.candidates.some((item) => item.entityKey === 'FIX:ALPHA' && item.fieldName === 'latitude' && typeof item.value === 'number'));
     assert.ok(result.output.candidates.filter((item) => item.entityKey === 'FIX:ALPHA').every((item) => item.reviewRequired));
     assert.ok(result.output.warnings.some((warning) => warning.includes('could not be deterministically parsed')));
+    assert.equal(result.auditArtifacts.length, 1);
+  });
+
+  it('treats an all-null singleton model response as no observation and preserves deterministic coordinates', async () => {
+    const { task, group, coordinatePage } = fixture();
+    coordinatePage.textLayerText = 'ALPHA 012345N 1031234E';
+    const visionClient: VisionStageClient = async (request) => ({
+      parsedJson: {
+        pageNo: 2,
+        regionId: 'p2-coordinate',
+        identifier: null,
+        entityType: null,
+        coordinateText: null,
+        frequency: null,
+        channel: null,
+        navaidType: null,
+        rawText: null,
+        visualDescription: null,
+      },
+      execution: executionRef(request, 'empty-coordinate-model-run'),
+      audit: auditValue(request),
+    });
+    const result = await executeWaypointNavaid({
+      task,
+      group,
+      layout: layout([coordinateRegion()]),
+      model: 'test-vision',
+      useModel: true,
+      stageInputHash: 'sha256:coordinate',
+      visionClient,
+    });
+    assert.ok(result.output.candidates.some((item) => item.entityKey === 'FIX:ALPHA' && item.fieldName === 'latitude' && item.status === 'DERIVED'));
+    assert.ok(result.output.warnings.some((warning) => warning.includes('empty observation set')));
     assert.equal(result.auditArtifacts.length, 1);
   });
 });

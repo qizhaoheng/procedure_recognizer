@@ -1,0 +1,7 @@
+
+> procedure-recognizer@0.1.0 dev:server
+> tsx watch server/src/index.ts
+
+Procedure recognizer API listening on http://127.0.0.1:3317
+12:51:47 [tsx] change in ./server\src\services\recognition-v2\validation\semanticValidationExecutor.ts Rerunning...
+cProcedure recognizer API listening on http://127.0.0.1:3317

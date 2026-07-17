@@ -20,6 +20,10 @@ import { renderDynamicRegionCrop } from '../layout/dynamicRegionCrop';
 import { runVisionStage, type VisionStageClient } from '../orchestration/visionStageClient';
 import { readRecognitionV2Prompt } from '../prompts/promptResources';
 import type { StageAuditArtifact, StageAuditWriter } from '../layout/pageLayoutExecutor';
+import { locateLocalRasterEvidence, readLocalRasterOcrText } from '../tables/localRasterTableRecovery';
+import { extractProcedureNamesFromText } from './procedureTitleParser';
+
+export { extractProcedureNamesFromText } from './procedureTitleParser';
 
 const PROMPT_ID = 'v2_procedure_identity';
 const PROMPT_VERSION = '2.0.0-alpha.1';
@@ -70,24 +74,36 @@ export async function executeProcedureIdentity(input: {
   onAuditArtifact?: StageAuditWriter;
 }): Promise<ProcedureIdentityExecutionResult> {
   const pageByNo = new Map(input.task.pages.map((page) => [page.pageNo, page]));
+  const identityPages = identityPageNos(input.group, input.layout);
   const evidence: SourceEvidence[] = [];
   const candidates: FieldCandidate[] = [];
   const warnings: string[] = [];
   for (const layoutPage of input.layout.pages) {
+    if (!identityPages.has(layoutPage.pageNo)) continue;
     const page = pageByNo.get(layoutPage.pageNo);
     if (!page) {
       warnings.push(`Layout references missing task page ${layoutPage.pageNo}.`);
       continue;
     }
     addRuleCandidates(input.group, page, evidence, candidates);
+    if (page.imageUrl && pageText(page).trim().length < 200) {
+      try {
+        const rasterText = await readLocalRasterOcrText(page);
+        if (rasterText) await addRasterTitleCandidates(input.group, page, rasterText, evidence, candidates);
+      } catch (error) {
+        warnings.push(`Local raster identity recovery failed for page ${page.pageNo}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
   }
   addGroupFallbackCandidates(input.group, input.layout, pageByNo, evidence, candidates);
+  const airportMasterPageNos = addAirportMasterDataCandidates(input.task, input.group, evidence, candidates);
 
   const auditArtifacts: StageAuditArtifact[] = [];
   if (input.useModel) {
     const imageInputs = [];
     const allowedRegions = new Map<string, AllowedIdentityRegion>();
     for (const layoutPage of input.layout.pages) {
+      if (!identityPages.has(layoutPage.pageNo)) continue;
       const page = pageByNo.get(layoutPage.pageNo);
       if (!page?.imageUrl) continue;
       const titleRegions = layoutPage.regions.filter((region) => region.type === 'PROCEDURE_TITLE');
@@ -151,8 +167,8 @@ export async function executeProcedureIdentity(input: {
     contractVersion: RECOGNITION_V2_CONTRACT_VERSION,
     schemaId: RECOGNITION_V2_SCHEMA_IDS.extractionStageResult,
     taskType: 'PROCEDURE_IDENTITY',
-    pageNos: input.layout.pages.map((page) => page.pageNo),
-    regionIds: input.layout.pages.flatMap((page) => page.regions.filter((region) => region.type === 'PROCEDURE_TITLE').map((region) => region.regionId)),
+    pageNos: [...new Set([...identityPages, ...airportMasterPageNos])].sort((a, b) => a - b),
+    regionIds: input.layout.pages.filter((page) => identityPages.has(page.pageNo)).flatMap((page) => page.regions.filter((region) => region.type === 'PROCEDURE_TITLE').map((region) => region.regionId)),
     evidence: dedupeBy(evidence, (item) => item.evidenceId),
     candidates: dedupeBy(candidates, candidateKey),
     warnings: [...new Set(warnings)],
@@ -160,6 +176,123 @@ export async function executeProcedureIdentity(input: {
   };
   await assertValidExtractionStageResult(output);
   return { output, auditArtifacts };
+}
+
+function addAirportMasterDataCandidates(
+  task: ProcedureTask,
+  group: ProcedureGroup,
+  evidence: SourceEvidence[],
+  candidates: FieldCandidate[],
+) {
+  const pageNos = new Set([
+    ...(group.supportingInfoRefs?.airportMetadata ?? []),
+    ...(group.supportingInfoRefs?.communication ?? []),
+  ]);
+  const airportIcao = String(group.supportingInfoSummary?.airportMetadata?.airportIcao ?? '').trim().toUpperCase();
+  for (const page of task.pages.filter((item) => pageNos.has(item.pageNo))) {
+    const text = pageText(page).replace(/\s+/g, ' ');
+    const transition = text.match(/TRANSITION\s+ALTITUDE[^0-9]{0,30}(\d(?:[\d\s,.]*\d)?)\s*(FT|M)?/i);
+    if (transition) {
+      const numeric = Number(transition[1].replace(/[^0-9.]/g, ''));
+      const feet = transition[2]?.toUpperCase() === 'M' ? Math.round(numeric * 3.280839895) : numeric;
+      if (Number.isFinite(feet) && feet >= 1000 && feet <= 30000) {
+        addAirportField(page, airportIcao, 'transitionAltitudeFt', transition[0], Math.round(feet), 'ft');
+      }
+    }
+    const variation = text.match(/(?:MAG(?:NETIC)?\s+VAR(?:IATION)?|MAG\s+VAR)[^0-9]{0,20}(\d{1,2}(?:\.\d+)?)\s*(?:掳|°)?\s*([EW])/i);
+    if (variation) {
+      const magnitude = Number(variation[1]);
+      if (Number.isFinite(magnitude) && magnitude <= 30) {
+        addAirportField(page, airportIcao, 'magneticVariationDeg', variation[0], variation[2].toUpperCase() === 'W' ? magnitude : -magnitude, 'deg');
+      }
+    }
+  }
+  return [...pageNos];
+
+  function addAirportField(page: PdfPageAsset, icao: string, fieldName: string, rawText: string, value: number, unit: string) {
+    const entity = `AIRPORT:${icao || group.packageId || group.groupId}`;
+    const evidenceId = stableId('evidence', ['airport-master-data', page.pageNo, fieldName, rawText]);
+    evidence.push({
+      evidenceId,
+      fileName: page.sourceFileName || task.fileName,
+      pageNo: page.pageNo,
+      aipPageNo: page.aipPageNo,
+      sourceType: 'SUPPORTING_INFORMATION',
+      rawText,
+      visualDescription: `Deterministically parsed airport ${fieldName} from AIP AD supporting data.`,
+      extractionTask: 'PROCEDURE_IDENTITY',
+      confidence: 0.98,
+      status: 'OBSERVED',
+    });
+    candidates.push({
+      candidateId: stableId('candidate', ['airport-master-data', page.pageNo, fieldName, value]),
+      entityType: 'AIRPORT',
+      entityKey: entity,
+      fieldName,
+      value,
+      normalizedValue: value,
+      unit,
+      status: 'OBSERVED',
+      sourceEvidenceIds: [evidenceId],
+      confidence: 0.98,
+      reviewRequired: false,
+    });
+  }
+}
+
+async function addRasterTitleCandidates(
+  group: ProcedureGroup,
+  page: PdfPageAsset,
+  rasterText: string,
+  evidence: SourceEvidence[],
+  candidates: FieldCandidate[],
+) {
+  for (const observation of extractProcedureNamesFromText(rasterText)) {
+    if (hasEquivalentCandidate(candidates, 'procedureName', observation.name)) continue;
+    const evidenceId = stableId('evidence', ['local-raster-title', page.pageNo, observation.name, observation.rawText]);
+    const location = await locateLocalRasterEvidence(page, observation.name.split(/\s+/), 'PROCEDURE_TITLE');
+    evidence.push({
+      evidenceId,
+      fileName: page.sourceFileName || 'AIP AD-2',
+      pageNo: page.pageNo,
+      aipPageNo: page.aipPageNo,
+      bbox: location?.bbox,
+      sourceType: 'PROCEDURE_TITLE',
+      rawText: observation.rawText,
+      visualDescription: 'Locally OCR-recovered formal procedure title',
+      extractionTask: 'PROCEDURE_IDENTITY',
+      confidence: 0.88,
+      status: 'OBSERVED',
+    });
+    candidates.push({
+      candidateId: stableId('candidate', ['local-raster-title', page.pageNo, observation.name, observation.rawText]),
+      entityType: 'PROCEDURE',
+      entityKey: entityKey(group, 'PROCEDURE', observation.name),
+      fieldName: 'procedureName',
+      value: observation.name,
+      normalizedValue: normalizeIdentityValue('procedureName', observation.name),
+      status: 'OBSERVED',
+      sourceEvidenceIds: [evidenceId],
+      confidence: 0.88,
+      reviewRequired: true,
+    });
+  }
+}
+
+/**
+ * Supporting pages are useful to later extract navaids and notes, but they are
+ * not allowed to redefine the identity of this procedure package. Chart index
+ * pages in particular contain many unrelated procedures and otherwise create
+ * deterministic false conflicts.
+ */
+function identityPageNos(group: ProcedureGroup, layout: PageLayoutStageResult) {
+  const core = new Set([
+    ...(group.chartPages ?? []),
+    ...(group.tabularPages ?? []),
+    ...(group.textSupplementPages ?? []),
+  ]);
+  if (core.size) return core;
+  return new Set(layout.pages.map((page) => page.pageNo));
 }
 
 function addRuleCandidates(
@@ -174,8 +307,10 @@ function addRuleCandidates(
   addRuleValue(group, page, 'procedureCategory', header.procedureCategory === 'UNKNOWN' ? undefined : header.procedureCategory, 0.9, evidence, candidates);
   addRuleValue(group, page, 'navigationType', header.navigationType === 'UNKNOWN' ? undefined : header.navigationType, 0.86, evidence, candidates);
   addRuleValue(group, page, 'runway', header.runway, 0.88, evidence, candidates);
-  addRuleValue(group, page, 'chartNumber', header.aipPageNo, 0.94, evidence, candidates);
-  for (const name of header.procedureNames) addRuleValue(group, page, 'procedureName', name, 0.9, evidence, candidates);
+  if ((group.chartPages ?? []).includes(page.pageNo) || !(group.chartPages ?? []).length) {
+    addRuleValue(group, page, 'chartNumber', header.aipPageNo, 0.94, evidence, candidates);
+  }
+  for (const name of header.procedureNames.filter(plausibleProcedureName)) addRuleValue(group, page, 'procedureName', name, 0.9, evidence, candidates);
   for (const transition of page.pageClassification?.transitionNames ?? []) {
     addRuleValue(group, page, 'transitionName', transition, 0.86, evidence, candidates);
   }
@@ -192,19 +327,22 @@ function addGroupFallbackCandidates(
 ) {
   const firstPage = pageByNo.get(layout.pages[0]?.pageNo);
   if (!firstPage) return;
-  const existingFields = new Set(candidates.map((candidate) => candidate.fieldName));
+  const authoritativeGroup = group.confidence !== undefined && group.confidence >= 0.9 && /CHART_INDEX/i.test(group.source ?? '');
+  const confidenceFloor = authoritativeGroup ? Math.min(0.96, group.confidence!) : undefined;
   const values: Array<[keyof typeof FIELD_ENTITY, string | undefined, number]> = [
-    ['packageType', group.packageType, 0.7],
-    ['procedureCategory', group.procedureCategory === 'UNKNOWN' ? undefined : group.procedureCategory, 0.7],
-    ['navigationType', group.navigationType === 'UNKNOWN' ? undefined : group.navigationType, 0.68],
-    ['runway', group.runway, 0.68],
-    ['chartNumber', group.chartNo, 0.75],
+    ['packageType', group.packageType, confidenceFloor ?? 0.7],
+    ['procedureCategory', group.procedureCategory === 'UNKNOWN' ? undefined : group.procedureCategory, confidenceFloor ?? 0.7],
+    ['navigationType', group.navigationType === 'UNKNOWN' ? undefined : group.navigationType, confidenceFloor ?? 0.68],
+    ['runway', group.runway, confidenceFloor ?? 0.68],
+    ['chartNumber', group.chartNo, confidenceFloor ?? 0.75],
   ];
   for (const [field, value, confidence] of values) {
-    if (!existingFields.has(field)) addRuleValue(group, firstPage, field, value, confidence, evidence, candidates, true);
+    if (!hasEquivalentCandidate(candidates, field, value)) addRuleValue(group, firstPage, field, value, confidence, evidence, candidates, true, !authoritativeGroup);
   }
-  if (!existingFields.has('procedureName')) {
-    for (const name of group.procedureNames) addRuleValue(group, firstPage, 'procedureName', name, 0.68, evidence, candidates, true);
+  for (const name of group.procedureNames.filter(plausibleProcedureName)) {
+    if (!hasEquivalentCandidate(candidates, 'procedureName', name)) {
+      addRuleValue(group, firstPage, 'procedureName', name, confidenceFloor ?? 0.68, evidence, candidates, true, !authoritativeGroup);
+    }
   }
 }
 
@@ -217,6 +355,7 @@ function addRuleValue(
   evidence: SourceEvidence[],
   candidates: FieldCandidate[],
   metadataFallback = false,
+  forceReview = metadataFallback,
 ) {
   const normalized = String(value ?? '').trim();
   if (!normalized) return;
@@ -243,8 +382,21 @@ function addRuleValue(
     status: 'OBSERVED',
     sourceEvidenceIds: [evidenceId],
     confidence,
-    reviewRequired: metadataFallback || confidence < 0.75,
+    reviewRequired: forceReview || confidence < 0.75,
   });
+}
+
+function plausibleProcedureName(value: string) {
+  const text = value.trim().replace(/\s+/g, ' ');
+  if (!text || text.length > 80) return false;
+  if (/MISSED\s+APPROACH|TRANSITION\s+(?:LEVEL|ALT)|CATEGORY\s+OF\s+AIRCRAFT|\d{2,3}\s*[掳°]/i.test(text)) return false;
+  return /[A-Z]/i.test(text);
+}
+
+function hasEquivalentCandidate(candidates: FieldCandidate[], fieldName: keyof typeof FIELD_ENTITY, value: string | undefined) {
+  if (!value) return true;
+  const normalized = normalizeIdentityValue(fieldName, value);
+  return candidates.some((candidate) => candidate.fieldName === fieldName && candidate.normalizedValue === normalized);
 }
 
 function addModelCandidates(
@@ -275,8 +427,8 @@ function addModelCandidates(
         evidenceId,
         fileName: allowedRegion.fileName,
         pageNo: observation.pageNo,
-        aipPageNo: allowedRegion.aipPageNo,
-        regionId: observation.regionId,
+        aipPageNo: allowedRegion.aipPageNo ?? undefined,
+        regionId: observation.regionId ?? undefined,
         bbox: allowedRegion.bbox,
         sourceType: 'PROCEDURE_TITLE',
         rawText: observation.rawText || undefined,

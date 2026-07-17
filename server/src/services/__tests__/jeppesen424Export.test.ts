@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { aiProcedureToSimpleLegs } from '../jeppesen424/aiProcedureToSimpleLegs';
+import { enrichArinc424References } from '../jeppesen424/arinc424ReferenceEnricher';
+import { buildArinc424Coverage } from '../jeppesen424/arinc424Coverage';
 import { parseJeppesen424Text } from '../jeppesen424/jeppesen424TextParser';
 import { simpleLegsTo424Text } from '../jeppesen424/simpleLegsTo424Text';
 import { compareSimpleProcedureLegs } from '../jeppesen424/simpleProcedureComparator';
@@ -61,6 +63,150 @@ describe('Jeppesen 424 export', () => {
     assert.equal(result.procedureName, 'ADLOV 1E');
     assert.equal(result.score, 100);
     assert.equal(result.matchedLegs, aiLegs.length);
+  });
+
+  it('preserves reviewed fly-over coding through the 424 round trip', () => {
+    const legs = aiProcedureToSimpleLegs({
+      airportIcao: 'WMKJ',
+      runway: 'RW16',
+      packageType: 'SID',
+      navigationType: 'RNAV',
+      procedures: [{
+        procedureName: 'ADLOV 1E',
+        runway: 'RW16',
+        legs: [
+          { sequence: 10, fixIdentifier: 'PORPA', pathTerminator: 'TF', flyOver: true, speedLimitKias: 205 },
+          { sequence: 20, fixIdentifier: 'GOVNU', pathTerminator: 'TF' },
+        ],
+      }],
+    });
+    const text = simpleLegsTo424Text(legs, { airportIcao: 'WMKJ' });
+    assert.equal(text.split('\n')[0].slice(39, 41), 'EY');
+    const reparsed = parseJeppesen424Text(text);
+    assert.equal(reparsed[0].flyOver, true);
+    assert.equal(reparsed[0].speedLimitKias, 205);
+    assert.equal(compareSimpleProcedureLegs(legs, reparsed)[0].score, 100);
+  });
+
+  it('converts a published metric altitude to a deterministic flight-level token', () => {
+    const legs = aiProcedureToSimpleLegs({
+      airportIcao: 'VHHH',
+      packageType: 'SID',
+      navigationType: 'RNP',
+      procedures: [{
+        procedureName: 'BEKOL 5A',
+        runway: 'RW07R',
+        legs: [{ sequence: 80, fixIdentifier: 'BEKOL', pathTerminator: 'TF', altitudeConstraint: '+4800m' }],
+      }],
+    });
+    assert.equal(legs[0].altitudeSourceUnit, 'M');
+    assert.equal(legs[0].altitudeCode, 'FL157');
+    assert.equal(legs[0].altitudeValue, 15700);
+    const [primary] = simpleLegsTo424Text(legs, { airportIcao: 'VHHH' }).split('\n');
+    assert.equal(primary.slice(84, 89), 'FL157');
+    assert.equal(parseJeppesen424Text(primary)[0].altitudeValue, 15700);
+  });
+
+  it('uses the production VHHH terminal profile instead of hard-coded SPA/E/2 fields', () => {
+    const legs = aiProcedureToSimpleLegs({
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV',
+      procedures: [{ procedureName: 'BEKOL 5A', runway: 'RW07R', legs: [
+        { sequence: 10, fixIdentifier: 'HH301', pathTerminator: 'CF' },
+        { sequence: 80, fixIdentifier: 'BEKOL', pathTerminator: 'TF', altitudeConstraint: '+4800m' },
+      ] }],
+    });
+    const [first, , last] = simpleLegsTo424Text(legs, {
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV',
+    }).split('\n');
+    assert.equal(first.slice(0, 5), 'SPACP');
+    assert.equal(first[12], 'D');
+    assert.equal(first[19], 'N');
+    assert.equal(first.slice(34, 38), 'VHPC');
+    assert.equal(last.slice(34, 38), 'ZGEA');
+    assert.equal(last.slice(84, 89), 'FL157');
+  });
+
+  it('encodes RNP, transition altitude, turn, true-course variation and the controlled-magnetic-variation continuation', () => {
+    const canonical: ProcedureUnderstandingResult = {
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV', transitionAltitudeFt: 9000, magneticVariationDeg: 3,
+      procedures: [{ procedureName: 'BEKOL 5A', runway: 'RW07R', legs: [{
+        sequence: 10, fixIdentifier: 'HH301', pathTerminator: 'CF', courseDeg: 74, courseTrueDeg: 71,
+        turnDirection: 'R', navigationSpecification: 'RNP 1', recommendedNavaid: 'SMT',
+      }] }],
+    };
+    const legs = aiProcedureToSimpleLegs(canonical);
+    const [primary, continuation, variation] = simpleLegsTo424Text(legs, {
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV', transitionAltitudeFt: canonical.transitionAltitudeFt!,
+    }).split('\n');
+    assert.equal(primary[43], 'R');
+    assert.equal(primary.slice(44, 47), '010');
+    assert.equal(primary.slice(47, 49), 'CF');
+    assert.equal(primary.slice(50, 56), 'SMT VH');
+    assert.equal(primary.slice(70, 74), '0740');
+    assert.equal(primary.slice(94, 99), '09000');
+    assert.equal(primary.slice(106, 116), 'VHHH  VHPA');
+    assert.equal(continuation.slice(38, 40), '2P');
+    assert.equal(variation.slice(38, 40), '3E');
+    assert.equal(variation.slice(60, 66), 'W0030P');
+    assert.equal(variation.slice(118, 120), ' D');
+    assert.ok([primary, continuation, variation].every((line) => line.length === 132));
+  });
+
+  it('encodes an RF center fix independently from the recommended navaid field', () => {
+    const legs = aiProcedureToSimpleLegs({
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV',
+      procedures: [{ procedureName: 'BEKOL 1X', runway: 'RW07R', legs: [
+        { sequence: 30, fixIdentifier: 'HH341', pathTerminator: 'RF', centerFix: 'HH941', turnDirection: 'R', distanceNm: 3.1 },
+      ] }],
+    });
+    const [primary] = simpleLegsTo424Text(legs, { airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV' }).split('\n');
+    assert.equal(primary.slice(50, 56), '      ');
+    assert.equal(primary.slice(106, 116), 'HH941 VHPC');
+  });
+
+  it('never labels a procedure-only export as a complete airport 424 dataset', () => {
+    const canonical: ProcedureUnderstandingResult = {
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV',
+      runways: [{ identifier: 'RW07R' }], fixes: [{ identifier: 'HH301' }],
+      navaids: [{ identifier: 'SMT', navaidType: 'DVOR/DME' }],
+      procedures: [{ procedureName: 'BEKOL 5A', runway: 'RW07R', legs: [{ sequence: 10, fixIdentifier: 'HH301', pathTerminator: 'CF' }] }],
+    };
+    const legs = aiProcedureToSimpleLegs(canonical);
+    const text = simpleLegsTo424Text(legs, { airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV' });
+    const coverage = buildArinc424Coverage(canonical, legs, text, '2026-07-17T00:00:00.000Z');
+    assert.equal(coverage.releaseScope, 'PROCEDURE_PACKAGE');
+    assert.equal(coverage.airportComplete, false);
+    assert.equal(coverage.items.find((item) => item.category === 'PROCEDURE_LEG')?.status, 'COMPLETE');
+    assert.equal(coverage.items.find((item) => item.category === 'RUNWAY')?.status, 'NOT_EXPORTED');
+    assert.equal(coverage.items.find((item) => item.category === 'AIRPORT_PRIMARY')?.status, 'NOT_EXPORTED');
+  });
+
+  it('derives CF recommended-navaid theta/rho from AIP coordinates and refuses ambiguous station selection', () => {
+    const canonical: ProcedureUnderstandingResult = {
+      airportIcao: 'VHHH', packageType: 'SID', navigationType: 'RNAV', magneticVariationDeg: 3,
+      fixes: [
+        { identifier: 'HH301', latitude: 22.324725, longitude: 113.986558333 },
+        { identifier: 'HH311', latitude: 22.247872222, longitude: 114.086869444 },
+      ],
+      navaids: [{ identifier: 'SMT', navaidType: 'DVOR/DME', latitude: 22.337619444, longitude: 113.982072222 }],
+      procedures: [{ procedureName: 'BEKOL 5A', runway: 'RW07R', legs: [
+        { sequence: 10, fixIdentifier: 'HH301', pathTerminator: 'CF' },
+        { sequence: 30, fixIdentifier: 'HH311', pathTerminator: 'CF' },
+      ] }],
+    };
+    const enriched = enrichArinc424References(canonical, aiProcedureToSimpleLegs(canonical));
+    assert.equal(enriched.unresolvedCfLegs.length, 0);
+    assert.deepEqual(
+      enriched.legs.map((leg) => [leg.recommendedNavaid, leg.thetaDegMag, leg.rhoNm]),
+      [['SMT', 165.1, 0.8], ['SMT', 135.6, 7.9]],
+    );
+    assert.equal(enriched.legs[0].arincReferenceDerivation?.method, 'AIP_COORDINATE_GEOMETRY');
+
+    const ambiguous = structuredClone(canonical);
+    ambiguous.navaids!.push({ identifier: 'ITFR', navaidType: 'DVOR/DME', latitude: 22.3, longitude: 113.9 });
+    const unresolved = enrichArinc424References(ambiguous, aiProcedureToSimpleLegs(ambiguous));
+    assert.equal(unresolved.unresolvedCfLegs.length, 2);
+    assert.equal(unresolved.legs[0].recommendedNavaid, undefined);
   });
 
   it('preserves RNAV STAR entry coding and strips inferred TF turns', () => {

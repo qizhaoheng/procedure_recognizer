@@ -28,6 +28,7 @@ import { airportIcaoFromGroup, normalizeProcedureUnderstandingResult } from '../
 import { buildGroupingDebug } from '../services/procedurePackageGrouper';
 import { regroupPages } from '../services/procedureGrouper';
 import { getLlmRuntimeConfig } from '../services/llm/llmClient';
+import { locateLocalRasterEvidence } from '../services/recognition-v2/tables/localRasterTableRecovery';
 import type { AiInputPackage, EvaluationResult, GeoJsonRenderMode, ProcedureGroup, ProcedureUnderstandingResult } from '../types/procedure';
 import type { BuiltPrompt, PromptRunRecord } from '../services/prompt/promptTypes';
 
@@ -219,6 +220,24 @@ router.get('/:taskId/pages/:pageNo/image', async (req, res, next) => {
     res.sendFile(path.resolve(process.cwd(), 'server', 'data', page.imageUrl.replace(/^\/uploads\//, '')));
   } catch (error) {
     next(error);
+  }
+});
+
+router.get('/:taskId/pages/:pageNo/evidence-location', async (req, res, next) => {
+  try {
+    const task = await readTask(req.params.taskId);
+    const page = task.pages.find((item) => item.pageNo === Number(req.params.pageNo));
+    if (!page) return res.status(404).json({ error: 'PDF 页面不存在。' });
+    const rawTerms = Array.isArray(req.query.term) ? req.query.term : [req.query.term];
+    const terms = rawTerms.filter((term): term is string => typeof term === 'string').map((term) => term.trim()).filter(Boolean).slice(0, 12);
+    if (!terms.length) return res.status(400).json({ error: '缺少证据定位关键词。' });
+    const sourceType = typeof req.query.sourceType === 'string' ? req.query.sourceType : undefined;
+    const location = await locateLocalRasterEvidence(page, terms, sourceType);
+    if (!location) return res.status(404).json({ error: '该证据没有可验证的精确位置。' });
+    res.setHeader('Cache-Control', 'private, max-age=300');
+    return res.json(location);
+  } catch (error) {
+    return next(error);
   }
 });
 

@@ -18,6 +18,7 @@ import {
   Wand2,
 } from 'lucide-vue-next';
 import ProcedureMap from '../components/procedure/ProcedureMap.vue';
+import RecognitionV2Workbench from '../components/recognition-v2/RecognitionV2Workbench.vue';
 import type { LayerVisibility } from '../components/procedure/ProcedureLayerControl.vue';
 import { parseProcedureGeoJson } from '../utils/procedureGeojsonParser';
 import type {
@@ -47,15 +48,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 const route = useRoute();
 const router = useRouter();
 
-type StepKey = 'grouping' | 'request' | 'recognition' | 'preview' | 'jeppesen';
+type StepKey = 'grouping' | 'v2' | 'request' | 'recognition' | 'preview' | 'jeppesen';
 
 const steps: Array<{ key: StepKey; title: string }> = [
   { key: 'grouping', title: 'PDF 分组' },
-  { key: 'request', title: 'AI 请求预览' },
-  { key: 'recognition', title: 'AI 识别结果' },
-  { key: 'preview', title: 'GeoJSON 预览' },
+  { key: 'v2', title: '识别、校验与发布' },
 ];
-steps.push({ key: 'jeppesen', title: 'Jeppesen 424 对比' });
 const stepKeys = steps.map((step) => step.key);
 
 const statusLabels: Record<string, string> = {
@@ -506,6 +504,7 @@ const geojsonIssues = computed(() => {
 
 const stepDone = computed<Record<StepKey, boolean>>(() => ({
   grouping: Boolean(task.value?.groups.length && selectedGroup.value),
+  v2: ['APPROVED', 'COMPLETED'].includes(selectedGroup.value?.recognitionV2?.status ?? ''),
   request: Boolean(aiInputPackage.value),
   recognition: llmRunStatus.value === 'COMPLETED',
   preview: Boolean(selectedGroup.value?.geojson),
@@ -522,6 +521,12 @@ const requestSummaryText = computed(() => {
   const pkg = aiInputPackage.value;
   if (!pkg) return '';
   return `将发送 ${pkg.includedImages.length} 张图片、${pkg.includedSummaries.length} 类辅助摘要，模板 ${pkg.promptTemplate}。`;
+});
+
+const v2SummaryText = computed(() => {
+  const summary = selectedGroup.value?.recognitionV2;
+  if (!summary) return '';
+  return `活动识别任务：${summary.activeRunId}，状态 ${summary.status}。`;
 });
 
 const recognitionSummaryText = computed(() => {
@@ -550,10 +555,7 @@ const jeppesenSummaryText = computed(() => {
 
 const stepSummaries = computed(() => [
   { key: 'grouping', label: 'PDF 分组', text: groupingSummaryText.value },
-  { key: 'request', label: 'AI 请求', text: requestSummaryText.value },
-  { key: 'recognition', label: 'AI 识别', text: recognitionSummaryText.value },
-  { key: 'preview', label: 'GeoJSON', text: geojsonSummaryText.value },
-  { key: 'jeppesen', label: 'Jeppesen 424', text: jeppesenSummaryText.value },
+  { key: 'v2', label: '识别工作台', text: v2SummaryText.value },
 ].filter((item) => item.text));
 
 function stepState(key: StepKey) {
@@ -569,6 +571,15 @@ function stepStateLabel(key: StepKey) {
 function goToStep(step: StepKey) {
   currentStep.value = step;
   if (task.value) replaceRecognizerRoute(task.value.taskId, selectedGroup.value?.packageId || selectedGroupId.value || undefined);
+}
+
+function selectV2Package(packageId: string) {
+  const group = task.value?.groups.find((item) => item.groupId === packageId || item.packageId === packageId);
+  if (!group || !task.value) return;
+  selectedGroupId.value = group.groupId;
+  selectedPageNo.value = allGroupPages(group)[0] ?? task.value.pages[0]?.pageNo;
+  currentStep.value = 'v2';
+  replaceRecognizerRoute(task.value.taskId, group.packageId || group.groupId);
 }
 
 onBeforeUnmount(() => {
@@ -1779,7 +1790,7 @@ function isCancelledError(value: unknown) {
     <header class="topbar">
       <div class="title">
         <h1>PDF 程序识别流程</h1>
-        <p>上传 PDF 后，按步骤完成程序分组、AI识别和地图预览。{{ task?.fileName ? ` · ${task.fileName}` : '' }}</p>
+        <p>上传 PDF 后，在统一工作台完成识别、校验、GeoJSON、424 对比与发布。{{ task?.fileName ? ` · ${task.fileName}` : '' }}</p>
       </div>
       <div class="actions">
         <input ref="fileInput" class="file-input" type="file" accept="application/pdf,.pdf" @change="onFileSelected" />
@@ -1886,8 +1897,8 @@ function isCancelledError(value: unknown) {
             <p v-else class="empty">解析后自动生成程序包，也可以人工新建。</p>
 
             <div class="step-footer">
-              <button type="button" class="primary" :disabled="!selectedGroup" @click="goToStep('request')">
-                下一步：预览 AI 请求
+              <button type="button" class="primary" :disabled="!selectedGroup" @click="goToStep('v2')">
+                进入识别工作台
               </button>
             </div>
           </div>
@@ -1927,6 +1938,20 @@ function isCancelledError(value: unknown) {
             </div>
           </div>
         </div>
+      </section>
+
+      <!-- ==================== V2 分阶段识别工作台 ==================== -->
+      <section v-else-if="currentStep === 'v2'" class="step-panel">
+        <p v-if="!task || !selectedGroup" class="empty">请先返回 PDF 分组并选择程序包。</p>
+        <RecognitionV2Workbench
+          v-else
+          :task-id="task.taskId"
+          :package-id="selectedGroup.packageId || selectedGroup.groupId"
+          :package-name="selectedGroup.packageName || selectedGroup.groupName"
+          :packages="task.groups"
+          @updated="refreshTask(false)"
+          @select-package="selectV2Package"
+        />
       </section>
 
       <!-- ==================== Step 2：AI 请求预览 ==================== -->
@@ -2043,7 +2068,7 @@ function isCancelledError(value: unknown) {
             </span>
             <span v-if="llmRunStatus === 'RUNNING'">AI 识别中，完成后自动刷新结果...</span>
             <span v-else-if="llmRunStatus === 'ERROR'">{{ visionRunRecord?.errorMessage || selectedGroup.aiResponse?.errors?.[0] || 'AI 调用失败' }}</span>
-            <span v-else-if="llmRunStatus === 'NOT_STARTED'">尚未发送 AI 识别，请返回 Step 2 点击「发送 AI 识别」。</span>
+            <span v-else-if="llmRunStatus === 'NOT_STARTED'">尚未发送 AI 识别，请返回「AI 请求预览」步骤点击「发送 AI 识别」。</span>
           </div>
 
           <div v-if="classificationWarning" class="alert error">{{ classificationWarning }}</div>
@@ -2914,7 +2939,7 @@ button.ghost {
 
 .stepper {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(6, minmax(0, 1fr));
   gap: 8px;
   padding: 10px 16px;
   border-bottom: 1px solid #d7deea;

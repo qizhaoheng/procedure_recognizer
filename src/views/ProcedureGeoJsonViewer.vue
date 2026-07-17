@@ -22,7 +22,7 @@ const fileName = ref('');
 const fileInput = ref<HTMLInputElement>();
 const resetCounter = ref(0);
 const mapVersion = ref(0);
-const taskGeoJson = ref<{ taskId: string; packageId: string }>();
+const taskGeoJson = ref<{ taskId: string; packageId?: string; v2RunId?: string; airportMode?: boolean }>();
 const uploadStatus = ref('等待加载 GeoJSON');
 
 const activeModel = computed(() => model.value ?? emptyModel);
@@ -64,25 +64,53 @@ const featureSummary = computed(() => {
 onMounted(async () => {
   const taskId = String(route.query.taskId || '');
   const packageId = String(route.query.packageId || route.query.groupId || '');
+  const v2RunId = String(route.query.v2RunId || '');
+  const airportMode = String(route.query.airport || '') === '1';
+  if (taskId && airportMode) {
+    await loadAirportGeoJson(taskId);
+    return;
+  }
   if (taskId && packageId) {
-    await loadTaskGeoJson(taskId, packageId);
+    await loadTaskGeoJson(taskId, packageId, v2RunId || undefined);
     return;
   }
   if (restoreCachedGeoJson()) return;
   await loadDefaultSample();
 });
 
-async function loadTaskGeoJson(taskId: string, packageId: string) {
+async function loadAirportGeoJson(taskId: string) {
   loading.value = true;
   error.value = '';
-  taskGeoJson.value = { taskId, packageId };
-  uploadStatus.value = '正在加载任务 GeoJSON';
+  taskGeoJson.value = { taskId, airportMode: true };
+  uploadStatus.value = '正在加载 V2 机场级 GeoJSON 预览';
   try {
-    const response = await fetch(`/api/procedure-tasks/${encodeURIComponent(taskId)}/packages/${encodeURIComponent(packageId)}/geojson`);
+    const response = await fetch(`/api/procedure-tasks/${encodeURIComponent(taskId)}/recognition-v2/airport-geojson-preview`);
+    if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '机场 GeoJSON 加载失败');
+    const geojson = await response.json();
+    loadGeoJson(geojson, `${geojson.metadata?.airportIcao || taskId}-airport.geojson`, false);
+    uploadStatus.value = `已加载 ${geojson.metadata?.includedPackageCount || 0} 个生效程序包的机场级 GeoJSON`;
+  } catch (loadError) {
+    clearModelOnly();
+    error.value = loadError instanceof Error ? loadError.message : '机场 GeoJSON 加载失败';
+    uploadStatus.value = '机场结果加载失败';
+  } finally {
+    loading.value = false;
+  }
+}
+
+async function loadTaskGeoJson(taskId: string, packageId: string, v2RunId?: string) {
+  loading.value = true;
+  error.value = '';
+  taskGeoJson.value = { taskId, packageId, v2RunId };
+  uploadStatus.value = v2RunId ? '正在加载 V2 READY GeoJSON 预览' : '正在加载任务 GeoJSON';
+  try {
+    const response = await fetch(v2RunId
+      ? `/api/procedure-tasks/${encodeURIComponent(taskId)}/packages/${encodeURIComponent(packageId)}/recognition-v2/runs/${encodeURIComponent(v2RunId)}/geojson-preview`
+      : `/api/procedure-tasks/${encodeURIComponent(taskId)}/packages/${encodeURIComponent(packageId)}/geojson`);
     if (!response.ok) throw new Error((await response.json().catch(() => ({}))).error || '任务 GeoJSON 加载失败');
     const geojson = await response.json();
     loadGeoJson(geojson, `${taskId}-${packageId}.geojson`, false);
-    uploadStatus.value = '已从识别任务加载 GeoJSON';
+    uploadStatus.value = v2RunId ? '已加载 V2 READY 发布前 GeoJSON' : '已从识别任务加载 GeoJSON';
   } catch (loadError) {
     clearModelOnly();
     error.value = loadError instanceof Error ? loadError.message : '任务 GeoJSON 加载失败';
@@ -98,7 +126,8 @@ function backToRecognizer() {
     path: '/pdf-procedure-recognizer',
     query: {
       taskId: taskGeoJson.value.taskId,
-      packageId: taskGeoJson.value.packageId,
+      ...(taskGeoJson.value.packageId ? { packageId: taskGeoJson.value.packageId } : {}),
+      ...(taskGeoJson.value.v2RunId ? { v2RunId: taskGeoJson.value.v2RunId } : {}),
     },
   });
 }
@@ -106,7 +135,11 @@ function backToRecognizer() {
 function downloadGeoJson() {
   if (taskGeoJson.value) {
     const anchor = document.createElement('a');
-    anchor.href = `/api/procedure-tasks/${encodeURIComponent(taskGeoJson.value.taskId)}/packages/${encodeURIComponent(taskGeoJson.value.packageId)}/geojson/download`;
+    anchor.href = taskGeoJson.value.airportMode
+      ? `/api/procedure-tasks/${encodeURIComponent(taskGeoJson.value.taskId)}/recognition-v2/airport-geojson-preview?download=1`
+      : taskGeoJson.value.v2RunId
+      ? `/api/procedure-tasks/${encodeURIComponent(taskGeoJson.value.taskId)}/packages/${encodeURIComponent(taskGeoJson.value.packageId!)}/recognition-v2/runs/${encodeURIComponent(taskGeoJson.value.v2RunId)}/geojson-preview?download=1`
+      : `/api/procedure-tasks/${encodeURIComponent(taskGeoJson.value.taskId)}/packages/${encodeURIComponent(taskGeoJson.value.packageId!)}/geojson/download`;
     anchor.download = '';
     document.body.appendChild(anchor);
     anchor.click();

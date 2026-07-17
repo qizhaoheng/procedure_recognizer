@@ -20,7 +20,14 @@ export interface GeoJsonValidationResult {
   renderableCount: number;
 }
 
-export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGroup): GeoJsonValidationResult {
+export interface GeoJsonValidationExpectations {
+  airportIcao?: string;
+  runway?: string;
+  minimumProcedureLegCount?: number;
+  requireProcedureTrack?: boolean;
+}
+
+export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGroup, expectations: GeoJsonValidationExpectations = {}): GeoJsonValidationResult {
   const warnings: string[] = [];
   const errors: string[] = [];
 
@@ -30,6 +37,10 @@ export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGrou
 
   let hasLabelPoint = false;
   let renderableCount = 0;
+  let procedureLegCount = 0;
+  let procedureTrackCount = 0;
+  let chartAirport = '';
+  let chartRunway = '';
   const allowedSourcePages = group ? new Set([...(group.relatedPageNos ?? []), ...(group.supportingPages ?? [])]) : undefined;
   geojson.features.forEach((feature, index) => {
     const props = (feature.properties ?? {}) as Record<string, unknown>;
@@ -37,6 +48,12 @@ export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGrou
 
     if (!objectType) errors.push(`feature[${index}] is missing properties.object_type.`);
     if (objectType === 'LabelPoint') hasLabelPoint = true;
+    if (objectType === 'ProcedureLeg') procedureLegCount += 1;
+    if (objectType === 'ProcedureTrack' && feature.geometry) procedureTrackCount += 1;
+    if (objectType === 'ProcedureChart') {
+      chartAirport = String(props.airport_icao ?? '').trim().toUpperCase();
+      chartRunway = String(props.runway ?? '').trim().toUpperCase().replace(/^RWY/, 'RW');
+    }
     if (objectType === 'LabelPoint' && !props.label_text) errors.push(`feature[${index}] LabelPoint is missing label_text.`);
     if (objectType === 'ProcedureLeg' && (!props.procedure || !props.leg_seq || (!props.path_terminator && !props.leg_type))) {
       errors.push(`feature[${index}] ProcedureLeg is missing procedure, leg_seq, or path terminator.`);
@@ -68,6 +85,19 @@ export function validateProcedureGeoJson(geojson: unknown, group?: ProcedureGrou
   });
 
   if (!hasLabelPoint) warnings.push('GeoJSON does not include LabelPoint features; map labels may be incomplete.');
+  if (expectations.airportIcao && chartAirport !== expectations.airportIcao.trim().toUpperCase()) {
+    errors.push(`GeoJSON airport ${chartAirport || 'MISSING'} does not match ${expectations.airportIcao}.`);
+  }
+  const expectedRunway = expectations.runway?.trim().toUpperCase().replace(/^RWY/, 'RW');
+  if (expectedRunway && chartRunway !== expectedRunway) {
+    errors.push(`GeoJSON runway ${chartRunway || 'MISSING'} does not match ${expectedRunway}.`);
+  }
+  if (expectations.minimumProcedureLegCount !== undefined && procedureLegCount < expectations.minimumProcedureLegCount) {
+    errors.push(`GeoJSON has ${procedureLegCount} procedure leg geometries; expected at least ${expectations.minimumProcedureLegCount}.`);
+  }
+  if (expectations.requireProcedureTrack && procedureTrackCount === 0) {
+    errors.push('GeoJSON contains no rendered ProcedureTrack.');
+  }
   if (group && ['SID', 'STAR', 'APPROACH'].includes(group.packageType || '') && renderableCount === 0) {
     errors.push('GeoJSON contains no renderable geometry for map preview.');
   }

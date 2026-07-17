@@ -159,7 +159,7 @@ function extractSupportFields(page: PdfPageAsset, supportType: SupportType) {
     return {
       pageNo: page.pageNo,
       airspace: matches(compact, /\b(?:CTR|TMA)\b[^.;]{0,180}/gi),
-      transitionAltitude: compact.match(/TRANSITION ALTITUDE[^0-9]*(\d+\s*FT|\d+)/i)?.[1],
+      transitionAltitude: compact.match(/TRANSITION ALTITUDE[^0-9]*(\d(?:[\d\s,.]*\d)?\s*(?:FT|M)?)/i)?.[1]?.trim(),
       frequencies: matches(compact, /\b(?:APP|TWR|SMC|ATIS|RADAR|GROUND)\b[^.;\n]{0,100}?\d{3}\.\d{1,3}\s*MHz?/gi),
       callsigns: matches(compact, /\b[A-Z][A-Z ]{1,40}?\s(?:APPROACH|TOWER|GROUND|ATIS)\b/gi),
       textSample: compact.slice(0, 1200),

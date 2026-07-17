@@ -1,6 +1,6 @@
 import type { FieldCandidate, SourceEvidence } from '../contracts/index';
 
-export const FUSION_SOURCE_POLICY_VERSION = '1.0.0';
+export const FUSION_SOURCE_POLICY_VERSION = '1.1.0';
 export const FUSION_ENTITY_MATCH_POLICY_VERSION = '1.0.0';
 
 const MULTI_VALUE_FIELDS = new Set(['procedureName', 'transitionName', 'runway']);

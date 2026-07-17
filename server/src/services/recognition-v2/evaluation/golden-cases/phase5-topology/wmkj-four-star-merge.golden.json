@@ -1,0 +1,67 @@
+{
+  "contractVersion": "2.0.0-alpha.1",
+  "schemaId": "recognition-v2-topology-golden-case.schema.json",
+  "caseId": "wmkj-four-star-merge",
+  "category": "MULTI_BRANCH_MERGE",
+  "airportIcao": "WMKJ",
+  "procedureName": "WMKJ RWY 16 four-transition STAR merge",
+  "procedureType": "STAR",
+  "source": {
+    "publisher": "Civil Aviation Authority of Malaysia",
+    "fileName": "1-WM-AD-2.WMKJ-en-MS-202607.pdf",
+    "documentSha256": "0af784523c11d815ac5a89fc9d16ff3f4c6bdc389f76855bba3dfb5773c7dd0b",
+    "relativePath": "server/data/aip-procedure-agent/6051d4a9-c2a2-422c-8907-6a4b373e1db7/evaluation-input/1-WM-AD-2.WMKJ-en-MS-202607.pdf",
+    "reviewedAt": "2026-07-16T08:00:00.000Z",
+    "pages": [
+      {
+        "pageNo": 1,
+        "aipPageNo": "AD 2-WMKJ-7-5",
+        "role": "PROCEDURE_DIAGRAM",
+        "evidence": [
+          {
+            "evidenceId": "ev_wmkj_merge_geometry",
+            "modality": "VISUAL_GEOMETRY",
+            "rawText": "ADLOV 1G / EMTUV 1G / PIMOK 1G / OMKOM 1G -> 11 DME ARC VJB -> RDL340 VJB -> OSRUP",
+            "reviewedObservation": "Four published arrivals enter the common 11 DME arc at different radials and share the RDL340 VJB exit toward OSRUP."
+          }
+        ]
+      },
+      {
+        "pageNo": 2,
+        "aipPageNo": "AD 2-WMKJ-7-6",
+        "role": "PROCEDURE_LEG_TABLE",
+        "evidence": [
+          {
+            "evidenceId": "ev_wmkj_merge_rows",
+            "modality": "TABULAR_ROW",
+            "rawText": "ADLOV 1G, OMKOM 1G, PIMOK 1G and EMTUV 1G each join the 11 DME ARC VJB and intercept RDL-340 VJB for the straight-in approach RWY 16."
+          }
+        ]
+      }
+    ]
+  },
+  "expectations": {
+    "nodes": [
+      { "identifier": "RDL340_11DME_VJB", "nodeType": "PSEUDO", "evidenceIds": ["ev_wmkj_merge_geometry", "ev_wmkj_merge_rows"] },
+      { "identifier": "OSRUP", "nodeType": "FIX", "evidenceIds": ["ev_wmkj_merge_geometry"] }
+    ],
+    "edges": [
+      {
+        "edgeId": "edge_common_arc_exit_osrup",
+        "fromIdentifier": "RDL340_11DME_VJB",
+        "toIdentifier": "OSRUP",
+        "relation": "TRACK",
+        "evidenceIds": ["ev_wmkj_merge_geometry", "ev_wmkj_merge_rows"]
+      }
+    ],
+    "branchPoints": [],
+    "mergePoints": [
+      {
+        "identifier": "RDL340_11DME_VJB",
+        "connectedIdentifiers": ["RDL016_11DME_VJB", "RDL114_11DME_VJB", "RDL236_11DME_VJB", "RDL275_11DME_VJB"],
+        "evidenceIds": ["ev_wmkj_merge_geometry", "ev_wmkj_merge_rows"]
+      }
+    ],
+    "requiredUnknowns": []
+  }
+}

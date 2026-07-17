@@ -14,6 +14,9 @@ export const RECOGNITION_V2_SCHEMA_IDS = {
   validationStageResult: 'recognition-v2-validation-stage-result.schema.json',
   canonicalPreview: 'recognition-v2-canonical-preview.schema.json',
   v1V2DiffReport: 'recognition-v2-v1-v2-diff-report.schema.json',
+  topologyGoldenCase: 'recognition-v2-topology-golden-case.schema.json',
+  humanReviewStageResult: 'recognition-v2-human-review-stage-result.schema.json',
+  publicationWorkspace: 'recognition-v2-publication-workspace.schema.json',
 } as const;
 
 export type RecognitionV2Stage =
@@ -316,6 +319,71 @@ export interface ValidationStageResult extends ContractVersionRef<typeof RECOGNI
   completedAt: string;
 }
 
+export type HumanReviewItemStatus = 'PENDING' | 'CONFIRMED' | 'CORRECTED';
+
+export interface HumanReviewItem {
+  reviewItemId: string;
+  reviewFingerprint: string;
+  procedureNames: string[];
+  entityType: CandidateEntityType;
+  entityKey: string;
+  fieldName: string;
+  currentValue?: unknown;
+  suggestedValues: unknown[];
+  candidateIds: string[];
+  evidenceIds: string[];
+  issueIds: string[];
+  reasonCodes: string[];
+  ruleIds: string[];
+  duplicateCount: number;
+  critical: boolean;
+  status: HumanReviewItemStatus;
+  correctedValue?: unknown;
+  reviewer?: string;
+  note?: string;
+  decidedAt?: string;
+}
+
+export interface HumanReviewAuditEvent {
+  eventId: string;
+  reviewItemId: string;
+  action: 'CONFIRMED' | 'CORRECTED';
+  reviewer: string;
+  previousValue?: unknown;
+  value?: unknown;
+  note?: string;
+  at: string;
+  reusedFromRunId?: string;
+}
+
+export interface HumanReviewStageResult extends ContractVersionRef<typeof RECOGNITION_V2_SCHEMA_IDS.humanReviewStageResult> {
+  runId: string;
+  packageId: string;
+  status: 'IN_PROGRESS' | 'COMPLETED';
+  baselineFusionRef: string;
+  baselineValidationRef: string;
+  items: HumanReviewItem[];
+  evidence: SourceEvidence[];
+  auditTrail: HumanReviewAuditEvent[];
+  summary: {
+    total: number;
+    pending: number;
+    confirmed: number;
+    corrected: number;
+    criticalPending: number;
+    mergedSignalCount: number;
+    reusedDecisionCount: number;
+  };
+  reviewedValidation?: ValidationStageResult;
+  reviewedFusionRef?: string;
+  reviewedValidationRef?: string;
+  canonicalPreviewRef?: string;
+  diffRef?: string;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string;
+}
+
 export interface CanonicalPreviewArtifact extends ContractVersionRef<typeof RECOGNITION_V2_SCHEMA_IDS.canonicalPreview> {
   procedureUnderstanding: Record<string, unknown>;
   releaseDecision: ReleaseDecision;
@@ -339,4 +407,74 @@ export interface V1V2DiffReport extends ContractVersionRef<typeof RECOGNITION_V2
     onlyV2: number;
   };
   generatedAt: string;
+}
+
+export type PublicationStatus =
+  | 'STALE'
+  | 'LOCKED'
+  | 'PREFLIGHT_BLOCKED'
+  | 'PREFLIGHT_PASSED'
+  | 'DRY_RUN_READY'
+  | 'DIFF_REVIEW_REQUIRED'
+  | 'PUBLISHABLE'
+  | 'PUBLISHED'
+  | 'ROLLED_BACK';
+
+export interface PublicationCheck {
+  code: string;
+  status: 'PASS' | 'WARN' | 'BLOCK';
+  message: string;
+}
+
+export interface PublicationWorkspace extends ContractVersionRef<typeof RECOGNITION_V2_SCHEMA_IDS.publicationWorkspace> {
+  taskId: string;
+  packageId: string;
+  runId: string;
+  status: PublicationStatus;
+  lock: {
+    lockId: string;
+    sourcePackageHash: string;
+    canonicalHash: string;
+    canonicalPreviewRef: string;
+    reviewOutputRef: string;
+    lockedAt: string;
+  };
+  preflight?: { passed: boolean; checks: PublicationCheck[]; checkedAt: string };
+  dryRun?: {
+    text: string;
+    textHash: string;
+    lineCount: number;
+    simpleLegCount: number;
+    releaseScope?: 'PROCEDURE_PACKAGE';
+    airportComplete?: boolean;
+    coverage?: import('../../jeppesen424/arinc424Coverage').Arinc424CoverageItem[];
+    generatedAt: string;
+  };
+  diff?: {
+    accepted: boolean;
+    blockingDifferenceCount: number;
+    procedureResults: unknown[];
+    checkedAt: string;
+    acceptedAt?: string;
+  };
+  publishedReleaseId?: string;
+  updatedAt: string;
+}
+
+export interface PublicationRelease {
+  releaseId: string;
+  runId: string;
+  artifactRef: string;
+  canonicalHash: string;
+  textHash: string;
+  status: 'ACTIVE' | 'SUPERSEDED' | 'ROLLED_BACK';
+  publishedAt: string;
+  rolledBackAt?: string;
+}
+
+export interface PublicationLedger {
+  version: 1;
+  activeReleaseId?: string;
+  releases: PublicationRelease[];
+  updatedAt: string;
 }

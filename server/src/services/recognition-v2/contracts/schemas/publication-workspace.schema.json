@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-publication-workspace.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contractVersion", "schemaId", "taskId", "packageId", "runId", "status", "lock", "updatedAt"],
+  "properties": {
+    "contractVersion": { "const": "2.0.0-alpha.1" },
+    "schemaId": { "const": "recognition-v2-publication-workspace.schema.json" },
+    "taskId": { "type": "string", "minLength": 1 },
+    "packageId": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["STALE", "LOCKED", "PREFLIGHT_BLOCKED", "PREFLIGHT_PASSED", "DRY_RUN_READY", "DIFF_REVIEW_REQUIRED", "PUBLISHABLE", "PUBLISHED", "ROLLED_BACK"] },
+    "lock": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lockId", "sourcePackageHash", "canonicalHash", "canonicalPreviewRef", "reviewOutputRef", "lockedAt"],
+      "properties": {
+        "lockId": { "type": "string", "minLength": 1 }, "sourcePackageHash": { "type": "string", "minLength": 1 },
+        "canonicalHash": { "type": "string", "minLength": 1 }, "canonicalPreviewRef": { "type": "string", "minLength": 1 },
+        "reviewOutputRef": { "type": "string", "minLength": 1 }, "lockedAt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "preflight": {
+      "type": "object", "additionalProperties": false, "required": ["passed", "checks", "checkedAt"],
+      "properties": { "passed": { "type": "boolean" }, "checkedAt": { "type": "string" }, "checks": { "type": "array", "items": { "$ref": "#/$defs/check" } } }
+    },
+    "dryRun": {
+      "type": "object", "additionalProperties": false, "required": ["text", "textHash", "lineCount", "simpleLegCount", "generatedAt"],
+      "properties": {
+        "text": { "type": "string" }, "textHash": { "type": "string" }, "lineCount": { "type": "integer", "minimum": 0 }, "simpleLegCount": { "type": "integer", "minimum": 0 },
+        "releaseScope": { "const": "PROCEDURE_PACKAGE" }, "airportComplete": { "type": "boolean" },
+        "coverage": { "type": "array", "items": { "$ref": "#/$defs/coverage" } },
+        "generatedAt": { "type": "string" }
+      }
+    },
+    "diff": {
+      "type": "object", "additionalProperties": false, "required": ["accepted", "blockingDifferenceCount", "procedureResults", "checkedAt"],
+      "properties": { "accepted": { "type": "boolean" }, "blockingDifferenceCount": { "type": "integer", "minimum": 0 }, "procedureResults": { "type": "array" }, "checkedAt": { "type": "string" }, "acceptedAt": { "type": "string" } }
+    },
+    "publishedReleaseId": { "type": "string" },
+    "updatedAt": { "type": "string", "minLength": 1 }
+  },
+  "$defs": {
+    "check": { "type": "object", "additionalProperties": false, "required": ["code", "status", "message"], "properties": { "code": { "type": "string" }, "status": { "enum": ["PASS", "WARN", "BLOCK"] }, "message": { "type": "string" } } },
+    "coverage": {
+      "type": "object", "additionalProperties": false, "required": ["category", "sourceCount", "exportedCount", "status", "message"],
+      "properties": {
+        "category": { "enum": ["AIRPORT_PRIMARY", "RUNWAY", "VHF_NAVAID", "ILS_NAVAID", "TERMINAL_WAYPOINT", "PROCEDURE_LEG"] },
+        "sourceCount": { "type": "integer", "minimum": 0 }, "exportedCount": { "type": "integer", "minimum": 0 },
+        "status": { "enum": ["COMPLETE", "NOT_EXTRACTED", "NOT_EXPORTED", "PARTIAL"] }, "message": { "type": "string" }
+      }
+    }
+  }
+}

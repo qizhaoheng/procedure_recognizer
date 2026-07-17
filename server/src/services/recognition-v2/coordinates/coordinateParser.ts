@@ -17,13 +17,18 @@ interface CoordinatePattern {
 
 const patterns: CoordinatePattern[] = [
   {
+    format: 'SYMBOL_DMS',
+    regex: /\b(\d{1,2})\s*[\u00b0o]\s*(\d{1,2})\s*['\u2019]\s*(\d{1,2}(?:\.\d+)?)\s*(?:["\u201d]|'')?\s*([NS])\s*[,;/]?\s*(\d{1,3})\s*[\u00b0o]\s*(\d{1,2})\s*['\u2019]\s*(\d{1,2}(?:\.\d+)?)\s*(?:["\u201d]|'')?\s*([EW])\b/gi,
+    convert: (m) => pair(dms(m[1], m[2], m[3], m[4]), dms(m[5], m[6], m[7], m[8])),
+  },
+  {
     format: 'COMPACT_DMS',
     regex: /\b(\d{2})(\d{2})(\d{2}(?:\.\d+)?)\s*([NS])\s*[,;/]?\s*(\d{3})(\d{2})(\d{2}(?:\.\d+)?)\s*([EW])\b/gi,
     convert: (m) => pair(dms(m[1], m[2], m[3], m[4]), dms(m[5], m[6], m[7], m[8])),
   },
   {
     format: 'SYMBOL_DMS',
-    regex: /\b(\d{1,2})\s*°\s*(\d{1,2})\s*'\s*(\d{1,2}(?:\.\d+)?)\s*"?\s*([NS])\s*[,;/]?\s*(\d{1,3})\s*°\s*(\d{1,2})\s*'\s*(\d{1,2}(?:\.\d+)?)\s*"?\s*([EW])\b/gi,
+    regex: /\b(\d{1,2})\s*°\s*(\d{1,2})\s*'\s*(\d{1,2}(?:\.\d+)?)\s*(?:"|'')?\s*([NS])\s*[,;/]?\s*(\d{1,3})\s*°\s*(\d{1,2})\s*'\s*(\d{1,2}(?:\.\d+)?)\s*(?:"|'')?\s*([EW])\b/gi,
     convert: (m) => pair(dms(m[1], m[2], m[3], m[4]), dms(m[5], m[6], m[7], m[8])),
   },
   {

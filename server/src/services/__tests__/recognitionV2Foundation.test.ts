@@ -220,7 +220,7 @@ describe('recognition V2 API skeleton', () => {
       const createResponse = await fetch(`${base}/runs`, { method: 'POST' });
       assert.equal(createResponse.status, 201);
       const created = await createResponse.json() as { run: RecognitionV2RunManifest; executorsAvailable: RecognitionV2Stage[] };
-      assert.deepEqual(created.executorsAvailable, ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID', 'EVIDENCE_FUSION', 'SEMANTIC_VALIDATION']);
+      assert.deepEqual(created.executorsAvailable, ['PAGE_LAYOUT', 'PROCEDURE_IDENTITY', 'PROCEDURE_TABLE', 'WAYPOINT_NAVAID', 'NOTES_CONSTRAINTS', 'CHART_TOPOLOGY', 'EVIDENCE_FUSION', 'SEMANTIC_VALIDATION']);
       assert.equal(task.groups[0].recognitionV2?.activeRunId, created.run.runId);
 
       const stageResponse = await fetch(`${base}/runs/${created.run.runId}/stages/PAGE_LAYOUT/run`, {
@@ -287,25 +287,28 @@ describe('recognition V2 API skeleton', () => {
       assert.match(waypointBody.outputRef, /waypoint-navaid-stage-attempt-1\.json$/);
       assert.equal(waypointBody.result.taskType, 'WAYPOINT_NAVAID');
 
-      const unavailable = await fetch(`${base}/runs/${created.run.runId}/stages/NOTES_CONSTRAINTS/run`, { method: 'POST' });
-      assert.equal(unavailable.status, 501);
-      assert.equal((await unavailable.json() as { code: string }).code, 'V2_STAGE_EXECUTOR_NOT_AVAILABLE');
-      const unchangedNotes = await store.readRun('task_1', 'package_1', created.run.runId);
-      assert.equal(record(unchangedNotes, 'NOTES_CONSTRAINTS').status, 'PENDING');
-      assert.equal(record(unchangedNotes, 'NOTES_CONSTRAINTS').outputRef, undefined);
+      const notesResponse = await fetch(`${base}/runs/${created.run.runId}/stages/NOTES_CONSTRAINTS/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ useModel: false }),
+      });
+      assert.equal(notesResponse.status, 200);
+      const notesBody = await notesResponse.json() as { outputRef: string; result: { taskType: string } };
+      assert.match(notesBody.outputRef, /notes-constraints-stage-attempt-1\.json$/);
+      assert.equal(notesBody.result.taskType, 'NOTES_CONSTRAINTS');
 
       const prematureFusion = await fetch(`${base}/runs/${created.run.runId}/stages/EVIDENCE_FUSION/run`, { method: 'POST' });
       assert.equal(prematureFusion.status, 409);
       assert.equal((await prematureFusion.json() as { code: string }).code, 'DEPENDENCY_NOT_COMPLETED');
 
-      const missingReason = await fetch(`${base}/runs/${created.run.runId}/stages/NOTES_CONSTRAINTS/skip`, {
+      const missingReason = await fetch(`${base}/runs/${created.run.runId}/stages/CHART_TOPOLOGY/skip`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ reason: '' }),
       });
       assert.equal(missingReason.status, 400);
       assert.equal((await missingReason.json() as { code: string }).code, 'SKIP_REASON_REQUIRED');
-      for (const optionalStage of ['NOTES_CONSTRAINTS', 'CHART_TOPOLOGY']) {
+      for (const optionalStage of ['CHART_TOPOLOGY']) {
         const skipped = await fetch(`${base}/runs/${created.run.runId}/stages/${optionalStage}/skip`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -329,6 +332,28 @@ describe('recognition V2 API skeleton', () => {
       assert.ok(validationBody.auditRefs.some((ref) => ref.includes('canonical-preview')));
       assert.ok(validationBody.auditRefs.some((ref) => ref.includes('v1-v2-diff')));
       assert.equal(task.groups[0].procedureUnderstanding, undefined, 'Phase 4 preview must not overwrite V1 canonical data');
+
+      const initializeReviewResponse = await fetch(`${base}/runs/${created.run.runId}/review/initialize`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      assert.equal(initializeReviewResponse.status, 201);
+      const initializedReview = await initializeReviewResponse.json() as { review: { schemaId: string; status: string; updatedAt: string; summary: { total: number; criticalPending: number }; items: Array<{ reviewItemId: string; currentValue?: unknown; evidenceIds: string[] }> } };
+      assert.equal(initializedReview.review.schemaId, RECOGNITION_V2_SCHEMA_IDS.humanReviewStageResult);
+      assert.equal(initializedReview.review.status, 'IN_PROGRESS');
+      assert.ok(initializedReview.review.summary.total > 0);
+      assert.equal(initializedReview.review.summary.criticalPending, initializedReview.review.summary.total);
+      const getReviewResponse = await fetch(`${base}/runs/${created.run.runId}/review`);
+      assert.equal(getReviewResponse.status, 200);
+      const batchItem = initializedReview.review.items.find((item) => item.currentValue !== undefined && item.evidenceIds.length > 0);
+      assert.ok(batchItem);
+      const batchReviewResponse = await fetch(`${base}/runs/${created.run.runId}/review/batch`, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ expectedUpdatedAt: initializedReview.review.updatedAt, decisions: [{ reviewItemId: batchItem.reviewItemId, status: 'CONFIRMED' }] }),
+      });
+      assert.equal(batchReviewResponse.status, 200);
+      const batchReview = await batchReviewResponse.json() as { updatedItemCount: number; review: { items: Array<{ reviewItemId: string; reviewer?: string }> } };
+      assert.equal(batchReview.updatedItemCount, 1);
+      assert.equal(batchReview.review.items.find((item) => item.reviewItemId === batchItem.reviewItemId)?.reviewer, 'REVIEW_UI');
 
       const getResponse = await fetch(`${base}/runs/${created.run.runId}`);
       assert.equal(getResponse.status, 200);

@@ -118,6 +118,14 @@ export interface ProcedureGroup {
   tableCandidates?: TableCandidate[];
   aiRequest?: AiRequestRecord;
   aiResponse?: AiResponseRecord;
+  /** V2 大对象保存在独立 artifact 中；这里只保留活动运行摘要。 */
+  recognitionV2?: {
+    activeRunId: string;
+    status: string;
+    sourcePackageHash: string;
+    runRef: string;
+    updatedAt: string;
+  };
   procedureUnderstanding?: ProcedureUnderstandingResult;
   visionRunRecord?: VisionRunRecord;
   recognitionEvaluation?: EvaluationResult;

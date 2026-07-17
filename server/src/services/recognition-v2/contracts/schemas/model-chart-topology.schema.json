@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "recognition-v2-model-chart-topology.schema.json",
+  "title": "Recognition V2 Model Chart Topology",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["pageNo", "regionId", "nodes", "edges", "warnings"],
+  "properties": {
+    "pageNo": { "type": "integer", "minimum": 1 },
+    "regionId": { "type": "string", "minLength": 1 },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["identifier", "nodeType", "confidence"],
+        "properties": {
+          "identifier": { "type": "string", "pattern": "^[A-Z0-9]{2,8}$" },
+          "nodeType": { "enum": ["FIX", "NAVAID", "RUNWAY", "PSEUDO"] },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fromIdentifier", "toIdentifier", "relation", "turnDirection", "confidence"],
+        "properties": {
+          "fromIdentifier": { "type": ["string", "null"], "pattern": "^[A-Z0-9]{2,8}$" },
+          "toIdentifier": { "type": ["string", "null"], "pattern": "^[A-Z0-9]{2,8}$" },
+          "relation": { "enum": ["TRACK", "ARC", "HOLD", "VECTOR", "MISSED_APPROACH"] },
+          "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", null] },
+          "centerIdentifier": { "type": ["string", "null"], "pattern": "^[A-Z0-9]{2,8}$" },
+          "radiusNm": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+          "inboundCourseDeg": { "type": ["number", "null"], "minimum": 0, "exclusiveMaximum": 360 },
+          "legTimeMinutes": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+          "minimumAltitudeFt": { "type": ["number", "null"] },
+          "openEnded": { "type": "boolean" },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 }
+        }
+      }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } }
+  }
+}

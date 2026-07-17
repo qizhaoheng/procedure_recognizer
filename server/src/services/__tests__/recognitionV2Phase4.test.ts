@@ -41,12 +41,12 @@ describe('Recognition V2 Phase 4 evidence fusion', () => {
     assert.equal(output.selectedCandidateIds.includes('c_airport_b'), false);
   });
 
-  it('keeps a model-only value in preview but marks it unresolved and blocking', async () => {
+  it('keeps a model-only value in preview and routes it to human review without treating it as missing', async () => {
     const extraction = result([evidence('e_model', 1, true)], [candidate('c_model', 'AIRPORT', 'AIRPORT:VHHH', 'airportIcao', 'VHHH', 'e_model', true)]);
     const { output } = await executeEvidenceFusion({ packageId: 'P1', extractions: [extraction], now: NOW });
     assert.equal(output.entities[0].fields.airportIcao, 'VHHH');
     assert.equal(output.unresolvedItems[0].reasonCode, 'MODEL_ONLY');
-    assert.equal(output.unresolvedItems[0].blockingFor424, true);
+    assert.equal(output.unresolvedItems[0].blockingFor424, false);
   });
 
   it('does not admit a candidate whose claimed evidence record is missing', async () => {
@@ -86,6 +86,21 @@ describe('Recognition V2 Phase 4 deterministic validation', () => {
     assert.ok(output.issues.some((item) => item.ruleId === 'LEG_FIX_REFERENCE' && item.severity === 'BLOCKING'));
     assert.ok(output.issues.some((item) => item.ruleId === 'GEOMETRY_DISTANCE_MISMATCH' && item.severity === 'WARNING'));
     assert.equal(fusion.entities.find((item) => item.entityKey === 'LEG:2')!.fields.distanceNm, originalDistance);
+  });
+
+  it('does not compare a CF inbound course with the previous-fix straight-line bearing', async () => {
+    const fusion = fusionResult([
+      entity('AIRPORT', 'AIRPORT:P1', { airportIcao: 'VHHH' }),
+      entity('PROCEDURE', 'PROCEDURE:P1', { procedureName: ['BEKOL 5A'], procedureCategory: 'DEPARTURE', packageType: 'SID', navigationType: 'RNAV' }),
+      entity('FIX', 'FIX:PORPA', { identifier: 'PORPA', latitude: 22.33, longitude: 114.02 }),
+      entity('FIX', 'FIX:HH311', { identifier: 'HH311', latitude: 22.24, longitude: 114.05 }),
+      entity('LEG', 'LEG:1', { sequence: 10, pathTerminator: 'IF', toFix: 'PORPA' }),
+      entity('LEG', 'LEG:2', { sequence: 20, pathTerminator: 'CF', toFix: 'HH311', courseDegMag: 183 }),
+    ]);
+
+    const { output } = await executeSemanticValidation({ fusion, now: NOW });
+
+    assert.equal(output.issues.some((item) => item.ruleId === 'GEOMETRY_COURSE_MISMATCH'), false);
   });
 });
 

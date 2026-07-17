@@ -32,6 +32,24 @@ interface ModelLayoutObservation {
   warnings: string[];
 }
 
+const MODEL_PAGE_ROLES = new Set<PageRole>([
+  'PROCEDURE_DIAGRAM', 'PROCEDURE_LEG_TABLE', 'WAYPOINT_COORDINATE_TABLE', 'PROCEDURE_TITLE',
+  'PROCEDURE_NOTES', 'PROFILE_VIEW', 'MINIMA_TABLE', 'MSA', 'SUPPORTING_INFORMATION', 'UNKNOWN',
+]);
+
+const MODEL_ROLE_ALIASES: Record<string, PageRole> = {
+  CHART: 'PROCEDURE_DIAGRAM',
+  TITLE: 'PROCEDURE_TITLE',
+  NOTES: 'PROCEDURE_NOTES',
+  PROCEDURE_TABLE: 'PROCEDURE_LEG_TABLE',
+  TABULAR_DESCRIPTION: 'PROCEDURE_LEG_TABLE',
+  WAYPOINT_TABLE: 'WAYPOINT_COORDINATE_TABLE',
+  COORDINATE_TABLE: 'WAYPOINT_COORDINATE_TABLE',
+  AERODROME_DATA_TABLE: 'SUPPORTING_INFORMATION',
+  AD_DATA_TABLE: 'SUPPORTING_INFORMATION',
+  OPERATIONAL_HOURS_TABLE: 'SUPPORTING_INFORMATION',
+};
+
 export interface StageAuditArtifact {
   fileName: string;
   value: unknown;
@@ -55,6 +73,7 @@ export async function executePageLayout(input: {
   onAuditArtifact?: StageAuditWriter;
 }): Promise<PageLayoutExecutionResult> {
   const pages = corePages(input.task, input.group);
+  const modelEligiblePages = packageSpecificPageNos(input.group);
   if (!pages.length) throw new Error('PAGE_LAYOUT has no package pages to analyze.');
   const systemPrompt = await readRecognitionV2Prompt('page-layout.prompt.md');
   const modelSchema = input.useModel ? await readRecognitionV2Schema(MODEL_SCHEMA_ID) : undefined;
@@ -64,8 +83,11 @@ export async function executePageLayout(input: {
 
   for (const page of pages) {
     const rules = analyzePageLayoutWithRules(page);
-    if (!input.useModel || !page.imageUrl) {
+    if (!input.useModel || !page.imageUrl || !modelEligiblePages.has(page.pageNo)) {
       if (input.useModel && !page.imageUrl) rules.warnings.push('Vision model skipped because this page has no image asset.');
+      if (input.useModel && page.imageUrl && !modelEligiblePages.has(page.pageNo)) {
+        rules.warnings.push('Vision model intentionally skipped for a generic supporting page; rules-only layout retained.');
+      }
       await assertValidPageLayoutResult(rules);
       results.push(rules);
       continue;
@@ -74,7 +96,9 @@ export async function executePageLayout(input: {
     const pageInputHash = hashValue([input.stageInputHash, page.pageNo, rules]);
     const userPrompt = [
       `Page number: ${page.pageNo}`,
-      `Existing non-authoritative rule hints: ${JSON.stringify({ pageRoles: rules.pageRoles, regions: rules.regions })}`,
+      `Required response keys: pageNo, pageRoles, regions, warnings. Region keys: type, bbox, rotationDeg, readingOrder, confidence. Do not return regionId, pageNo or reviewRequired inside regions.`,
+      `Allowed role/type values: ${[...MODEL_PAGE_ROLES].join(', ')}.`,
+      `Existing non-authoritative rule hints: ${JSON.stringify({ pageRoles: rules.pageRoles, regions: rules.regions.map(modelRegionHint) })}`,
       `Extracted text hint (may be incomplete or wrongly ordered):\n${pageText(page).slice(0, 5000)}`,
     ].join('\n\n');
     const modelResult = await visionClient({
@@ -93,8 +117,9 @@ export async function executePageLayout(input: {
     const auditArtifact = { fileName: `page-layout-model-page-${page.pageNo}.json`, value: modelResult.audit };
     if (input.onAuditArtifact) await input.onAuditArtifact(auditArtifact);
     else auditArtifacts.push(auditArtifact);
-    await assertValidModelPageLayout(modelResult.parsedJson);
-    const observation = modelResult.parsedJson as ModelLayoutObservation;
+    const normalizedModelResult = normalizeModelLayoutObservation(modelResult.parsedJson);
+    await assertValidModelPageLayout(normalizedModelResult);
+    const observation = normalizedModelResult as ModelLayoutObservation;
     if (observation.pageNo !== page.pageNo) throw new Error(`Layout model returned page ${observation.pageNo} for page ${page.pageNo}.`);
     const merged = mergeLayout(rules, observation, modelResult.execution);
     await assertValidPageLayoutResult(merged);
@@ -110,6 +135,56 @@ export async function executePageLayout(input: {
   };
   await assertValidPageLayoutStageResult(output);
   return { output, auditArtifacts };
+}
+
+function modelRegionHint(region: PageRegion) {
+  return {
+    type: region.type,
+    bbox: region.bbox,
+    rotationDeg: region.rotationDeg,
+    readingOrder: region.readingOrder,
+    confidence: region.confidence,
+  };
+}
+
+export function normalizeModelLayoutObservation(value: unknown): unknown {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const source = value as Record<string, unknown>;
+  if (!Array.isArray(source.regions)) return value;
+  let normalized = !Array.isArray(source.pageRoles) || !Array.isArray(source.warnings);
+  const regions = source.regions.map((item) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return item;
+    const region = item as Record<string, unknown>;
+    const type = normalizeModelRole(region.type);
+    normalized ||= type !== region.type || Object.keys(region).some((key) => !['type', 'bbox', 'rotationDeg', 'readingOrder', 'confidence'].includes(key));
+    return {
+      type,
+      bbox: region.bbox,
+      rotationDeg: region.rotationDeg,
+      readingOrder: region.readingOrder,
+      confidence: region.confidence,
+    };
+  });
+  const hasSuppliedRoles = Array.isArray(source.pageRoles);
+  const suppliedRoles = hasSuppliedRoles ? source.pageRoles as unknown[] : [];
+  const pageRoles = [...new Set((hasSuppliedRoles ? suppliedRoles : regions.map((region) =>
+    region && typeof region === 'object' && !Array.isArray(region) ? (region as Record<string, unknown>).type : undefined))
+    .map(normalizeModelRole)
+    .filter((role): role is PageRole => typeof role === 'string'))];
+  const warnings = Array.isArray(source.warnings) ? source.warnings.filter((item): item is string => typeof item === 'string') : [];
+  if (normalized) warnings.push('Compatible model layout fields were normalized to the current V2 contract before validation.');
+  return {
+    pageNo: source.pageNo,
+    pageRoles: hasSuppliedRoles ? pageRoles : pageRoles.length ? pageRoles : ['UNKNOWN'],
+    regions,
+    warnings: [...new Set(warnings)],
+  };
+}
+
+function normalizeModelRole(value: unknown): unknown {
+  const role = String(value ?? '').trim().toUpperCase();
+  if (MODEL_PAGE_ROLES.has(role as PageRole)) return role as PageRole;
+  return MODEL_ROLE_ALIASES[role] ?? value;
 }
 
 function mergeLayout(rules: PageLayoutResult, model: ModelLayoutObservation, execution: ModelExecutionRef): PageLayoutResult {
@@ -152,6 +227,16 @@ function corePages(task: ProcedureTask, group: ProcedureGroup) {
   ]);
   const fallback = coreNos.size ? coreNos : new Set(packagePageNos(group));
   return task.pages.filter((page) => fallback.has(page.pageNo)).sort((a, b) => a.pageNo - b.pageNo);
+}
+
+function packageSpecificPageNos(group: ProcedureGroup) {
+  return new Set([
+    ...(group.chartPages ?? []),
+    ...(group.tabularPages ?? []),
+    ...(group.coordinatePages ?? []),
+    ...(group.minimaPages ?? []),
+    ...(group.textSupplementPages ?? []),
+  ]);
 }
 
 function pageText(page: PdfPageAsset) {

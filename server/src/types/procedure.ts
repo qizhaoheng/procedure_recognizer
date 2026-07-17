@@ -531,8 +531,13 @@ export interface TableLegItem {
   fromFix?: string | null;
   toFix?: string | null;
   courseDeg?: number | null;
+  courseTrueDeg?: number | null;
+  magneticVariationDeg?: number | null;
   distanceNm?: number | null;
   altitudeConstraint?: string | null;
+  speedLimitKias?: number | null;
+  navigationSpecification?: string | null;
+  flyOver?: boolean | null;
   turnDirection?: string | null;
   recommendedNavaid?: string | null;
   remarks?: string | null;
@@ -566,6 +571,10 @@ export interface ProcedureUnderstandingResult {
   procedureCategory?: string | null;
   navigationType?: string | null;
   runway?: string | null;
+  /** Airport transition altitude from AD 2 supporting data, in feet. */
+  transitionAltitudeFt?: number | null;
+  /** Airport magnetic variation; west is positive, east is negative. */
+  magneticVariationDeg?: number | null;
   procedureClassification?: ProcedureClassificationResult | null;
   procedureStructure?: ProcedureStructureDeclaration | null;
   chartTexts?: ChartTextItem[];

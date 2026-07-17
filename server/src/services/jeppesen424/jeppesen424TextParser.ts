@@ -62,6 +62,7 @@ interface PartialLeg {
   thetaDegMag?: number;
   rhoNm?: number;
   speedLimitKias?: number;
+  flyOver?: boolean;
   holdingAtFix?: boolean;
   endOfProcedure?: boolean;
   fixSection?: string;
@@ -114,6 +115,7 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
         current.thetaDegMag = extractTheta(line) ?? current.thetaDegMag;
         current.rhoNm = extractRho(line) ?? current.rhoNm;
         current.speedLimitKias = extractSpeedLimit(line) ?? current.speedLimitKias;
+        current.flyOver = line[40] === 'Y' || current.flyOver;
         current.holdingAtFix = line[42] === 'H' || current.holdingAtFix;
         current.recommendedNavaid = extractRecommendedNavaid(line) ?? current.recommendedNavaid;
       }
@@ -171,6 +173,7 @@ export function parseJeppesen424Text(text: string): SimpleProcedureLeg[] {
       thetaDegMag: item.thetaDegMag,
       rhoNm: item.rhoNm,
       speedLimitKias: item.speedLimitKias,
+      flyOver: item.flyOver ?? false,
       holdingAtFix: item.holdingAtFix ?? false,
       endOfProcedure: item.endOfProcedure ?? false,
       fixSection: item.fixSection,

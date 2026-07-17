@@ -1,0 +1,86 @@
+{
+  "contractVersion": "2.0.0-alpha.1",
+  "schemaId": "recognition-v2-topology-golden-case.schema.json",
+  "caseId": "vhhh-bekol1x-rf",
+  "category": "RF",
+  "airportIcao": "VHHH",
+  "procedureName": "BEKOL 1X",
+  "procedureType": "SID",
+  "source": {
+    "publisher": "Civil Aviation Department Hong Kong",
+    "fileName": "1-File_VH-AD-2-VHHH.pdf",
+    "documentSha256": "2edd493910458dc94570207cbda96df67df354ee99ac693c21969bf3c4ecda8c",
+    "relativePath": "server/data/aip-procedure-agent/b43161c9-bb60-4688-a46e-7394eeb5c030/evaluation-input/1-File_VH-AD-2-VHHH.pdf",
+    "reviewedAt": "2026-07-16T08:00:00.000Z",
+    "pages": [
+      {
+        "pageNo": 4,
+        "aipPageNo": "AD 2-VHHH-SID-BEKOL-X",
+        "role": "PROCEDURE_DIAGRAM",
+        "evidence": [
+          {
+            "evidenceId": "ev_vhhh_rf_chart",
+            "modality": "VISUAL_GEOMETRY",
+            "rawText": "Radius-to-fix (RF) leg is required.",
+            "reviewedObservation": "The chart shows two consecutive curved legs from PORPA via HH341 to HH342."
+          }
+        ]
+      },
+      {
+        "pageNo": 5,
+        "aipPageNo": "AD 2-VHHH-SID-BEKOL-X-1",
+        "role": "PROCEDURE_LEG_TABLE",
+        "evidence": [
+          {
+            "evidenceId": "ev_vhhh_rf_row_03",
+            "modality": "TABULAR_ROW",
+            "rawText": "03 | RF Centre: HH941 r=2.656 NM | HH341 | Distance 3.1 NM | Turn R | @210 KIAS | RNP 1"
+          },
+          {
+            "evidenceId": "ev_vhhh_rf_row_04",
+            "modality": "TABULAR_ROW",
+            "rawText": "04 | RF Centre: HH942 r=3.246 NM | HH342 | Distance 2.4 NM | Turn R | @230 KIAS | RNP 1"
+          }
+        ]
+      }
+    ]
+  },
+  "expectations": {
+    "nodes": [
+      { "identifier": "PORPA", "nodeType": "FIX", "evidenceIds": ["ev_vhhh_rf_chart"] },
+      { "identifier": "HH341", "nodeType": "FIX", "evidenceIds": ["ev_vhhh_rf_row_03"] },
+      { "identifier": "HH342", "nodeType": "FIX", "evidenceIds": ["ev_vhhh_rf_row_04"] },
+      { "identifier": "HH941", "nodeType": "FIX", "evidenceIds": ["ev_vhhh_rf_row_03"] },
+      { "identifier": "HH942", "nodeType": "FIX", "evidenceIds": ["ev_vhhh_rf_row_04"] }
+    ],
+    "edges": [
+      {
+        "edgeId": "edge_porpa_hh341_rf",
+        "fromIdentifier": "PORPA",
+        "toIdentifier": "HH341",
+        "relation": "ARC",
+        "pathTerminator": "RF",
+        "turnDirection": "R",
+        "centerIdentifier": "HH941",
+        "radiusNm": 2.656,
+        "distanceNm": 3.1,
+        "evidenceIds": ["ev_vhhh_rf_chart", "ev_vhhh_rf_row_03"]
+      },
+      {
+        "edgeId": "edge_hh341_hh342_rf",
+        "fromIdentifier": "HH341",
+        "toIdentifier": "HH342",
+        "relation": "ARC",
+        "pathTerminator": "RF",
+        "turnDirection": "R",
+        "centerIdentifier": "HH942",
+        "radiusNm": 3.246,
+        "distanceNm": 2.4,
+        "evidenceIds": ["ev_vhhh_rf_chart", "ev_vhhh_rf_row_04"]
+      }
+    ],
+    "branchPoints": [],
+    "mergePoints": [],
+    "requiredUnknowns": []
+  }
+}

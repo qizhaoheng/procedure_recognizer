@@ -1,6 +1,6 @@
 # AIP AD-2 → ARINC 424：V2 分阶段识别实施规划
 
-状态：Phase 4 核心融合与确定性校验链路完成；尚未进入生产准确率验收
+状态：Phase 5 核心链路完成（线性 RNAV SID 真实样例 READY）；复杂分支与特殊几何仍需扩展样例验收
 日期：2026-07-16  
 适用仓库：`procedure_recognizer`
 
@@ -642,7 +642,21 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 - `SEMANTIC_VALIDATION` 返回 `BLOCKED/REVIEW_REQUIRED/READY`；只有 `READY` 才把 run 标记为 `APPROVED`，但 Phase 6 前仍不允许写入 `group.procedureUnderstanding` 或正式 GeoJSON/424；
 - 当前测试仍以通用构造样例验证机制，不代表真实机场字段准确率；真实 AIP 分层标注、盲测和阈值制定仍是生产验收前置条件。
 
-### Phase 5：Chart 拓扑专项抽取
+### Phase 4.5：V2 可视化工作台（已完成）
+
+完成记录：
+
+- 在现有程序包流程中新增“V2 分阶段识别”步骤，保留 V1 请求、识别、地图和 424 页面；
+- 支持创建、选择、刷新和取消独立 V2 Run，并显示输入指纹、状态、进度和更新时间；
+- 十个阶段以依赖卡片展示，只有依赖满足时才允许执行；Notes 仍需填写原因后显式跳过，Chart 拓扑已可执行；
+- 模型调用默认关闭，可由操作员对支持模型的专项阶段主动开启；融合和校验始终使用确定性规则；
+- 候选表可以展开到 PDF 页码、来源类型、原文、模型/规则来源和置信度；
+- 冲突、未解决项、阻断规则、校验发布决定、canonical 预览和 V1/V2 字段差异均可直接查看；
+- 所有阶段原始 artifact 保留 JSON 审计入口；人工复核和正式发布继续锁定到 Phase 6；
+- 已使用真实 WSSS 程序包走通页面上的版式、身份、表格、坐标、显式跳过、融合和校验操作；页面正确显示 140 个候选、49 个融合疑点和 135 条校验问题，最终决定为 `BLOCKED`，未写入 V1；
+- 浏览器控制技能用于本地可视化和交互验收；前端无控制台错误，生产构建与 176 项全量回归通过。
+
+### Phase 5：Chart 拓扑专项抽取（核心链路已完成）
 
 交付：
 
@@ -654,7 +668,61 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 
 退出条件：Chart 只补充/验证拓扑和特殊几何，不直接描出最终正式坐标航迹。
 
-### Phase 6：人工复核与发布门禁
+完成记录：
+
+- `CHART_TOPOLOGY` 已成为正式执行器，显式依赖 `PAGE_LAYOUT + PROCEDURE_TABLE`，不再以空结果伪装完成；
+- 模型关闭时，从严格恢复的程序表行序确定性生成 `START/前序节点 → 当前节点` 拓扑边，每条边保留输入候选、规则版本和源证据；
+- 模型开启时，只允许在已裁剪的 `PROCEDURE_DIAGRAM` 区域观察可见节点和连续航迹，模型结果与表格推导保持独立，不能反算正式坐标或补造端点；
+- 支持 `TRACK/ARC/HOLD/VECTOR/MISSED_APPROACH` 关系，并根据节点入度/出度确定性派生分支和汇合候选；
+- 语义校验新增表格航段与拓扑边一致性、重复边、异常闭环和主图节点确认规则；
+- 工作台新增“航迹拓扑”页签，显示可审计边、主图确认节点、模型/规则来源和复核状态；
+- 同步修复三类已暴露的系统性假冲突：支持页污染程序身份、主图误当程序表、同名程序终点坐标被错误排除；
+- 程序表可确定恢复常见的 9 列 `Tabular Descriptions` 文本流，并把物理行序作为带推导链的序号候选；
+- 主图中明确打印的坐标可以作为节点坐标证据，仍禁止根据像素位置估算经纬度；
+- 真实 WSSS ANITO 7A 对照：旧 Phase 4.5 运行有 118 个 blocking issue；Phase 5 新运行 `v2_run_1784189688028_39f1f758` 得到 8 个正式航段、8 条拓扑边、8 个主图确认节点、0 冲突、0 未决、0 阻断和 `READY`；V1/GeoJSON/424 均未被写入；
+- 当前 `READY` 只证明这条线性 RNAV SID 样例通过，不代表 DME Arc、RF、Holding、Vector、Missed Approach 或多分支程序已经完成生产验收。
+
+### Phase 5.1：真实拓扑 Golden Case（已完成）
+
+完成记录：
+
+- 已按 DME Arc、RF、Holding、Vector、Missed Approach 和多分支汇合六类分别建立真实 golden case，覆盖 WMKJ、VHHH、WSSS 三个机场；
+- 每个 case 固定 PDF SHA-256、真实 PDF 页码、AIP 页码、原始文字/视觉证据、预期节点、边、特殊几何和必须保持未知的字段；
+- 新增版本化 Golden Case JSON Schema、统一加载器、证据完整性校验、拓扑评估器和本地 PDF 指纹复核；
+- Vector 的未公布终点正式表达为 `toIdentifier=null + openEnded=true`，模型 Schema 和 Prompt 不再强迫补造终点；
+- RF 表格支持通用的 `RF Centre/Center + identifier + r=... NM` 解析，拓扑边保留中心、半径、距离和转向；
+- 六类基准、三机场隔离、PDF 指纹、防幻觉失败和专项几何保留测试均已加入全量回归；
+- 详细基准矩阵见 `docs/recognition-v2-phase5.1-golden-cases.md`。
+
+边界：Golden case 建立代表验收真值已经固定，不代表六类在所有真实 PDF 上已达到生产准确率。后续必须逐 case 运行 V2 并按失败证据补通用能力。
+
+### Phase 5.4：发布审核闭环（已完成）
+
+完成记录：
+
+- 激活既有 `HUMAN_REVIEW` 阶段，以独立 V2 artifact 保存审核草稿、字段决议和不可变审计事件；
+- 融合未决项、开放冲突和校验问题按 `entityKey + fieldName` 聚合，依赖性坐标报错回收到根坐标字段，避免同一问题重复确认；
+- 审核项按程序归属展示，Fix/Navaid 会根据实际航段引用关联到使用它的程序，共享实体只审核一次；
+- 每个字段展示当前规范值、候选值、原始 PDF 页面、证据 bbox 红框、原文、来源类型和置信度；
+- 支持确认当前值或录入类型化修正值，强制记录审核人，可选记录说明；无当前值或无源证据的字段不能直接确认；
+- 修正只写入 reviewed fusion，不覆盖原始候选、V1 或正式 424；完成审核时重新运行全部确定性语义校验；
+- 仅当所有关键审核项已处理、重新校验无开放 BLOCKING/WARNING 时，`HUMAN_REVIEW` 完成并把 Run 从 `REVIEW_REQUIRED` 提升为 `APPROVED`，其发布决定为 `READY`；
+- 修正引入的新问题会刷新审核队列并拒绝完成，不能靠点击“通过”绕过发布门禁；
+- 详细接口、artifact 和边界见 `docs/recognition-v2-phase5.4-review-closure.md`。
+
+### Phase 5.4.1：审核效率优化与真实 READY 验收（已完成工程能力，等待人工真值确认）
+
+完成记录：
+
+- 字段门禁保持不变，工作台把同一 `FIX/NAVAID`、同一 `LEG` 和同一 `TOPOLOGY` 实体聚合为坐标行、航段行和拓扑关系业务卡片；
+- 一次业务卡片确认可原子写入多个字段决议，每个字段继续生成独立审计事件，不能用页面聚合掩盖字段级来源；
+- 含缺值、冲突或无证据字段的卡片禁止整卡确认，必须进入字段编辑器逐项修正；
+- 新增包级共享审核决议账本，只有 `sourcePackageHash + reviewFingerprint` 完全相同才允许跨 Run 复用；review fingerprint 包含实体、字段、当前值、候选值及原图证据内容；
+- 被复用的决议在目标 Run 中生成新的审计事件，并记录 `reusedFromRunId`，页面单独显示复用数量；
+- 支持关闭自动复用重新建立审核队列，不把复用当作模型自动批准；
+- 工程自动化可以验证批量决议、复用门禁和 READY 重算，但真实 AIP 数据的首次确认仍必须由人类审核员完成。
+
+### Phase 6：正式发布与现有基础设施接通
 
 交付：
 
@@ -662,7 +730,7 @@ POST /tasks/:taskId/packages/:packageId/recognition-v2/runs/:runId/publish-canon
 - 字段候选对比；
 - 冲突/未知/校验问题列表；
 - 人工决议审计记录；
-- approve/publish canonical；
+- publish canonical；
 - V2 结果驱动现有地图和 424。
 
 退出条件：审核者无需通读所有 PDF，即可定位和处理所有阻断项。
@@ -807,10 +875,10 @@ Phase 0 已交付：
 
 ## 20. 下一步
 
-Phase 4 核心代码完成后的下一步：
+Phase 5 核心代码完成后的下一步：
 
 1. 用至少三个机场的真实 AIP 建立按机场隔离的开发集、回归集和盲测集，并人工标注字段证据、冲突和预期发布决定；
 2. 针对真实数据补齐来源策略矩阵和字段级验收阈值，不能用构造测试通过代替业务准确率；
-3. 进入 Phase 5，建设 Chart 拓扑、分支/汇合和 DME Arc/RF/Holding 等专项候选，不让 Chart 覆盖正式坐标；
+3. 已完成多分支 SID/STAR、DME Arc、RF、Holding、Vector 和 Missed Approach 的首批真实 golden case；下一步逐 case 运行 V2、记录基线分数并降低失败项；
 4. 进入 Phase 6 前继续保持 Adapter 只读，禁止 V2 写入现有正式 GeoJSON/424 链路；
 5. Phase 6 建设证据审阅、冲突裁决、人工决议审计和明确的 publish-canonical 门禁。
