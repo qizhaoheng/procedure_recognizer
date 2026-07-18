@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { dmsToDecimal, geodesicForward, geodesicInverse, parseCoordinate } from '../coordinate';
 import { arc, compile424Candidate, compileGeoJson, validatePir } from '../compiler';
-import type { ProcedurePIR } from '../domain';
+import type { BusinessProcedurePackage, PageAsset, ProcedurePIR } from '../domain';
+import { derivePackageSources, selectGroupingImagePages } from '../orchestrator';
+import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
 
 test('parses compact AIP coordinates', () => { const value = parseCoordinate('N012030.00 E1034500.00'); assert.ok(Math.abs(value.latitude! - 1.3416667) < 1e-5); assert.equal(value.longitude, 103.75); });
 test('converts DMS and validates components', () => { assert.equal(dmsToDecimal(1, 30, 0, 'S'), -1.5); assert.throws(() => dmsToDecimal(1, 60, 0)); });
@@ -47,3 +49,145 @@ test('matches a spelled-out combined title to a numeric route designator', () =>
 });
 
 function samplePir(): ProcedurePIR { return { schemaVersion: '1.0.0', airport: { icao: 'WSSS', name: 'Singapore' }, procedure: { category: 'SID', identifier: 'TEST1A', name: 'TEST ONE ALPHA DEPARTURE', runways: ['02L'], navigationSpecification: 'RNAV 1' }, routes: [{ routeId: 'r1', routeType: 'RUNWAY_TRANSITION', identifier: 'RW02L', runway: '02L', legIds: ['l1'], sequence: 1 }], fixes: [{ fixId: 'a', identifier: 'AAAAA', type: 'WAYPOINT', latitude: 1.3, longitude: 103.8, coordinateSourceType: 'EXPLICIT_TABLE', evidence: ['e1'], confidence: .99, status: 'CONFIRMED', allowFor424: true }, { fixId: 'b', identifier: 'BBBBB', type: 'WAYPOINT', latitude: 1.4, longitude: 103.9, coordinateSourceType: 'EXPLICIT_TABLE', evidence: ['e2'], confidence: .99, status: 'CONFIRMED', allowFor424: true }], legs: [{ legId: 'l1', sequence: 10, routeId: 'r1', pathTerminator: 'TF', fromFixId: 'a', toFixId: 'b', course: 45, courseReference: 'MAGNETIC', distanceNm: 8, openEnded: false, evidence: ['e3'], confidence: .95, fieldStatus: { pathTerminator: 'CONFIRMED' }, warnings: [] }], notes: [], sourceEvidence: [], conflicts: [], validation: { results: [] }, quality: { confidence: .95, reviewRequired: false, unresolvedFields: [] } }; }
+
+// 回归：OMAA AD-2 实测版式。旧选图逻辑（仅按文本覆盖率升序）把 6 张图额度全花在
+// "PAGE INTENTIONALLY LEFT BLANK" 上，模型一张真实航图都没看到。实测修复后
+// 航图页正确的包 70→77、无航图页的包 8→0。
+// （注：拦掉 74 个包的并非此处，而是 preflight 里对 roleReason 的字符串匹配，见
+//  sourcePreflight.ts 的 CHART_PAGE_IS_ACTUALLY_TABLE 与下方 preflight 回归测试。）
+function omaaPage(pageNumber: number, vectorPathCount: number, nativeTextCoverage: number): PageAsset {
+  return { documentId: 'doc', fileName: 'OMAA.pdf', pageNumber, width: 842, height: 1191, rotation: 0, renderedImagePath: `page-${pageNumber}.png`, thumbnailPath: `thumb-${pageNumber}.png`, nativeText: 'x', textSpans: [], vectorPaths: [], vectorPathCount, embeddedImages: [], detectedTables: [], detectedLanguages: ['en'], quality: { isScanned: false, nativeTextCoverage, renderDpi: 200 }, summary: '' };
+}
+
+test('grouping image budget goes to charts, never to blank pages', () => {
+  const pages = [
+    omaaPage(65, 26, 0.006), omaaPage(69, 26, 0.006), omaaPage(71, 26, 0.006),
+    omaaPage(73, 26, 0.006), omaaPage(75, 26, 0.006), omaaPage(77, 26, 0.006),
+    omaaPage(43, 1203, 0.60), omaaPage(45, 1086, 0.56), omaaPage(49, 1772, 0.91),
+    omaaPage(107, 94762, 0.43), omaaPage(115, 93448, 0.35), omaaPage(117, 93191, 0.30),
+    omaaPage(141, 77912, 0.14), omaaPage(143, 77082, 0.13), omaaPage(147, 47338, 0.15),
+  ];
+  const selected = selectGroupingImagePages(pages, 6).map((p) => p.pageNumber);
+  assert.deepEqual(selected, [107, 115, 117, 141, 143, 147]);
+  for (const blank of [65, 69, 71, 73, 75, 77]) assert.ok(!selected.includes(blank), `blank page ${blank} must not consume the image budget`);
+  for (const table of [43, 45, 49]) assert.ok(!selected.includes(table), `table page ${table} must not outrank a chart page`);
+});
+
+test('scanned pages still outrank denser vector pages in the image budget', () => {
+  const scanned = omaaPage(9, 30, 0.0);
+  scanned.quality.isScanned = true;
+  scanned.quality.nativeTextCoverage = 0.05; // 非空白：无文字覆盖但确实需要看图
+  const selected = selectGroupingImagePages([omaaPage(107, 94762, 0.43), scanned], 2);
+  assert.deepEqual(selected.map((p) => p.pageNumber), [9, 107]);
+});
+
+test('falls back to the truncated array length for tasks stored before vectorPathCount existed', () => {
+  const legacy = omaaPage(115, 0, 0.35);
+  delete (legacy as { vectorPathCount?: number }).vectorPathCount;
+  legacy.vectorPaths = Array.from({ length: 5000 }, () => ({ operator: 'op' }));
+  assert.equal(pageVectorPathCount(legacy), 5000);
+});
+
+// ---- 来源完整性预检（sourcePreflight）----
+// 历史缺陷：旧检查要求模型自由文本 roleReason 里字面出现 "chart topology"/"visual chart"，
+// 而分组 schema 是 additionalProperties:false 且未定义 roleReasons，模型结构上无法输出该字段。
+// 于是条件恒为真，每个航图页都被判为"实为表格"——OMAA 82 个包里 70 个是这样被误拦的。
+// 现改为包内相对比较：图页算子数须达本包表格页的 3 倍。
+function pkgWith(pages: Array<{ page: number; role: string }>, name = 'ATUDO 5F', category: 'SID' | 'STAR' | 'APPROACH' = 'SID'): BusinessProcedurePackage {
+  return {
+    packageId: 'pkg', procedureKey: 'k', category: 'SID', procedureName: name, runways: ['13L'],
+    sources: { primaryCharts: [], procedureTables: [], coordinateTables: [], runwayPages: [], navaidPages: [], sharedNotes: [], profilePages: [], minimaPages: [], relatedPages: [] },
+    confidence: 1, warnings: [], procedureCategory: category, navigationType: 'RNAV 1',
+    packagePages: pages.map((p) => ({ documentId: 'doc', fileName: 'OMAA.pdf', pageNumber: p.page, pageRole: p.role, isShared: false, confidence: 1 })),
+    groupingConfidence: 1, groupingReason: 'r', status: 'GROUPED',
+  } as BusinessProcedurePackage;
+}
+// 含机场平面图这个极端离群值（258 万算子）——早期的"语料级最大倍差分界"会被它带偏到
+// 2585709，导致连真航图 p115 都低于分界、82 个包全被拦。回归必须覆盖它。
+const omaaCorpus = [omaaPage(23, 1226, 0.63), omaaPage(43, 1203, 0.60), omaaPage(65, 26, 0.006), omaaPage(115, 93448, 0.35), omaaPage(64, 2585709, 0.39)];
+
+test('a genuine chart page passes preflight (the roleReason check blocked 70 of 82 OMAA packages)', () => {
+  const pkg = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
+  assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 0);
+  assert.equal(pkg.sourceCompleteness!.chart, 'PRESENT');
+  assert.equal(pkg.status, 'GROUPED', '真航图不得被降级为需复核');
+});
+
+test('an extreme outlier page does not drag the chart criterion up', () => {
+  // p64 是机场平面图（258 万算子）。判据只看本包内的图/表比，离群值不参与。
+  const pkg = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
+  assert.equal(pkg.preflight!.preflightPassed, true, '离群值不得把真航图判成表格');
+});
+
+test('a coding-table page declared as chart is still blocked', () => {
+  const pkg = assessPackageSources(pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
+  assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 1);
+  assert.equal(pkg.packageStatus, 'SOURCE_AMBIGUOUS');
+  assert.equal(pkg.status, 'REQUIRES_REVIEW');
+});
+
+test('with no table page to compare against, preflight refuses to guess', () => {
+  const pkg = assessPackageSources(pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }]), omaaCorpus);
+  assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 0, '无基准时不得拦截');
+  assert.ok(pkg.preflight!.blockingIssues.some((i) => i.code === 'TABLE_MISSING'), '缺表另行报告');
+});
+
+test('a package with no chart page at all is blocked as CHART_MISSING', () => {
+  const pkg = assessPackageSources(pkgWith([{ page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
+  assert.ok(pkg.preflight!.blockingIssues.some((i) => i.code === 'CHART_MISSING'));
+  assert.equal(pkg.sourceCompleteness!.chart, 'MISSING');
+});
+
+test('an RNP AR approach name keeps its identity despite the (AR) suffix', () => {
+  // 归一化成 RNPYRWY13LAR；原实现把跑道号锚定在串尾，尾部的 AR 会让它失配，
+  // OMAA 4 个 RNP AR 进近因此被误报 PROCEDURE_IDENTITY_UNCLEAR。
+  const pkg = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }], 'RNP Y RWY 13L (AR)', 'APPROACH'), omaaCorpus);
+  assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'PROCEDURE_IDENTITY_UNCLEAR').length, 0);
+});
+
+test('an approach package that names no runway is still identity-unclear', () => {
+  const pkg = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }], 'AREA MINIMA', 'APPROACH'), omaaCorpus);
+  assert.ok(pkg.preflight!.blockingIssues.some((i) => i.code === 'PROCEDURE_IDENTITY_UNCLEAR'));
+});
+
+// ---- 图/表角色倒置的确定性纠正 ----
+// OMAA 进近编码表每份两页：首页带小节号，续页只有列头。续页无身份信息，模型把它
+// 填进 PROCEDURE_CHART，真航图反被挤进 PROCEDURE_TABLE。实测触发 5 次、零误触，
+// 纠正后预检通过 73 -> 78。
+test('an inverted chart/table role pair is swapped back by density', () => {
+  const pkg = pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }, { page: 115, role: 'PROCEDURE_TABLE' }], 'RNP Y RWY 13L (AR)', 'APPROACH');
+  const repair = repairInvertedChartRoles(pkg, omaaCorpus);
+  assert.ok(repair, '倒置必须被检出');
+  assert.equal(repair!.promotedPage, 115);
+  assert.equal(repair!.demotedPage, 43);
+  assert.equal(pkg.packagePages.find((p) => p.pageNumber === 115)!.pageRole, 'PROCEDURE_CHART');
+  assert.equal(pkg.packagePages.find((p) => p.pageNumber === 43)!.pageRole, 'PROCEDURE_TABLE');
+  assert.ok(pkg.warnings.some((w) => w.startsWith('ROLE_SWAPPED_BY_DENSITY')), '确定性覆盖必须留痕');
+});
+
+test('a correctly assigned package is left alone', () => {
+  const pkg = pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]);
+  assert.equal(repairInvertedChartRoles(pkg, omaaCorpus), undefined, '正常包不得被误触');
+  assert.equal(pkg.packagePages.find((p) => p.pageNumber === 115)!.pageRole, 'PROCEDURE_CHART');
+  assert.equal(pkg.warnings.length, 0, '未纠正就不该留痕');
+});
+
+test('repair then preflight clears the chart-role blocker', () => {
+  const pkg = pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }, { page: 115, role: 'PROCEDURE_TABLE' }], 'RNP Y RWY 13L (AR)', 'APPROACH');
+  repairInvertedChartRoles(pkg, omaaCorpus);
+  const assessed = assessPackageSources(pkg, omaaCorpus);
+  assert.equal(assessed.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 0);
+});
+
+test('sources stays consistent with packagePages after a role swap', () => {
+  // sources 是 packagePages 的派生视图。忘记重算会让两份表述打架：
+  // packagePages 说 p115 是图页，而 sources.primaryCharts 还停留在 p43。
+  const pages = omaaCorpus.map((p, i) => ({ ...p, globalPageNumber: i + 1 }));
+  const task = { pages } as unknown as Parameters<typeof derivePackageSources>[1];
+  const pkg = pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }, { page: 115, role: 'PROCEDURE_TABLE' }], 'RNP Y RWY 13L (AR)', 'APPROACH');
+  repairInvertedChartRoles(pkg, pages);
+  pkg.sources = derivePackageSources(pkg.packagePages, task);
+  const chartGlobals = pages.filter((p) => p.pageNumber === 115).map((p) => p.globalPageNumber);
+  assert.deepEqual(pkg.sources.primaryCharts, chartGlobals, 'sources.primaryCharts 必须跟随 pageRole 更新');
+  assert.ok(!pkg.sources.primaryCharts.includes(pages.find((p) => p.pageNumber === 43)!.globalPageNumber));
+});
