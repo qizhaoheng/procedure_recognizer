@@ -7,6 +7,7 @@ import { budgets, callModel } from './modelGateway';
 import { executeCorrectiveLegExtraction, executePlannedRecognition, materializeEvidenceCrops } from './planExecutor';
 import { carryOverManualEdits } from './fragmentMerger';
 import { deviationsToValidations, verifyAgainstSourceChart } from './chartOverlay';
+import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from './sourcePreflight';
 import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan } from './domain';
 import { PdfDocumentTools } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
@@ -54,6 +55,14 @@ async function analyzeAirportFiles(task: AgentTask, signal: AbortSignal) {
   task.airportIcao = analysis.airport.icao || null; task.airportName = analysis.airport.name || null;
   task.packages = analysis.packages.map((item) => toBusinessPackage(item, task));
   markSharedPages(task.packages);
+  // 先按矢量密度纠正图/表角色倒置（改 pageRole 后必须重算派生的 sources），再做来源完整性预检。
+  const roleRepairs = task.packages.flatMap((pkg) => {
+    const repair = repairInvertedChartRoles(pkg, task.pages);
+    if (repair) pkg.sources = derivePackageSources(pkg.packagePages, task);
+    return repair ? [repair] : [];
+  });
+  if (roleRepairs.length) task.warningCount += roleRepairs.length;
+  for (const pkg of task.packages) assessPackageSources(pkg, task.pages);
   const auditWarnings = auditGrouping(task, analysis);
   analysis.warnings = [...new Set([...(analysis.warnings || []), ...auditWarnings])];
   task.warningCount += auditWarnings.length;
@@ -86,8 +95,21 @@ async function transcribeScannedPages(task: AgentTask, signal: AbortSignal) {
 
 const GROUPING_BATCH_PAGE_LIMIT = 110;
 
+// 纯结构判据，不依赖任何语种的"本页空白"字样：几乎没有图形且几乎没有文字。
+function isBlankPage(page: PageAsset) { return pageVectorPathCount(page) < 50 && page.quality.nativeTextCoverage < 0.02; }
+
+// 分组要看的是航图，不是空白页。旧排序只按文本覆盖率升序，而空白页覆盖率恒为最低，
+// 会把整个图额度吃光（OMAA：6 张全是 PAGE INTENTIONALLY LEFT BLANK，模型一张真实航图都没看到）。
+// 改为：扫描页优先（确实只能靠看），其次按矢量算子数降序取图形最密的页。
+export function selectGroupingImagePages(pages: PageAsset[], limit: number) {
+  return [...pages]
+    .filter((page) => !isBlankPage(page))
+    .sort((a, b) => Number(b.quality.isScanned) - Number(a.quality.isScanned) || pageVectorPathCount(b) - pageVectorPathCount(a) || a.quality.nativeTextCoverage - b.quality.nativeTextCoverage)
+    .slice(0, limit);
+}
+
 async function groupAirportPackages(task: AgentTask, signal: AbortSignal): Promise<AirportPackageAnalysis> {
-  // 文档分批（每批页数受限），每批附页面缩略图（优先扫描/低文本页），多轮结果确定性合并。
+  // 文档分批（每批页数受限），每批附页面缩略图（优先扫描页，其次图形最密的页），多轮结果确定性合并。
   const batches: Array<typeof task.documents> = [];
   let current: typeof task.documents = []; let pageCount = 0;
   for (const document of task.documents.filter((d) => d.parseStatus === 'PARSED')) {
@@ -99,9 +121,9 @@ async function groupAirportPackages(task: AgentTask, signal: AbortSignal): Promi
   const partials: AirportPackageAnalysis[] = [];
   for (const [batchIndex, batch] of batches.entries()) {
     assertActive(task, signal);
-    const documents = batch.map((document) => ({ documentId: document.documentId, fileName: document.fileName, pageCount: document.pageCount, pages: task.pages.filter((p) => p.documentId === document.documentId).map((p) => ({ pageNumber: p.pageNumber, title: p.title, summary: p.summary, languages: p.detectedLanguages, nativeTextQuality: p.quality.nativeTextCoverage, transcribed: (p.quality as any).transcribed === true })) }));
+    const documents = batch.map((document) => ({ documentId: document.documentId, fileName: document.fileName, pageCount: document.pageCount, pages: task.pages.filter((p) => p.documentId === document.documentId).map((p) => ({ pageNumber: p.pageNumber, title: p.title, summary: p.summary, languages: p.detectedLanguages, nativeTextQuality: p.quality.nativeTextCoverage, vectorPathCount: pageVectorPathCount(p), transcribed: (p.quality as any).transcribed === true })) }));
     const batchPages = task.pages.filter((p) => batch.some((d) => d.documentId === p.documentId));
-    const imagePages = [...batchPages].sort((a, b) => Number(b.quality.isScanned) - Number(a.quality.isScanned) || a.quality.nativeTextCoverage - b.quality.nativeTextCoverage).slice(0, budgets.maxImagesPerCall);
+    const imagePages = selectGroupingImagePages(batchPages, budgets.maxImagesPerCall);
     const images = await Promise.all(imagePages.map(async (p) => ({ pageNo: p.pageNumber, aipPageNo: `${p.documentId}:${p.pageNumber}`, dataUrl: `data:image/png;base64,${(await fs.readFile(p.thumbnailPath)).toString('base64')}` })));
     const { parsed } = await callModel(task, 'airport-package-grouper', { taskName: batches.length > 1 ? `${task.taskName}（批次 ${batchIndex + 1}/${batches.length}，已识别机场：${partials[0]?.airport?.icao || '未定'}）` : task.taskName, documents }, images, `AIRPORT_PACKAGE_GROUPING${batches.length > 1 ? `:${batchIndex + 1}` : ''}`, signal, { planAction: 'AIRPORT_PACKAGE_GROUPING' });
     partials.push(parsed as AirportPackageAnalysis);
@@ -173,8 +195,13 @@ function markSharedPages(packages: BusinessProcedurePackage[]) {
 
 function toBusinessPackage(item: AirportPackageAnalysis['packages'][number], task: AgentTask): BusinessProcedurePackage {
   const packagePages: PackagePageRef[] = [...item.sources.map((s) => ({ ...s, shared: false })), ...item.sharedSources.map((s) => ({ ...s, shared: true }))].flatMap((source) => source.pages.map((pageNumber, index) => ({ documentId: source.documentId, fileName: source.fileName, pageNumber, pageRole: source.roles[index] || source.roles[0] || 'RELATED', isShared: source.shared, confidence: item.groupingConfidence })));
+  return { packageId: crypto.randomUUID(), procedureKey: item.procedureKey, category: item.procedureCategory === 'SID' ? 'SID' : 'STAR', procedureCategory: item.procedureCategory, procedureName: item.procedureName, runways: item.runways, navigationType: item.navigationType, packagePages, sources: derivePackageSources(packagePages, task), confidence: item.groupingConfidence, groupingConfidence: item.groupingConfidence, groupingReason: item.groupingReason, status: 'GROUPED', warnings: item.warnings };
+}
+
+// sources 是 packagePages 的派生视图；任何改动 pageRole 的地方都必须重算它，否则两份表述会打架。
+export function derivePackageSources(packagePages: PackagePageRef[], task: AgentTask): BusinessProcedurePackage['sources'] {
   const globals = (role: RegExp) => packagePages.filter((ref) => role.test(ref.pageRole)).map((ref) => task.pages.find((p) => p.documentId === ref.documentId && p.pageNumber === ref.pageNumber)?.globalPageNumber).filter((n): n is number => !!n);
-  return { packageId: crypto.randomUUID(), procedureKey: item.procedureKey, category: item.procedureCategory === 'SID' ? 'SID' : 'STAR', procedureCategory: item.procedureCategory, procedureName: item.procedureName, runways: item.runways, navigationType: item.navigationType, packagePages, sources: { primaryCharts: globals(/CHART/i), procedureTables: globals(/PROCEDURE_TABLE/i), coordinateTables: globals(/COORDINATE/i), runwayPages: globals(/RUNWAY/i), navaidPages: globals(/NAVAID/i), sharedNotes: globals(/NOTE/i), profilePages: globals(/PROFILE/i), minimaPages: globals(/MINIMA/i), relatedPages: globals(/RELATED|INDEX/i) }, confidence: item.groupingConfidence, groupingConfidence: item.groupingConfidence, groupingReason: item.groupingReason, status: 'GROUPED', warnings: item.warnings };
+  return { primaryCharts: globals(/CHART/i), procedureTables: globals(/PROCEDURE_TABLE/i), coordinateTables: globals(/COORDINATE/i), runwayPages: globals(/RUNWAY/i), navaidPages: globals(/NAVAID/i), sharedNotes: globals(/NOTE/i), profilePages: globals(/PROFILE/i), minimaPages: globals(/MINIMA/i), relatedPages: globals(/RELATED|INDEX/i) };
 }
 
 // ============================== 阶段 B：识别规划 ==============================

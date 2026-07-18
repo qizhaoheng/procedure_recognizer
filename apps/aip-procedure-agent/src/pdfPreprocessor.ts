@@ -17,15 +17,17 @@ export class PdfDocumentTools {
       const page = await doc.getPage(pageNumber); const viewport = page.getViewport({ scale: 1 }); const content = await page.getTextContent();
       const spans = content.items.flatMap((item: any) => { if (!item.str) return []; const tx = pdfjs.Util.transform(viewport.transform, item.transform); const x = tx[4]; const y = tx[5]; return [{ text: String(item.str), bbox: [x, y - Math.abs(tx[3]), x + (item.width || 0), y] as [number, number, number, number] }]; });
       const nativeText = spans.map((s) => s.text).join('\n'); const operatorList = await page.getOperatorList();
+      // 完整算子数是"图 vs 表"的关键判据，必须在截断前记录：截断后所有航图页都并列 5000，信号被抹平。
+      const vectorPathCount = operatorList.fnArray.length;
       const vectorPaths = operatorList.fnArray.slice(0, 5000).map((fn: number, i: number) => ({ operator: String(fn), args: Array.isArray(operatorList.argsArray[i]) ? operatorList.argsArray[i].flat(2).filter((v: unknown) => typeof v === 'number').slice(0, 40) : undefined }));
       const renderedImagePath = await this.renderPdfPage(page, pageNumber, 200, `page-${pageNumber}.png`); const thumbnailPath = await this.renderPdfPage(page, pageNumber, 55, `thumb-${pageNumber}.png`);
       const coverage = Math.min(1, nativeText.replace(/\s/g, '').length / Math.max(1, viewport.width * viewport.height / 250));
-      const asset: PageAsset = { pageNumber, width: Math.round(viewport.width), height: Math.round(viewport.height), rotation: page.rotate || 0, renderedImagePath, thumbnailPath, nativeText, textSpans: spans, vectorPaths, embeddedImages: [], detectedTables: [], detectedLanguages: detectLanguages(nativeText), quality: { isScanned: nativeText.trim().length < 20, nativeTextCoverage: coverage, renderDpi: 200 }, summary: summarize(nativeText), title: nativeText.split(/\r?\n/).map((s) => s.trim()).find((s) => s.length > 5)?.slice(0, 160) };
+      const asset: PageAsset = { pageNumber, width: Math.round(viewport.width), height: Math.round(viewport.height), rotation: page.rotate || 0, renderedImagePath, thumbnailPath, nativeText, textSpans: spans, vectorPaths, vectorPathCount, embeddedImages: [], detectedTables: [], detectedLanguages: detectLanguages(nativeText), quality: { isScanned: nativeText.trim().length < 20, nativeTextCoverage: coverage, renderDpi: 200 }, summary: summarize(nativeText), title: nativeText.split(/\r?\n/).map((s) => s.trim()).find((s) => s.length > 5)?.slice(0, 160) };
       this.pages.push(asset); await onPage?.(asset); page.cleanup();
     }
     await loadingTask.destroy(); return this.pages;
   }
-  listPages() { return this.pages.map(({ nativeText, textSpans, vectorPaths, ...page }) => ({ ...page, textLength: nativeText.length, spanCount: textSpans.length, vectorPathCount: vectorPaths.length })); }
+  listPages() { return this.pages.map(({ nativeText, textSpans, vectorPaths, ...page }) => ({ ...page, textLength: nativeText.length, spanCount: textSpans.length, vectorPathCount: page.vectorPathCount ?? vectorPaths.length })); }
   getPageSummary(page: number) { return this.requirePage(page).summary; }
   extractText(page: number, bbox?: [number, number, number, number]) { const item = this.requirePage(page); if (!bbox) return item.nativeText; return item.textSpans.filter((span) => intersects(span.bbox, bbox)).map((span) => span.text).join('\n'); }
   searchDocument(keyword: string) { const needle = keyword.toLocaleLowerCase(); return this.pages.flatMap((page) => page.nativeText.toLocaleLowerCase().includes(needle) ? [{ pageNumber: page.pageNumber, snippets: snippets(page.nativeText, keyword) }] : []); }
