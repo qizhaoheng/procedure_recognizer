@@ -8,6 +8,7 @@ import { derivePackageSources, selectGroupingImagePages } from '../orchestrator'
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
 import { verify424Text, verifyGeometry } from '../aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from '../airportReference';
+import { createEmptyPir, mergeFragment } from '../fragmentMerger';
 import { completenessFindingsToValidations } from '../completenessAudit';
 import { simpleLegsTo424Text } from '../../../../server/src/services/jeppesen424/simpleLegsTo424Text';
 
@@ -434,4 +435,36 @@ test('a waypoint identifier containing digits does not derail the scan', () => {
 test('table numbers without a hemisphere are never read as coordinates', () => {
   assert.deepEqual(parseCoordinate('010 CA - - 160° - - +1000 - RNAV 1'), {});
   assert.deepEqual(parseCoordinate('030 TF SABKA - 317° 18.6 - +6000'), {});
+});
+
+// ---- 最低爬升梯度（PDG）----
+// WMKJ 实测：源页明明白白印着 "MINIMUM CLIMB GRADIENT (PDG) 5% UNTIL PASSING 6000FT"，
+// 而 PIR 根本没有这个字段——不是没提取到，是没建模，于是完整性核查报了 4 条
+// MISSING_CONSTRAINT 却无处安放。同一张图上各条 SID 的数值还不同（PIMOK 1J 是 3500FT）。
+test('a route carries the published climb gradient through the merge', () => {
+  const pir = createEmptyPir({ icao: 'WMKJ' }, { category: 'SID', name: 'AROSO 1J', runways: ['16'] });
+  mergeFragment(pir, {
+    routes: [{
+      routeId: 'r1', routeType: 'RUNWAY_TRANSITION', identifier: 'AROSO 1J', runway: '16', sequence: 1,
+      climbGradient: { percent: 5, untilAltitudeFt: 6000, purpose: 'ATC', rawText: 'MINIMUM CLIMB GRADIENT (PDG) 5% UNTIL PASSING 6000FT FOR ATC PURPOSES.' },
+    }],
+  }, { action: 'ANALYZE_ROUTE_STRUCTURE' });
+  assert.equal(pir.routes[0].climbGradient?.percent, 5);
+  assert.equal(pir.routes[0].climbGradient?.untilAltitudeFt, 6000);
+  assert.match(pir.routes[0].climbGradient!.rawText!, /5% UNTIL PASSING 6000FT/);
+});
+
+test('a later fragment does not overwrite a gradient already recorded for the route', () => {
+  // 同一张图上 PIMOK 1J 是 3500FT、其余是 6000FT，串味会把错的值写进来
+  const pir = createEmptyPir({ icao: 'WMKJ' }, { category: 'SID', name: 'PIMOK 1J', runways: ['16'] });
+  const route = (climbGradient: any) => ({ routeId: 'r1', routeType: 'RUNWAY_TRANSITION' as const, identifier: 'PIMOK 1J', runway: '16', sequence: 1, climbGradient });
+  mergeFragment(pir, { routes: [route({ percent: 5, untilAltitudeFt: 3500, rawText: 'PDG 5% UNTIL PASSING 3500FT' })] }, { action: 'ANALYZE_ROUTE_STRUCTURE' });
+  mergeFragment(pir, { routes: [route({ percent: 5, untilAltitudeFt: 6000, rawText: 'PDG 5% UNTIL PASSING 6000FT' })] }, { action: 'ANALYZE_ROUTE_STRUCTURE' });
+  assert.equal(pir.routes[0].climbGradient?.untilAltitudeFt, 3500, '先记录的值不得被邻近程序的值覆盖');
+});
+
+test('a route with no published gradient stays null rather than borrowing one', () => {
+  const pir = createEmptyPir({ icao: 'WMKJ' }, { category: 'STAR', name: 'X', runways: ['16'] });
+  mergeFragment(pir, { routes: [{ routeId: 'r1', routeType: 'ENROUTE_TRANSITION', identifier: 'X', sequence: 1 }] }, { action: 'ANALYZE_ROUTE_STRUCTURE' });
+  assert.equal(pir.routes[0].climbGradient, null);
 });

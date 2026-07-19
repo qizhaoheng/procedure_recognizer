@@ -21,7 +21,8 @@
      "runway",
      "transitionFix",
      "fixSequence",
-     "sequence"
+     "sequence",
+     "climbGradient"
     ],
     "properties": {
      "routeId": {
@@ -62,6 +63,44 @@
      },
      "sequence": {
       "type": "integer"
+     },
+     "climbGradient": {
+      "type": [
+       "object",
+       "null"
+      ],
+      "additionalProperties": false,
+      "required": [
+       "percent",
+       "untilAltitudeFt",
+       "rawText"
+      ],
+      "properties": {
+       "percent": {
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "untilAltitudeFt": {
+        "type": [
+         "number",
+         "null"
+        ]
+       },
+       "purpose": {
+        "type": [
+         "string",
+         "null"
+        ]
+       },
+       "rawText": {
+        "type": [
+         "string",
+         "null"
+        ]
+       }
+      }
      }
     }
    }

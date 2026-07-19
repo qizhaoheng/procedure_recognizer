@@ -1,8 +1,8 @@
 import crypto from 'node:crypto';
-import type { AltitudeConstraint, PageEvidence, PirConflict, PirFix, PirHolding, PirLeg, PirMinima, PirRoute, PirRunway, ProcedurePIR, SpeedConstraint } from './domain';
+import type { ClimbGradient, AltitudeConstraint, PageEvidence, PirConflict, PirFix, PirHolding, PirLeg, PirMinima, PirRoute, PirRunway, ProcedurePIR, SpeedConstraint } from './domain';
 
 // 分步识别的片段形态。routes 片段带 fixSequence（有序 fix 标识），legIds 由 legs 合并时回填。
-export interface RouteFragment { routeId: string; routeType: PirRoute['routeType']; identifier: string; runway?: string | null; transitionFix?: string | null; fixSequence?: string[]; sequence: number }
+export interface RouteFragment { routeId: string; routeType: PirRoute['routeType']; identifier: string; runway?: string | null; transitionFix?: string | null; climbGradient?: ClimbGradient | null; fixSequence?: string[]; sequence: number }
 export interface LegConstraintFragment { legId: string; altitudeConstraint?: AltitudeConstraint | null; speedConstraint?: SpeedConstraint | null; verticalAngle?: number | null; evidence?: string[] }
 export interface HoldingFragment { fixIdentifier: string; legId?: string | null; pathTerminator?: 'HA' | 'HF' | 'HM' | null; holding: PirHolding; evidence?: string[] }
 export interface PirFragment {
@@ -160,10 +160,13 @@ function mergeRoute(pir: ProcedurePIR, incoming: RouteFragment, source: Fragment
     || pir.routes.find((r) => r.routeType === incoming.routeType && r.identifier.toUpperCase() === incoming.identifier.toUpperCase() && (r.runway || null) === (incoming.runway || null));
   if (existing) {
     existing.transitionFix ||= incoming.transitionFix ?? null;
+    // 爬升梯度按程序发布，不同 SID 数值可能不同（实测 3500FT vs 6000FT），
+    // 因此只在本路线还没有时补上，不拿后来的片段覆盖已确认的值。
+    existing.climbGradient ??= incoming.climbGradient ?? null;
     if ((existing as any).fixSequence == null && incoming.fixSequence) (existing as any).fixSequence = incoming.fixSequence;
     return;
   }
-  const route: PirRoute & { fixSequence?: string[] } = { routeId: incoming.routeId, routeType: incoming.routeType, identifier: incoming.identifier, runway: incoming.runway ?? null, transitionFix: incoming.transitionFix ?? null, legIds: [], sequence: incoming.sequence };
+  const route: PirRoute & { fixSequence?: string[] } = { routeId: incoming.routeId, routeType: incoming.routeType, identifier: incoming.identifier, runway: incoming.runway ?? null, transitionFix: incoming.transitionFix ?? null, climbGradient: incoming.climbGradient ?? null, legIds: [], sequence: incoming.sequence };
   if (incoming.fixSequence) route.fixSequence = incoming.fixSequence;
   pir.routes.push(route);
   void source;
