@@ -8,6 +8,7 @@ import { derivePackageSources, selectGroupingImagePages } from '../orchestrator'
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
 import { verify424Text, verifyGeometry } from '../aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from '../airportReference';
+import { completenessFindingsToValidations } from '../completenessAudit';
 import { simpleLegsTo424Text } from '../../../../server/src/services/jeppesen424/simpleLegsTo424Text';
 
 test('parses compact AIP coordinates', () => { const value = parseCoordinate('N012030.00 E1034500.00'); assert.ok(Math.abs(value.latitude! - 1.3416667) < 1e-5); assert.equal(value.longitude, 103.75); });
@@ -365,4 +366,50 @@ test('reference pages are attached once and marked shared', () => {
   assert.equal(attached.length, 2);
   assert.ok(attached.every((p) => p.isShared), '机场级页面是共享页');
   assert.deepEqual(attached.map((p) => p.pageRole).sort(), ['NAVAID_DATA', 'RUNWAY_DATA']);
+});
+
+// ---- 结果完整性核查（AI 校验 AI）----
+// 这个校验器与被查对象同源，所以它的结论只能供人复核，不能直接推翻识别：
+// BLOCKER 一律降为 ERROR，读不了的页上的 finding 降为 WARNING。
+test('a same-family auditor cannot escalate to BLOCKER', () => {
+  const validations = completenessFindingsToValidations({
+    findings: [{ kind: 'MISSING_LEG', severity: 'BLOCKER', subject: 'Leg 030', detail: '源图有 TF 到 SABKA，结果里没有', pageNumber: 35, legId: 'l9' }],
+    readablePages: [{ pageNumber: 35, readable: true }],
+    completeness: 'INCOMPLETE',
+    decisionSummary: '',
+  });
+  assert.equal(validations.length, 1);
+  assert.equal(validations[0].severity, 'ERROR', 'BLOCKER 必须降级——拒出权留给确定性规则');
+  assert.equal(validations[0].ruleCode, 'SOURCE_COMPLETENESS_MISSING_LEG');
+  assert.equal(validations[0].fieldPath, 'legs.l9');
+});
+
+test('findings raised from an unreadable page are demoted to warnings', () => {
+  // 页面读不了等于"不知道"，不是"结果有问题"——不能拿看不清的页去否定识别结果
+  const validations = completenessFindingsToValidations({
+    findings: [{ kind: 'MISSING_CONSTRAINT', severity: 'ERROR', subject: '高度约束', detail: '看不清但似乎缺了', pageNumber: 34 }],
+    readablePages: [{ pageNumber: 34, readable: false, note: '字形码乱码' }],
+    completeness: 'NOT_ASSESSABLE',
+    decisionSummary: '',
+  });
+  assert.equal(validations[0].severity, 'WARNING');
+});
+
+test('a complete result yields no validations', () => {
+  const validations = completenessFindingsToValidations({
+    findings: [], readablePages: [{ pageNumber: 35, readable: true }], completeness: 'COMPLETE', decisionSummary: '',
+  });
+  assert.deepEqual(validations, []);
+});
+
+test('non-blocker severities and anchors are preserved', () => {
+  const validations = completenessFindingsToValidations({
+    findings: [{ kind: 'MISSING_FIX', severity: 'WARNING', subject: 'KJ706', detail: '坐标表有该点', pageNumber: 35, fixIdentifier: 'KJ706' }],
+    readablePages: [{ pageNumber: 35, readable: true }],
+    completeness: 'INCOMPLETE',
+    decisionSummary: '',
+  });
+  assert.equal(validations[0].severity, 'WARNING');
+  assert.equal(validations[0].fieldPath, 'fixes.KJ706');
+  assert.match(validations[0].message, /source page 35/);
 });
