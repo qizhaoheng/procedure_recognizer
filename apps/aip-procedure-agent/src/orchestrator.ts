@@ -9,6 +9,7 @@ import { carryOverManualEdits } from './fragmentMerger';
 import { deviationsToValidations, verifyAgainstSourceChart } from './chartOverlay';
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from './sourcePreflight';
 import { generate424WithAi, generateGeometryWithAi, type GenerationDiff } from './aiGeneration';
+import { attachAirportReferencePages, findAirportReferencePages } from './airportReference';
 import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan, ValidationResult } from './domain';
 import { PdfDocumentTools, garbledTextRatio } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
@@ -84,6 +85,12 @@ async function analyzeAirportFiles(task: AgentTask, signal: AbortSignal) {
     return repair ? [repair] : [];
   });
   if (roleRepairs.length) task.warningCount += roleRepairs.length;
+  // 机场级参考页（跑道 AD 2.12 / 导航台 AD 2.19）确定性补挂到每个包：
+  // 分组只关心"这条程序用哪几页"，不会带上它们，但没有跑道入口坐标离场起点就锚不住。
+  const referencePages = findAirportReferencePages(task.pages);
+  for (const pkg of task.packages) {
+    if (attachAirportReferencePages(pkg, referencePages)) pkg.sources = derivePackageSources(pkg.packagePages, task);
+  }
   for (const pkg of task.packages) assessPackageSources(pkg, task.pages);
   const auditWarnings = auditGrouping(task, analysis);
   analysis.warnings = [...new Set([...(analysis.warnings || []), ...auditWarnings])];
