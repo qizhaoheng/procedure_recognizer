@@ -6,6 +6,7 @@ import { garbledTextRatio } from '../pdfPreprocessor';
 import type { BusinessProcedurePackage, PageAsset, ProcedurePIR } from '../domain';
 import { derivePackageSources, selectGroupingImagePages } from '../orchestrator';
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
+import { verify424Text, verifyGeometry } from '../aiGeneration';
 
 test('parses compact AIP coordinates', () => { const value = parseCoordinate('N012030.00 E1034500.00'); assert.ok(Math.abs(value.latitude! - 1.3416667) < 1e-5); assert.equal(value.longitude, 103.75); });
 test('converts DMS and validates components', () => { assert.equal(dmsToDecimal(1, 30, 0, 'S'), -1.5); assert.throws(() => dmsToDecimal(1, 60, 0)); });
@@ -232,4 +233,59 @@ test('ordinary AIP text stays well clear of the threshold', () => {
 test('empty text yields no garbling signal', () => {
   assert.equal(garbledTextRatio(''), 0);
   assert.equal(garbledTextRatio('   \n  '), 0);
+});
+
+// ---- AI 直接生成 424 / 几何，确定性代码只做核对 ----
+// 生成权交给模型后，往返核对是唯一能独立发现"看着像但其实错了"的手段：
+// 424 文本解析回来逐字段比对，坐标串测地反算回来与 PIR 的航向/距离比对。
+test('424 text that parses to nothing is reported, not accepted', () => {
+  const diffs = verify424Text('这不是 424 记录\n随便几行文字\n', samplePir());
+  assert.equal(diffs.length, 1);
+  assert.ok(['NO_RECORDS_PARSED', 'UNPARSEABLE'].includes(diffs[0].code), diffs[0].code);
+});
+
+test('empty 424 output is reported', () => {
+  const diffs = verify424Text('   \n  ', samplePir());
+  assert.deepEqual(diffs.map((d) => d.code), ['EMPTY_OUTPUT']);
+});
+
+test('geometry drawn away from the PIR fixes is caught', () => {
+  const pir = samplePir(); // 腿 l1: a(1.3,103.8) -> b(1.4,103.9)，course 45、8NM
+  const wrong = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: [[104.5, 2.9], [104.6, 3.0]] }, properties: { featureType: 'LEG', legId: 'l1' } }],
+  };
+  const codes = verifyGeometry(wrong, pir).map((d) => d.code);
+  assert.ok(codes.includes('VERTEX_OFF_FIX'), `凭记忆摆点必须被抓到: ${codes.join(',')}`);
+});
+
+test('geometry anchored on the PIR fixes passes', () => {
+  const pir = samplePir();
+  const good = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: [[103.8, 1.3], [103.9, 1.4]] }, properties: { featureType: 'LEG', legId: 'l1' } }],
+  };
+  assert.deepEqual(verifyGeometry(good, pir).filter((d) => d.code === 'VERTEX_OFF_FIX'), []);
+});
+
+test('a leg with resolved endpoints but no geometry is reported as not drawn', () => {
+  const pir = samplePir();
+  const codes = verifyGeometry({ type: 'FeatureCollection', features: [] }, pir).map((d) => d.code);
+  assert.ok(codes.includes('LEG_NOT_DRAWN'), codes.join(','));
+});
+
+test('a missing FeatureCollection is reported rather than silently empty', () => {
+  assert.deepEqual(verifyGeometry(null, samplePir()).map((d) => d.code), ['NO_FEATURE_COLLECTION']);
+});
+
+test('open-ended legs are not required to terminate on a fix', () => {
+  const pir = samplePir();
+  pir.legs[0].pathTerminator = 'CA';
+  pir.legs[0].openEnded = true;
+  const feature = {
+    type: 'FeatureCollection',
+    features: [{ type: 'Feature', geometry: { type: 'LineString', coordinates: [[103.8, 1.3], [103.85, 1.35]] }, properties: { featureType: 'LEG', legId: 'l1', openEnded: true } }],
+  };
+  const codes = verifyGeometry(feature, pir).map((d) => d.code);
+  assert.ok(!codes.includes('VERTEX_OFF_FIX'), `开放腿不该因终点不在 fix 上而报错: ${codes.join(',')}`);
 });
