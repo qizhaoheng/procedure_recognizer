@@ -9,6 +9,7 @@ import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } f
 import { verify424Text, verifyGeometry } from '../aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from '../airportReference';
 import { createEmptyPir, mergeFragment } from '../fragmentMerger';
+import { deriveRouteCode } from '../../../../server/src/services/jeppesen424/routeCode';
 import { completenessFindingsToValidations } from '../completenessAudit';
 import { simpleLegsTo424Text } from '../../../../server/src/services/jeppesen424/simpleLegsTo424Text';
 
@@ -467,4 +468,20 @@ test('a route with no published gradient stays null rather than borrowing one', 
   const pir = createEmptyPir({ icao: 'WMKJ' }, { category: 'STAR', name: 'X', runways: ['16'] });
   mergeFragment(pir, { routes: [{ routeId: 'r1', routeType: 'ENROUTE_TRANSITION', identifier: 'X', sequence: 1 }] }, { action: 'ANALYZE_ROUTE_STRUCTURE' });
   assert.equal(pir.routes[0].climbGradient, null);
+});
+
+// 字母的拼法在各国 AIP 里不统一：ICAO 官方是 ALFA/JULIETT/WHISKY，实际印刷中
+// ALPHA/JULIET/WHISKEY 同样常见。只收官方拼法会让整类程序解不出路线代码——
+// WMKJ 的 AIP 印 "AROSO ONE JULIET DEPARTURE"，8 条 SID 因此全被判为身份不明。
+test('spelled-out designators accept both official and common phonetic spellings', () => {
+  for (const [name, expected] of [
+    ['AROSO ONE JULIET DEPARTURE', 'AROS1J'],   // 单 T，WMKJ 实际印法
+    ['ADLOV TWO JULIETT DEPARTURE', 'ADLO2J'],  // 双 T，ICAO 官方
+    ['EMTUV ONE GOLF ARRIVAL', 'EMTU1G'],
+    ['AROSO ONE MIKE DEPARTURE', 'AROS1M'],
+  ] as const) assert.equal(deriveRouteCode(name), expected, name);
+});
+
+test('a radar-vectored departure genuinely has no route code', () => {
+  assert.equal(deriveRouteCode('JOHOR RADAR TWO DEPARTURE'), undefined);
 });
