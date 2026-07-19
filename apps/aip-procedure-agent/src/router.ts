@@ -86,7 +86,7 @@ agentRouter.post("/tasks", upload.any(), async (req, res) => {
   };
   await ensureAgentStorage();
   await saveAgentTask(task);
-  if (req.body.autoAnalyze === "true") startTaskAnalysis(task);
+  if (req.body.autoAnalyze === "true") await startTaskAnalysis(task);
   res.status(202).json(taskSummary(task));
 });
 agentRouter.get("/tasks", async (_req, res) =>
@@ -157,12 +157,12 @@ agentRouter.delete("/tasks/:id/documents/:documentId", async (req, res) => {
 });
 agentRouter.post("/tasks/:id/analyze", async (req, res) => {
   const task = await readAgentTask(req.params.id);
-  startTaskAnalysis(task);
+  await startTaskAnalysis(task);
   res.status(202).json({ taskId: task.taskId, status: "ANALYZING" });
 });
 agentRouter.post("/tasks/:id/start", async (req, res) => {
   const task = await readAgentTask(req.params.id);
-  startTaskAnalysis(task);
+  await startTaskAnalysis(task);
   res.status(202).json(taskSummary(task));
 });
 agentRouter.post("/tasks/:id/cancel", async (req, res) => {
@@ -175,7 +175,7 @@ agentRouter.post("/tasks/:id/cancel", async (req, res) => {
 agentRouter.post("/tasks/:id/retry", async (req, res) => {
   const task = await readAgentTask(req.params.id);
   task.cancelRequested = false;
-  startTaskAnalysis(task);
+  await startTaskAnalysis(task);
   res.status(202).json(taskSummary(task));
 });
 agentRouter.get("/tasks/:id/packages", async (req, res) =>
@@ -191,7 +191,7 @@ agentRouter.post("/tasks/:id/packages", async (req, res) => {
 });
 agentRouter.post("/tasks/:id/packages/reanalyze", async (req, res) => {
   const task = await readAgentTask(req.params.id);
-  startTaskAnalysis(task);
+  await startTaskAnalysis(task);
   res.status(202).json({ taskId: task.taskId, status: "ANALYZING" });
 });
 agentRouter.post("/tasks/:id/packages/recognize", async (req, res) => {
@@ -204,7 +204,7 @@ agentRouter.post("/tasks/:id/packages/recognize", async (req, res) => {
     : task.packages;
   if (!packages.length)
     return res.status(400).json({ error: "没有可识别的程序包。" });
-  startPackagesRecognition(task, packages);
+  await startPackagesRecognition(task, packages);
   res.status(202).json({
     taskId: task.taskId,
     packageIds: packages.map((p) => p.packageId),

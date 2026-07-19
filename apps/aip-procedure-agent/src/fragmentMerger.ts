@@ -293,3 +293,45 @@ function differentCoordinate(a: PirFix, b: PirFix) {
 }
 function coordOf(fix: PirFix) { return { latitude: fix.latitude, longitude: fix.longitude }; }
 function fixOf(pir: ProcedurePIR, fixId?: string | null) { return fixId ? pir.fixes.find((f) => f.fixId === fixId) : undefined; }
+
+/**
+ * 用已提取的跑道数据补齐跑道类 fix 的坐标。
+ *
+ * 识别只把跑道物理数据放进 pir.runwayData，没有任何环节把它接到航段引用的那个
+ * 跑道 fix 上——于是 AD 2.12 页里白纸黑字的 "THR coordinates 013919.83N 1033950.29E"
+ * 已经进了 PIR，而 RW16 仍是 UNRESOLVED，离场起点锚不住、机场画不出来、
+ * 下游一连串腿因此无法绘制。这是纯粹的确定性关联，不该交给模型再猜一遍。
+ *
+ * DER（离场端）取跑道另一端的坐标，其余取入口坐标：从 16 号跑道起飞，
+ * 起点是 16 的入口，离场端是跑道另一头。
+ */
+export function resolveRunwayFixes(pir: ProcedurePIR): number {
+  let resolved = 0;
+  for (const fix of pir.fixes) {
+    if (Number.isFinite(fix.latitude) && Number.isFinite(fix.longitude)) continue;
+    const designator = runwayDesignator(fix.identifier);
+    if (!designator) continue;
+    const runway = pir.runwayData.find((item) => normalizeRunway(item.designator) === designator);
+    if (!runway) continue;
+    const useDer = fix.role === 'DER';
+    const latitude = useDer ? runway.derLatitude : runway.thresholdLatitude;
+    const longitude = useDer ? runway.derLongitude : runway.thresholdLongitude;
+    if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) continue;
+    fix.latitude = latitude as number;
+    fix.longitude = longitude as number;
+    fix.coordinateSourceType = 'RUNWAY_DATABASE';
+    fix.status = fix.status === 'MANUALLY_EDITED' ? fix.status : 'DERIVED';
+    fix.derivation = `Resolved from runway ${runway.designator} ${useDer ? 'departure end' : 'threshold'} coordinates in the runway physical characteristics table.`;
+    fix.evidence = [...new Set([...(fix.evidence || []), ...(runway.evidence || [])])];
+    resolved += 1;
+  }
+  return resolved;
+}
+
+function runwayDesignator(identifier: string) {
+  const match = String(identifier || '').toUpperCase().match(/^RW?Y?\s*(\d{2}[LCR]?)$/);
+  return match ? match[1] : undefined;
+}
+function normalizeRunway(designator: string) {
+  return String(designator || '').toUpperCase().replace(/^RW?Y?\s*/, '').trim();
+}

@@ -47,6 +47,9 @@ export async function auditResultCompleteness(
     task,
     'result-completeness-verifier',
     {
+      // 页面是共享的，被审对象必须点名，否则核查器会按整页要求结果——
+      // 实测它因此报出"SABKA 1J 缺失"，而 SABKA 1J 本就属于另一个包。
+      procedureUnderAudit: { name: pir.procedure.name, identifier: pir.procedure.identifier, category: pir.procedure.category, runways: pir.procedure.runways },
       airport: pir.airport,
       sourcePages,
       pir,
