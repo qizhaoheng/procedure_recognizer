@@ -10,6 +10,7 @@ import { deviationsToValidations, verifyAgainstSourceChart } from './chartOverla
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from './sourcePreflight';
 import { generate424WithAi, generateGeometryWithAi, type GenerationDiff } from './aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from './airportReference';
+import { auditResultCompleteness, completenessFindingsToValidations } from './completenessAudit';
 import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan, ValidationResult } from './domain';
 import { PdfDocumentTools, garbledTextRatio } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
@@ -340,6 +341,21 @@ async function recognizePackage(task: AgentTask, pkg: BusinessProcedurePackage, 
       procedure.candidate424 = generated424;
       procedure.geojson = generatedGeometry.featureCollection as Record<string, unknown>;
       validations = [...validations, ...generationDiffsToValidations(generated424.diffs, generatedGeometry)];
+      // 结果完整性核查：拿源页图像问"源上有什么、结果里没有什么"。放在生成之后，
+      // 这样它审的是最终产出而不是中间态。失败不影响已有产物——少一份审计好过丢一次识别。
+      try {
+        const auditPages = resolvePackagePages(task, pkg);
+        const auditImages = await pageImages(auditPages.slice(0, budgets.maxImagesPerCall));
+        const geometrySummary = { drawnLegs: (generatedGeometry.featureCollection as { features?: unknown[] })?.features?.length ?? 0, unresolvedLegs: generatedGeometry.unresolvedLegs };
+        const audit = await step(task, `RESULT_COMPLETENESS_AUDIT:${pkg.procedureKey}`, () => auditResultCompleteness(
+          task, pkg, pir, auditPages, auditImages,
+          { arinc424Text: generated424.text, geometrySummary, procedureId: procedure.procedureId },
+          signal,
+        ));
+        validations = [...validations, ...completenessFindingsToValidations(audit)];
+      } catch (error) {
+        pir.notes.push({ text: `Result completeness audit failed: ${messageOf(error)}`, evidence: [] });
+      }
       procedure.validations = validations;
       pir.validation.results = validations;
     } else {

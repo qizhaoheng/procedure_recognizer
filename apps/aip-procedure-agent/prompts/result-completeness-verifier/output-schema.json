@@ -1,0 +1,39 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["findings", "readablePages", "completeness", "decisionSummary"],
+  "properties": {
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "severity", "subject", "detail"],
+        "properties": {
+          "kind": { "type": "string", "enum": ["MISSING_PROCEDURE", "MISSING_ROUTE", "MISSING_LEG", "MISSING_FIX", "MISSING_CONSTRAINT", "MISSING_HOLDING", "MISSING_MINIMA", "UNSUPPORTED_BY_SOURCE", "CONTRADICTS_SOURCE"] },
+          "severity": { "type": "string", "enum": ["BLOCKER", "ERROR", "WARNING", "INFO"] },
+          "subject": { "type": "string" },
+          "detail": { "type": "string" },
+          "pageNumber": { "type": ["integer", "null"] },
+          "legId": { "type": ["string", "null"] },
+          "fixIdentifier": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "readablePages": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["pageNumber", "readable"],
+        "properties": {
+          "pageNumber": { "type": "integer" },
+          "readable": { "type": "boolean" },
+          "note": { "type": ["string", "null"] }
+        }
+      }
+    },
+    "completeness": { "type": "string", "enum": ["COMPLETE", "INCOMPLETE", "NOT_ASSESSABLE"] },
+    "decisionSummary": { "type": "string" }
+  }
+}
