@@ -154,6 +154,29 @@ export function validatePir(pir: ProcedurePIR, plan?: RecognitionPlan): Validati
   for (const conflict of pir.conflicts.filter((c) => c.status === 'OPEN'))
     push('OPEN_CONFLICT', 'WARNING', conflict.fieldPath, conflict.reason || 'Unresolved extraction conflict.', conflict.candidates.flatMap((c) => c.evidence));
 
+  // —— 跑道 fix 的坐标要与它自己声明的角色一致 ——
+  // 实测：fix 标着 role=DER，坐标却是跑道入口的，两端相距约 3.6 公里，离场起点因此偏掉。
+  // 依据就在同一份 PIR 里（runwayData 两端俱全），所以这是自相矛盾而非信息不足；
+  // 但只报不改——覆盖模型给的坐标需要更强的理由，交给人判断。
+  for (const [index, fix] of pir.fixes.entries()) {
+    if (!Number.isFinite(fix.latitude) || !Number.isFinite(fix.longitude)) continue;
+    const designator = String(fix.identifier || '').toUpperCase().match(/^RW?Y?\s*(\d{2}[LCR]?)$/)?.[1];
+    if (!designator) continue;
+    const runway = pir.runwayData.find((item) => String(item.designator || '').toUpperCase().replace(/^RW?Y?\s*/, '').trim() === designator);
+    if (!runway) continue;
+    const wantDer = fix.role === 'DER';
+    const expectedLat = wantDer ? runway.derLatitude : runway.thresholdLatitude;
+    const expectedLon = wantDer ? runway.derLongitude : runway.thresholdLongitude;
+    const otherLat = wantDer ? runway.thresholdLatitude : runway.derLatitude;
+    if (!Number.isFinite(expectedLat) || !Number.isFinite(expectedLon)) continue;
+    const offNm = geodesicInverse([fix.longitude!, fix.latitude!], [expectedLon as number, expectedLat as number]).distanceNm;
+    if (offNm <= 0.05) continue;
+    const looksLikeOtherEnd = Number.isFinite(otherLat) && Math.abs(fix.latitude! - (otherLat as number)) < 1e-6;
+    push('RUNWAY_FIX_END_MISMATCH', 'ERROR', `fixes[${index}]`,
+      `Fix ${fix.identifier} declares role ${fix.role ?? 'NONE'} but its coordinate sits ${offNm.toFixed(2)}NM from the runway ${wantDer ? 'departure end' : 'threshold'}${looksLikeOtherEnd ? ` — it matches the ${wantDer ? 'threshold' : 'departure end'} instead` : ''}.`,
+      runway.evidence, true);
+  }
+
   return out;
 }
 
