@@ -320,10 +320,10 @@ function fixName(fixId?: string) {
     "—"
   );
 }
+// 是否真的有识别产物，由后端给出。不要退回用 status 推断：REQUIRES_REVIEW 只说明
+// 校验发现问题，一个从未识别过的包也可能带着别的状态，用状态猜会把"没结果"说成"有结果"。
 function hasResult(pkg: any) {
-  return ["COMPLETED", "COMPLETED_WITH_WARNINGS", "REQUIRES_REVIEW"].includes(
-    pkg.status,
-  );
+  return pkg.hasResult === true;
 }
 function isPackageRunning(pkg: any) {
   return ["STARTING", "PLANNING", "RECOGNIZING", "VALIDATING"].includes(
@@ -336,11 +336,30 @@ function anotherPackageRunning(pkg: any) {
   );
 }
 function packageAction(pkg: any) {
-  if (pkg.status === "REQUIRES_REVIEW") return "需复核";
+  if (pkg.status === "REQUIRES_REVIEW" && hasResult(pkg)) return "需复核";
   if (hasResult(pkg)) return "识别完成";
   if (isPackageRunning(pkg)) return "识别中…";
   if (pkg.status === "FAILED") return "重新识别";
   return "识别此程序包";
+}
+// 来源质量：预检在识别之前跑出的结论，描述"源页齐不齐"，与识别结果无关。
+const SOURCE_ISSUE_LABELS: Record<string, string> = {
+  CHART_MISSING: "缺航图",
+  TABLE_MISSING: "缺编码表",
+  COORDINATE_SOURCE_MISSING: "缺坐标源",
+  RUNWAY_DATA_MISSING: "缺跑道数据",
+  NAVAID_DATA_MISSING: "缺导航台数据",
+  PROCEDURE_IDENTITY_UNCLEAR: "程序身份不明确",
+  PROCEDURE_CATEGORY_UNCLEAR: "程序类别不明确",
+  CROSS_PROCEDURE_PACKAGE: "多个程序混在一个包",
+  CHART_PAGE_NOT_IN_CORPUS: "航图页不在文档中",
+};
+function sourceIssues(pkg: any) {
+  const preflight = pkg.preflight;
+  if (!preflight) return [];
+  return [...(preflight.blockingIssues || []), ...(preflight.warnings || [])]
+    .map((issue: any) => SOURCE_ISSUE_LABELS[issue.code] || issue.code)
+    .filter((label: string, index: number, all: string[]) => all.indexOf(label) === index);
 }
 function statusText(status: string) {
   const labels: Record<string, string> = {
@@ -462,6 +481,10 @@ function msg(e: unknown) {
                 RWY {{ pkg.runways.join(", ") || "—" }} ·
                 {{ pkg.packagePages.length }} 页
               </small>
+              <!-- 来源质量与生命周期状态是两条独立的轴，分开显示，不要挤进状态徽章 -->
+              <span v-if="sourceIssues(pkg).length" class="source-quality">
+                {{ sourceIssues(pkg).join(" · ") }}
+              </span>
               <em
                 :class="{
                   running: isPackageRunning(pkg),
@@ -478,7 +501,7 @@ function msg(e: unknown) {
               class="package-action"
               :class="{
                 result: hasResult(pkg) && pkg.status !== 'REQUIRES_REVIEW',
-                review: pkg.status === 'REQUIRES_REVIEW',
+                review: hasResult(pkg) && pkg.status === 'REQUIRES_REVIEW',
               }"
               :disabled="isPackageRunning(pkg) || anotherPackageRunning(pkg)"
               @click="actOnPackage(pkg)"
@@ -1076,6 +1099,16 @@ function msg(e: unknown) {
   font-style: normal;
   color: #237a4b;
   font-size: 11px;
+  margin-top: 5px;
+}
+/* 来源质量：与状态徽章视觉上分开，用中性的琥珀色表示"源页有缺"，而非错误红 */
+.package-select .source-quality {
+  display: block;
+  font-size: 11px;
+  color: #92610a;
+  background: #fdf3d8;
+  border-radius: 4px;
+  padding: 2px 6px;
   margin-top: 5px;
 }
 .package-select em.running {

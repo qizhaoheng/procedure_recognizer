@@ -1,5 +1,8 @@
 const DMS = /([NS])?\s*(\d{1,3})\D+(\d{1,2})\D+(\d{1,2}(?:\.\d+)?)\s*([NSEW])?/i;
 const COMPACT = /^([NS])(\d{2,3})(\d{2})(\d{2}(?:\.\d+)?)(?:\s+|\/)?([EW])(\d{3})(\d{2})(\d{2}(?:\.\d+)?)$/i;
+// 半球符在后的紧凑式（WMKJ/AIP MALAYSIA 用这种："ARP coordinates and site at AD 013826N 1034013E"）。
+// 不加首尾锚定：这类坐标常嵌在整句话里。
+const COMPACT_TRAILING = /(\d{2,3})(\d{2})(\d{2}(?:\.\d+)?)\s*([NS])[\s,;/]*(\d{3})(\d{2})(\d{2}(?:\.\d+)?)\s*([EW])/i;
 
 export function dmsToDecimal(degrees: number, minutes: number, seconds: number, hemisphere?: string) {
   if (minutes >= 60 || seconds >= 60) throw new Error('Invalid DMS minutes or seconds.');
@@ -13,6 +16,11 @@ export function parseCoordinate(text: string): { latitude?: number; longitude?: 
   if (compact) return {
     latitude: dmsToDecimal(+compact[2], +compact[3], +compact[4], compact[1]),
     longitude: dmsToDecimal(+compact[6], +compact[7], +compact[8], compact[5]),
+  };
+  const trailing = normalized.match(COMPACT_TRAILING);
+  if (trailing) return {
+    latitude: dmsToDecimal(+trailing[1], +trailing[2], +trailing[3], trailing[4]),
+    longitude: dmsToDecimal(+trailing[5], +trailing[6], +trailing[7], trailing[8]),
   };
   const parts = normalized.split(/[,;/]|\s{2,}/).map((part) => part.trim()).filter(Boolean);
   const result: { latitude?: number; longitude?: number } = {};
