@@ -28,6 +28,7 @@ import {
   listAgentTasks,
   readAgentTask,
   saveAgentTask,
+  taskDir,
   writeArtifact,
   TaskRunConflictError,
 } from "./storage";
@@ -237,6 +238,26 @@ agentRouter.patch("/packages/:id", async (req, res) => {
   found.pkg.status = "GROUPED";
   await saveAgentTask(found.task);
   res.json(found.pkg);
+});
+/**
+ * 删除任务及其全部产物。此前只能删文件、删程序包，任务本身没有出口——
+ * 界面能列出却删不掉，于是历史任务连同每份 PDF 的整套渲染页一直堆积（实测攒到 1.2GB）。
+ * 上传的 PDF 若没有别的任务在引用，一并删除，避免留下没人认领的文件。
+ */
+agentRouter.delete("/tasks/:id", async (req, res) => {
+  const task = await readAgentTask(req.params.id).catch(() => undefined);
+  if (!task) return res.status(404).json({ error: "任务不存在。" });
+  if (task.activeRun) {
+    return res.status(409).json({ error: "任务正在运行，请先取消再删除。", code: "TASK_RUN_ACTIVE" });
+  }
+  const others = (await listAgentTasks()).filter((item) => item.taskId !== task.taskId);
+  const stillReferenced = new Set(others.flatMap((item) => item.documents.map((doc) => path.resolve(doc.filePath))));
+  for (const document of task.documents) {
+    const file = path.resolve(document.filePath);
+    if (!stillReferenced.has(file)) await fs.unlink(file).catch(() => undefined);
+  }
+  await fs.rm(taskDir(task.taskId), { recursive: true, force: true });
+  res.status(204).end();
 });
 agentRouter.delete("/packages/:id", async (req, res) => {
   const found = await findPackage(req.params.id);
