@@ -573,3 +573,31 @@ test('a common-route leg carrying the procedure runway renders', () => {
   const text = simpleLegsTo424Text([leg], { airportIcao: 'WMKJ' });
   assert.match(text, /RW16/);
 });
+
+// ---- 模型响应必须符合所声明的 schema ----
+// structuredOutputMode=json_object 时 schema 是作为文本拼进提示词的，模型可能把它原样吐回来。
+// 那段回声本身是合法 JSON，只检查"是不是 JSON"会一路放行；而顶层没有 fullText，
+// 读出来是 undefined -> 空字符串，却被记为成功。
+// 实测 WMKJ 一次分析的 44 次转写里 13 次是这种回声。
+test('a schema echo does not satisfy the schema it echoes', async () => {
+  const Ajv = (await import('ajv')).default;
+  const ajv = new Ajv({ allErrors: false, strict: false });
+  const schema = JSON.parse(await (await import('node:fs/promises')).readFile('apps/aip-procedure-agent/prompts/page-transcriber/output-schema.json', 'utf8'));
+  const validate = ajv.compile(schema);
+  // 模型实际返回的内容形态：schema 定义本身
+  assert.equal(validate({ type: 'object', additionalProperties: false, required: ['fullText'], properties: { fullText: { type: 'string' } } }), false);
+  assert.match(ajv.errorsText(validate.errors), /fullText/);
+  // 真正的转写结果应当通过
+  assert.equal(validate({ fullText: 'AIP MALAYSIA', regions: [], languages: ['en'], decisionSummary: '' }), true);
+});
+
+test('every prompt schema compiles, so validation cannot fail for the wrong reason', async () => {
+  const Ajv = (await import('ajv')).default;
+  const fsp = await import('node:fs/promises');
+  const ajv = new Ajv({ allErrors: false, strict: false });
+  const dirs = await fsp.readdir('apps/aip-procedure-agent/prompts');
+  for (const dir of dirs) {
+    const schema = JSON.parse(await fsp.readFile(`apps/aip-procedure-agent/prompts/${dir}/output-schema.json`, 'utf8'));
+    assert.doesNotThrow(() => ajv.compile(schema), `${dir} 的 schema 无法编译`);
+  }
+});
