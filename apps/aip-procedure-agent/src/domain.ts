@@ -27,7 +27,14 @@ export interface AirportPackageAnalysis { airport: { icao: string; name: string;
 export type ProcedureCategory = 'SID' | 'STAR' | 'APPROACH';
 export type ApproachType = 'ILS' | 'LOC' | 'RNP' | 'RNP_AR' | 'VOR' | 'NDB' | 'GLS' | 'VISUAL' | 'OTHER';
 export type FixRole = 'IAF' | 'IF' | 'FAF' | 'FAP' | 'SDF' | 'MAPT' | 'MAHF' | 'DER' | 'NONE';
-export interface PirRoute { routeId: string; routeType: 'RUNWAY_TRANSITION' | 'COMMON_ROUTE' | 'ENROUTE_TRANSITION' | 'APPROACH_TRANSITION' | 'FINAL_APPROACH' | 'MISSED_APPROACH' | 'OTHER'; identifier: string; runway?: string | null; transitionFix?: string | null; legIds: string[]; sequence: number }
+/**
+ * 最低爬升梯度（PDG）。源页通常按程序整条发布一句，如
+ * "MINIMUM CLIMB GRADIENT (PDG) 5% UNTIL PASSING 6000FT FOR ATC PURPOSES"，
+ * 且同一张图上各条 SID 的数值可能不同（WMKJ 实测 PIMOK 1J 是 3500FT，其余 6000FT）。
+ * 此前 PIR 完全没有这个字段——不是没提取到，而是没建模，于是它在源页上明明白白却无处安放。
+ */
+export interface ClimbGradient { percent?: number | null; untilAltitudeFt?: number | null; purpose?: string | null; rawText?: string | null }
+export interface PirRoute { routeId: string; routeType: 'RUNWAY_TRANSITION' | 'COMMON_ROUTE' | 'ENROUTE_TRANSITION' | 'APPROACH_TRANSITION' | 'FINAL_APPROACH' | 'MISSED_APPROACH' | 'OTHER'; identifier: string; runway?: string | null; transitionFix?: string | null; climbGradient?: ClimbGradient | null; legIds: string[]; sequence: number }
 export interface PirFix { fixId: string; identifier: string; type: string; role?: FixRole | null; latitude?: number | null; longitude?: number | null; coordinateSourceType: 'EXPLICIT_TABLE' | 'EXPLICIT_TEXT' | 'NAVAID_DATABASE' | 'RUNWAY_DATABASE' | 'DERIVED_COURSE_DISTANCE' | 'CHART_GEOREFERENCED' | 'AI_INFERRED' | 'UNRESOLVED'; coordinateAccuracyMeters?: number | null; evidence: string[]; confidence: number; status: FieldStatus; allowFor424?: boolean; derivation?: string | null }
 export interface PirRunway { runwayId: string; designator: string; thresholdLatitude?: number | null; thresholdLongitude?: number | null; derLatitude?: number | null; derLongitude?: number | null; elevationFt?: number | null; thresholdCrossingHeightFt?: number | null; trueBearing?: number | null; evidence: string[]; status: FieldStatus }
 export interface PirMinima { minimaId: string; type: 'DA' | 'MDA' | 'OCA' | 'OCH' | 'RVR' | 'VIS'; valueFt?: number | null; valueMeters?: number | null; aircraftCategory?: string | null; runway?: string | null; condition?: string | null; rawText?: string | null; evidence: string[]; status: FieldStatus }
