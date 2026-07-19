@@ -181,20 +181,32 @@ async function transcribeScannedPages(task: AgentTask, signal: AbortSignal) {
   const scanned = candidates.map((item) => item.page);
   let transcribed = 0;
   let budgetExhausted = false;
+  const emptyTranscriptions: number[] = [];
+  const failedTranscriptions: number[] = [];
   for (const page of scanned) {
     if (transcribed >= budgets.maxOcrPages) { budgetExhausted = true; task.warningCount += 1; break; }
     assertActive(task, signal);
     try {
       const image = { pageNo: page.pageNumber, dataUrl: `data:image/png;base64,${(await fs.readFile(page.renderedImagePath)).toString('base64')}` };
       const { parsed } = await callModel(task, 'page-transcriber', { fileName: page.fileName, pageNumber: page.pageNumber }, [image], `OCR:${page.documentId}:${page.pageNumber}`, signal, { planAction: 'PAGE_TRANSCRIPTION' });
-      page.nativeText = String(parsed.fullText || '');
+      const text = String(parsed.fullText || '');
+      // 转写返回空文本不算成功。WMKJ 实测 p59/61/63 三页转写后仍是 0 字符，却被计入
+      // transcribedPages=44 报成全部完成；分组读不到内容只能靠推测命名，把 p65 的
+      // VOR Z 挪到了 p59 上，连带三条 ILS 变体整体消失——而 p59 的标题栏明写着
+      // "ILS Y OR LOC Y RWY 16"。空结果必须留下痕迹，页面也保持未转写状态。
+      if (!text.trim()) {
+        emptyTranscriptions.push(page.pageNumber);
+        task.warningCount += 1;
+        continue;
+      }
+      page.nativeText = text;
       page.textSpans = (parsed.regions || []).map((r: any) => ({ text: String(r.text || ''), bbox: [r.bbox[0] * page.width, r.bbox[1] * page.height, r.bbox[2] * page.width, r.bbox[3] * page.height] as [number, number, number, number] }));
       page.detectedLanguages = parsed.languages?.length ? parsed.languages : page.detectedLanguages;
       page.summary = page.nativeText.replace(/\s+/g, ' ').trim().slice(0, 1800);
       page.title = page.nativeText.split(/\r?\n/).map((s) => s.trim()).find((s) => s.length > 5)?.slice(0, 160);
       (page.quality as any).transcribed = true;
       transcribed += 1;
-    } catch (error) { task.warningCount += 1; void error; }
+    } catch (error) { task.warningCount += 1; failedTranscriptions.push(page.pageNumber); void error; }
   }
   // 预算不足时必须让"哪些页没被转写"可见——静默截断会让下游拿着不可读的文本继续跑。
   const byReason = candidates.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.reason]: (acc[item.reason] || 0) + 1 }), {});
@@ -203,6 +215,10 @@ async function transcribeScannedPages(task: AgentTask, signal: AbortSignal) {
     transcribedPages: transcribed,
     needByReason: byReason,
     budgetExhausted,
+    // 转写返回空 / 调用失败的页要单独列出：它们既没拿到内容，也不该被算作已完成。
+    // 下游看到"这几页仍不可读"，好过看到一个 44/44 的假成功。
+    emptyTranscriptions,
+    failedTranscriptions,
     untranscribedPages: budgetExhausted ? candidates.slice(transcribed).map((item) => item.page.pageNumber) : [],
   };
 }
