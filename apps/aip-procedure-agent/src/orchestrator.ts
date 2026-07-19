@@ -41,7 +41,8 @@ function generationDiffsToValidations(diffs: GenerationDiff[], geometry: { diffs
 }
 
 export function startAgentTask(task: AgentTask) { startTaskAnalysis(task); }
-export function startTaskAnalysis(task: AgentTask) { launch(task, (signal) => analyzeAirportFiles(task, signal)); }
+export function startTaskAnalysis(task: AgentTask) { launch(task, (signal) => analyzeAirportFiles(task, signal), 'analyze'); }
+export function startTaskRegrouping(task: AgentTask) { launch(task, (signal) => regroupExistingPages(task, signal), 'regroup'); }
 export function startPackagePlanning(task: AgentTask, pkg: BusinessProcedurePackage) { launch(task, (signal) => planPackage(task, pkg, signal)); }
 export function startPackageRecognition(task: AgentTask, pkg: BusinessProcedurePackage) { launch(task, (signal) => recognizePackage(task, pkg, signal)); }
 export function startPackagesRecognition(task: AgentTask, packages: BusinessProcedurePackage[]) { launch(task, (signal) => recognizePackages(task, packages, signal)); }
@@ -100,6 +101,24 @@ async function analyzeAirportFiles(task: AgentTask, signal: AbortSignal) {
   // —— 扫描页 OCR/视觉转写：无原生文本的页面不得被忽略 ——
   await step(task, 'SCANNED_PAGE_TRANSCRIPTION', () => transcribeScannedPages(task, signal));
 
+  await groupAndOrganize(task, signal);
+}
+
+/**
+ * 只重跑分组及其后处理，复用已有的 task.pages。
+ *
+ * 分组 prompt 调整后不该重付一次预处理与转写的代价——WMKJ 是 88 页渲染 + 44 次视觉转写，
+ * 而分组本身只有 1 次调用。既有的"重新分析"入口会把 task.pages 清空重来，转写结果一并丢失。
+ */
+export async function regroupExistingPages(task: AgentTask, signal: AbortSignal) {
+  if (!task.pages.length) throw new Error('任务尚无已解析页面，请先执行文档分析。');
+  task.status = 'RUNNING'; task.stage = 'ANALYZING'; task.error = undefined;
+  task.packages = []; task.procedures = []; task.airportAnalysis = undefined;
+  await saveAgentTask(task);
+  await groupAndOrganize(task, signal);
+}
+
+async function groupAndOrganize(task: AgentTask, signal: AbortSignal) {
   task.progress = 50; task.stage = 'ANALYZING'; await saveAgentTask(task);
   const analysis = await step(task, 'AIRPORT_PACKAGE_GROUPING', () => groupAirportPackages(task, signal));
   task.airportIcao = analysis.airport.icao || null; task.airportName = analysis.airport.name || null;

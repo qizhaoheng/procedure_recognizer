@@ -38,7 +38,7 @@ export function deriveRouteCode(procedureName: unknown): string | undefined {
   );
   const title = withoutTransition.replace(/\s+(?:DEPARTURE|ARRIVAL)$/, "");
   const titleWithLetter = title.replace(
-    /\s+(ALPHA|BRAVO|CHARLIE|DELTA|ECHO|FOXTROT|GOLF|HOTEL|INDIA|JULIETT|KILO|LIMA|MIKE|NOVEMBER|OSCAR|PAPA|QUEBEC|ROMEO|SIERRA|TANGO|UNIFORM|VICTOR|WHISKEY|XRAY|X-RAY|YANKEE|ZULU)$/,
+    /\s+(ALPHA|ALFA|BRAVO|CHARLIE|DELTA|ECHO|FOXTROT|GOLF|HOTEL|INDIA|JULIETT|JULIET|KILO|LIMA|MIKE|NOVEMBER|OSCAR|PAPA|QUEBEC|ROMEO|SIERRA|TANGO|UNIFORM|VICTOR|WHISKEY|WHISKY|XRAY|X-RAY|YANKEE|ZULU)$/,
     (_, word: string) => ` ${PHONETIC_LETTERS[word]}`,
   );
   const wordDesignator = titleWithLetter.match(
@@ -70,11 +70,14 @@ const WORD_DIGITS: Record<string, string> = {
   NINE: "9",
 };
 
+// 同一个字母在各国 AIP 里拼法不统一：ICAO 官方是 ALFA/JULIETT/WHISKY，
+// 而实际印刷中 ALPHA/JULIET/WHISKEY 同样常见。只收官方拼法会让整类程序解不出路线代码——
+// WMKJ 的 AIP 印 "AROSO ONE JULIET DEPARTURE"，8 条 SID 因此全被判为身份不明。
 const PHONETIC_LETTERS: Record<string, string> = {
-  ALPHA: "A", BRAVO: "B", CHARLIE: "C", DELTA: "D", ECHO: "E",
-  FOXTROT: "F", GOLF: "G", HOTEL: "H", INDIA: "I", JULIETT: "J",
+  ALPHA: "A", ALFA: "A", BRAVO: "B", CHARLIE: "C", DELTA: "D", ECHO: "E",
+  FOXTROT: "F", GOLF: "G", HOTEL: "H", INDIA: "I", JULIETT: "J", JULIET: "J",
   KILO: "K", LIMA: "L", MIKE: "M", NOVEMBER: "N", OSCAR: "O",
   PAPA: "P", QUEBEC: "Q", ROMEO: "R", SIERRA: "S", TANGO: "T",
-  UNIFORM: "U", VICTOR: "V", WHISKEY: "W", XRAY: "X", "X-RAY": "X",
+  UNIFORM: "U", VICTOR: "V", WHISKEY: "W", WHISKY: "W", XRAY: "X", "X-RAY": "X",
   YANKEE: "Y", ZULU: "Z",
 };
