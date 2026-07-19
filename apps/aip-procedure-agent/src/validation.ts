@@ -173,3 +173,4 @@ function hasCoord(fix?: PirFix): fix is PirFix & { latitude: number; longitude: 
   return !!fix && Number.isFinite(fix.latitude) && Number.isFinite(fix.longitude);
 }
 function angleDiff(a: number, b: number) { const d = Math.abs(a - b) % 360; return d > 180 ? 360 - d : d; }
+

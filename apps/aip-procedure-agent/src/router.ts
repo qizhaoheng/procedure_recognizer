@@ -528,6 +528,14 @@ function publicDocument(document: AipDocument) {
 function workspaceTask(task: AgentTask) {
   return {
     ...task,
+    // procedures 被剥离以控制体积，前端因此无法自行判断某个包有没有识别结果。
+    // 显式给出，避免前端退回用 status 猜——REQUIRES_REVIEW 只说明校验有问题，不等于有结果。
+    packages: task.packages.map((pkg) => ({
+      ...pkg,
+      hasResult: task.procedures.some(
+        (procedure) => procedure.packageId === pkg.packageId,
+      ),
+    })),
     documents: task.documents.map(publicDocument),
     pages: task.pages.map((page) => ({
       pageNumber: page.pageNumber,

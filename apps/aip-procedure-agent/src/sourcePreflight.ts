@@ -55,9 +55,9 @@ export function assessPackageSources(pkg: BusinessProcedurePackage, pages: PageA
   const texts = roles('PROCEDURE_TEXT');
   const runway = roles('RUNWAY_DATA');
   const navaid = roles('NAVAID_DATA');
-  const falseCharts = charts.filter((page) => isBelowChartBand(page, pkg, pages));
   pkg.sourceCompleteness = {
-    chart: charts.length === 1 && !falseCharts.length ? 'PRESENT' : charts.length ? 'AMBIGUOUS' : 'MISSING',
+    // 只做结构陈述（有几张图页），不再用矢量密度猜"这张图其实是表"——那个比值拟合自单一机场。
+    chart: charts.length === 1 ? 'PRESENT' : charts.length ? 'AMBIGUOUS' : 'MISSING',
     table: tables.length ? 'PRESENT' : 'MISSING',
     coordinates: coordinates.length ? 'PRESENT' : 'MISSING',
     text: texts.length ? 'PRESENT' : 'NOT_REQUIRED',
@@ -74,7 +74,10 @@ export function assessPackageSources(pkg: BusinessProcedurePackage, pages: PageA
           ? 'COORDINATE_MISSING'
           : 'COMPLETE_SOURCE_SET';
   pkg.preflight = packagePreflight(pkg, pages);
-  if (!pkg.preflight.preflightPassed && pkg.status === 'GROUPED') pkg.status = 'REQUIRES_REVIEW';
+  // 刻意不动 pkg.status。生命周期状态（待识别/识别中/已完成/需复核）与来源质量是两条独立的轴：
+  // 预检跑在识别之前，此时还没有任何结果可"复核"。旧实现把 GROUPED 覆盖成 REQUIRES_REVIEW，
+  // 既让界面显示"没点识别就需复核"，也销毁了"这个包到底跑没跑过"的信息。
+  // 预检结论完整保存在 pkg.preflight / pkg.sourceCompleteness，由前端作为独立标识展示。
   pkg.warnings = [...new Set([...(pkg.warnings || []), ...pkg.preflight.blockingIssues.map((issue) => `${issue.code}: ${issue.message}`)])];
   return pkg;
 }
@@ -87,12 +90,19 @@ export function packagePreflight(pkg: BusinessProcedurePackage, pages: PageAsset
   if (!routeDesignator(pkg.procedureName) && !compactIdentity(pkg.procedureName) && !(pkg.procedureCategory === 'APPROACH' && approachIdentity(pkg.procedureName))) issues.push({ code: 'PROCEDURE_IDENTITY_UNCLEAR', procedure: pkg.procedureName, message: 'The package does not have an unambiguous procedure identity.' });
   if (!['SID', 'STAR', 'APPROACH'].includes(pkg.procedureCategory)) issues.push({ code: 'PROCEDURE_CATEGORY_UNCLEAR', procedure: pkg.procedureName, message: 'Procedure category is not SID, STAR or APPROACH.' });
   if (!chartPages.length) issues.push({ code: 'CHART_MISSING', procedure: pkg.procedureName, message: 'No actual procedure chart is associated with this package.' });
-  if (!tablePages.length) issues.push({ code: 'TABLE_MISSING', procedure: pkg.procedureName, message: 'No procedure table is associated with this package.' });
+  // 编码表是佐证而非前提：整套流程本来就以读图为主，缺表仍可识别。WMKJ 的进近是
+  // "航图 + 最低标准表"、没有 FMS 编码表，雷达引导 SID 同样没有——按阻塞处理会误拦一大片。
+  if (!tablePages.length) warnings.push({ code: 'TABLE_MISSING', procedure: pkg.procedureName, message: 'No procedure coding table is associated with this package; recognition will rely on the chart alone.' });
   for (const page of chartPages) {
-    const asset = findPage(page, pages);
-    if (!asset) { warnings.push({ code: 'CHART_PAGE_NOT_IN_CORPUS', page: page.pageNumber, message: 'The declared chart page was not found among the parsed pages.' }); continue; }
-    if (isBelowChartBand(page, pkg, pages)) issues.push({ code: 'CHART_PAGE_IS_ACTUALLY_TABLE', page: page.pageNumber, message: `The declared chart page carries ${pageVectorPathCount(asset)} vector operators, under ${CHART_TO_TABLE_RATIO}x this package's table pages (${tableDensityBaseline(pkg, pages)}).` });
+    if (!findPage(page, pages)) warnings.push({ code: 'CHART_PAGE_NOT_IN_CORPUS', page: page.pageNumber, message: 'The declared chart page was not found among the parsed pages.' });
   }
+  // 这里曾有 CHART_PAGE_IS_ACTUALLY_TABLE：要求每张图页的矢量密度达本包表格页的 3 倍。
+  // 该比值拟合自 OMAA（图 4.7万-9.5万 vs 表 611-1772，差 40 倍），换到 WMKJ 就失效——
+  // 那边航图只有 1814-4829 个算子、与表格同量级，比值连续分布在 1.12-6.79，阈值正好切在中间
+  // （2.91 被拦、3.14 放行，相邻取值两种结果）。且 OMAA 上真实倒置全部由
+  // repairInvertedChartRoles 修好，该拦截实际一次未命中，只在 WMKJ 制造了 4 个误报，故移除。
+  // 修复本身保留：它判的是"表格页比图页密 3 倍以上"这种数量级倒置（OMAA 实测 60 倍），
+  // 方向相反且宽松得多，两份语料都判得准。
   if (!pkg.packagePages.some((page) => ['COORDINATE_TABLE', 'WAYPOINT_COORDINATE_TABLE'].includes(page.pageRole) || page.secondaryRoles?.some((role) => ['COORDINATE_TABLE', 'WAYPOINT_COORDINATE_TABLE'].includes(role)))) warnings.push({ code: 'COORDINATE_SOURCE_MISSING', procedure: pkg.procedureName, message: 'No explicit coordinate source was associated.' });
   if (!pkg.packagePages.some((page) => page.pageRole === 'RUNWAY_DATA')) warnings.push({ code: 'RUNWAY_DATA_MISSING', procedure: pkg.procedureName, message: 'Runway support data is missing.' });
   if (/DME_ARC|CONVENTIONAL|VOR|NDB|ILS|LOC/.test(pkg.navigationType || '') && !pkg.packagePages.some((page) => page.pageRole === 'NAVAID_DATA')) issues.push({ code: 'NAVAID_DATA_MISSING', procedure: pkg.procedureName, message: 'The conventional procedure has no navaid support source.' });
@@ -102,25 +112,6 @@ export function packagePreflight(pkg: BusinessProcedurePackage, pages: PageAsset
 
 function findPage(ref: { documentId: string; pageNumber: number }, pages: PageAsset[]) {
   return pages.find((page) => page.documentId === ref.documentId && page.pageNumber === ref.pageNumber);
-}
-
-/** 本包表格页算子数的中位数；没有表格页时返回 undefined，表示无从比较。 */
-function tableDensityBaseline(pkg: BusinessProcedurePackage, pages: PageAsset[]): number | undefined {
-  const counts = pkg.packagePages
-    .filter((page) => page.pageRole === 'PROCEDURE_TABLE')
-    .map((page) => findPage(page, pages))
-    .filter((asset): asset is PageAsset => !!asset)
-    .map(pageVectorPathCount)
-    .sort((a, b) => a - b);
-  return counts.length ? counts[Math.floor(counts.length / 2)] : undefined;
-}
-
-/** 无基准可比、或页面不在语料里时一律返回 false —— 不拦。 */
-function isBelowChartBand(ref: { documentId: string; pageNumber: number }, pkg: BusinessProcedurePackage, pages: PageAsset[]) {
-  const baseline = tableDensityBaseline(pkg, pages);
-  if (baseline === undefined) return false;
-  const asset = findPage(ref, pages);
-  return asset ? pageVectorPathCount(asset) < CHART_TO_TABLE_RATIO * baseline : false;
 }
 
 function routeDesignator(name: string) { try { return deriveRouteCode(name); } catch { return undefined; } }

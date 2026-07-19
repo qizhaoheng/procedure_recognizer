@@ -9,7 +9,7 @@ import { carryOverManualEdits } from './fragmentMerger';
 import { deviationsToValidations, verifyAgainstSourceChart } from './chartOverlay';
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from './sourcePreflight';
 import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan } from './domain';
-import { PdfDocumentTools } from './pdfPreprocessor';
+import { PdfDocumentTools, garbledTextRatio } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
 import { saveAgentTask, taskDir, writeArtifact } from './storage';
 
@@ -72,11 +72,37 @@ async function analyzeAirportFiles(task: AgentTask, signal: AbortSignal) {
   await writeArtifact(task.taskId, 'airport-package-analysis.json', analysis); await writeArtifact(task.taskId, 'procedure-packages.json', task.packages); await saveAgentTask(task);
 }
 
+// 判据从"页面有没有文本"改成"页面的文本能不能用"。WMKJ 的 p35 有 1190 个字符、
+// 覆盖率 0.463，看着文本充裕，实际是无 ToUnicode 映射导致的字形码乱码；旧判据
+// （isScanned=文本<20 字符，或覆盖率<0.02）完全不触发，模型读不到坐标就编了 7 个。
+const GARBLED_TEXT_RATIO = 0.35;   // 实测正常页 0.04-0.15、乱码页 0.59-0.64，取中间空档
+const SPARSE_TEXT_CHARS = 200;     // 正文没进文本层的页（WMKJ 航图/编码表只剩页眉 75-99 字符）
+const GRAPHICS_RICH_OPERATORS = 1000; // 有实质图形内容，说明页面并非真的空
+
+function transcriptionNeed(page: PageAsset): { need: boolean; priority: number; reason: string } {
+  // 空白页永远排在"文本最少"的最前面，旧实现把 30 次 OCR 全烧在 OMAA 的
+  // "PAGE INTENTIONALLY LEFT BLANK" 上。没有内容就没有可转写的东西。
+  if (isBlankPage(page)) return { need: false, priority: 9, reason: '' };
+  if (page.quality.isScanned) return { need: true, priority: 0, reason: 'NO_TEXT_LAYER' };
+  // 就地从文本算，不读 quality.garbledTextRatio：该字段只在预处理时写入，
+  // 存量任务一律没有，依赖它会让乱码检测对所有既有任务静默失效。
+  if (garbledTextRatio(page.nativeText) >= GARBLED_TEXT_RATIO) return { need: true, priority: 1, reason: 'TEXT_LAYER_GARBLED' };
+  if (page.quality.nativeTextCoverage < 0.02) return { need: true, priority: 2, reason: 'TEXT_COVERAGE_NEGLIGIBLE' };
+  if (page.nativeText.trim().length < SPARSE_TEXT_CHARS && pageVectorPathCount(page) >= GRAPHICS_RICH_OPERATORS) return { need: true, priority: 3, reason: 'CONTENT_NOT_IN_TEXT_LAYER' };
+  return { need: false, priority: 9, reason: '' };
+}
+
 async function transcribeScannedPages(task: AgentTask, signal: AbortSignal) {
-  const scanned = task.pages.filter((p) => p.quality.isScanned || p.quality.nativeTextCoverage < 0.02);
+  // 预算有限（maxOcrPages），按损坏程度排序，让最不可读的页优先拿到转写额度。
+  const candidates = task.pages
+    .map((page) => ({ page, ...transcriptionNeed(page) }))
+    .filter((item) => item.need)
+    .sort((a, b) => a.priority - b.priority || a.page.pageNumber - b.page.pageNumber);
+  const scanned = candidates.map((item) => item.page);
   let transcribed = 0;
+  let budgetExhausted = false;
   for (const page of scanned) {
-    if (transcribed >= budgets.maxOcrPages) { task.warningCount += 1; break; }
+    if (transcribed >= budgets.maxOcrPages) { budgetExhausted = true; task.warningCount += 1; break; }
     assertActive(task, signal);
     try {
       const image = { pageNo: page.pageNumber, dataUrl: `data:image/png;base64,${(await fs.readFile(page.renderedImagePath)).toString('base64')}` };
@@ -90,7 +116,15 @@ async function transcribeScannedPages(task: AgentTask, signal: AbortSignal) {
       transcribed += 1;
     } catch (error) { task.warningCount += 1; void error; }
   }
-  return { scannedPages: scanned.length, transcribedPages: transcribed };
+  // 预算不足时必须让"哪些页没被转写"可见——静默截断会让下游拿着不可读的文本继续跑。
+  const byReason = candidates.reduce<Record<string, number>>((acc, item) => ({ ...acc, [item.reason]: (acc[item.reason] || 0) + 1 }), {});
+  return {
+    scannedPages: scanned.length,
+    transcribedPages: transcribed,
+    needByReason: byReason,
+    budgetExhausted,
+    untranscribedPages: budgetExhausted ? candidates.slice(transcribed).map((item) => item.page.pageNumber) : [],
+  };
 }
 
 const GROUPING_BATCH_PAGE_LIMIT = 110;

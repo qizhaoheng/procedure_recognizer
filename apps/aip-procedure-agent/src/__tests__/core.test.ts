@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { dmsToDecimal, geodesicForward, geodesicInverse, parseCoordinate } from '../coordinate';
 import { arc, compile424Candidate, compileGeoJson, validatePir } from '../compiler';
+import { garbledTextRatio } from '../pdfPreprocessor';
 import type { BusinessProcedurePackage, PageAsset, ProcedurePIR } from '../domain';
 import { derivePackageSources, selectGroupingImagePages } from '../orchestrator';
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
@@ -113,23 +114,34 @@ test('a genuine chart page passes preflight (the roleReason check blocked 70 of 
   assert.equal(pkg.status, 'GROUPED', '真航图不得被降级为需复核');
 });
 
-test('an extreme outlier page does not drag the chart criterion up', () => {
-  // p64 是机场平面图（258 万算子）。判据只看本包内的图/表比，离群值不参与。
-  const pkg = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
-  assert.equal(pkg.preflight!.preflightPassed, true, '离群值不得把真航图判成表格');
+// 预检跑在识别之前，此时没有任何结果可"复核"。它绝不能改生命周期状态——
+// 旧实现把 GROUPED 覆盖成 REQUIRES_REVIEW，界面于是显示"没点识别就全是需复核"，
+// 且从状态上再也看不出这个包跑没跑过。
+test('preflight never touches the lifecycle status', () => {
+  const blocked = assessPackageSources(pkgWith([{ page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
+  assert.ok(blocked.preflight!.blockingIssues.length, '这个包确实有阻塞项');
+  assert.equal(blocked.status, 'GROUPED', '有阻塞项也必须停在待识别');
+  const clean = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
+  assert.equal(clean.status, 'GROUPED');
 });
 
-test('a coding-table page declared as chart is still blocked', () => {
-  const pkg = assessPackageSources(pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }, { page: 23, role: 'PROCEDURE_TABLE' }]), omaaCorpus);
-  assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 1);
-  assert.equal(pkg.packageStatus, 'SOURCE_AMBIGUOUS');
-  assert.equal(pkg.status, 'REQUIRES_REVIEW');
+// 编码表是佐证不是前提：WMKJ 的进近是"航图 + 最低标准表"、没有 FMS 编码表，
+// 雷达引导 SID 同样没有。按阻塞处理会误拦 15 个包。
+test('a missing coding table is a warning, not a blocker', () => {
+  const pkg = assessPackageSources(pkgWith([{ page: 115, role: 'PROCEDURE_CHART' }]), omaaCorpus);
+  assert.ok(pkg.preflight!.warnings.some((i) => i.code === 'TABLE_MISSING'));
+  assert.ok(!pkg.preflight!.blockingIssues.some((i) => i.code === 'TABLE_MISSING'));
 });
 
-test('with no table page to compare against, preflight refuses to guess', () => {
-  const pkg = assessPackageSources(pkgWith([{ page: 43, role: 'PROCEDURE_CHART' }]), omaaCorpus);
-  assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 0, '无基准时不得拦截');
-  assert.ok(pkg.preflight!.blockingIssues.some((i) => i.code === 'TABLE_MISSING'), '缺表另行报告');
+// 密度型 CHART_PAGE_IS_ACTUALLY_TABLE 已移除：该比值拟合自 OMAA（图/表差 40 倍），
+// WMKJ 的航图只有 1814-4829 个算子、与表格同量级，比值连续分布在 1.12-6.79，
+// 固定阈值必然切在合法航图中间（实测 2.91 被拦、3.14 放行）。倒置改由 repair 处理。
+test('a low-density chart page is no longer blocked by a fixed ratio', () => {
+  const wmkjLike = [omaaPage(51, 4829, 0.4), omaaPage(52, 1537, 0.6), omaaPage(41, 4140, 0.4), omaaPage(42, 1423, 0.6)];
+  for (const [chart, table] of [[41, 42], [51, 52]]) {
+    const pkg = assessPackageSources(pkgWith([{ page: chart, role: 'PROCEDURE_CHART' }, { page: table, role: 'PROCEDURE_TABLE' }]), wmkjLike);
+    assert.equal(pkg.preflight!.blockingIssues.filter((i) => i.code === 'CHART_PAGE_IS_ACTUALLY_TABLE').length, 0, `p${chart}/p${table} 比值不足 3 也不该被拦`);
+  }
 });
 
 test('a package with no chart page at all is blocked as CHART_MISSING', () => {
@@ -190,4 +202,34 @@ test('sources stays consistent with packagePages after a role swap', () => {
   const chartGlobals = pages.filter((p) => p.pageNumber === 115).map((p) => p.globalPageNumber);
   assert.deepEqual(pkg.sources.primaryCharts, chartGlobals, 'sources.primaryCharts 必须跟随 pageRole 更新');
   assert.ok(!pkg.sources.primaryCharts.includes(pages.find((p) => p.pageNumber === 43)!.globalPageNumber));
+});
+
+// ---- 文本可用性判据 ----
+// 旧判据只问"页面有没有文本"：WMKJ 的 p35 有 1190 字符、覆盖率 0.463，看着文本充裕，
+// 实际是无 ToUnicode 映射的字形码乱码。旧规则在 WMKJ 88 页里一页都没选中，
+// 模型读不到坐标就编了 7 个（见上面的出处核验）。
+test('garbled glyph-code text is detected as unusable', () => {
+  // WMKJ p35 实际抽出的文本片段："CIVIL AVIATION AUTHORITY OF MALAYSIA" 的字形码
+  const garbled = '&,9,/$9,$7,21$87+25,7<2)0$/$<6,$ ^fsfi=^sf^qflk=^rqelofqv=lc=j^i^vpf^';
+  assert.ok(garbledTextRatio(garbled) >= 0.35, `实测应在 0.59-0.64，得到 ${garbledTextRatio(garbled)}`);
+});
+
+test('a contents page with dotted leaders is not mistaken for garbled text', () => {
+  // OMAA p63 原始符号占比 0.49，折叠连续重复字符后降到 0.15——点线导引是同一字符重复，
+  // 文本本身完全可读。不折叠就会把正常目录页送去 OCR。
+  const contents = 'OMAA AD 2.24 CHARTS RELATED TO AN AERODROME AD CHART - ICAO (Chart OMAA-AD-2-21A) ............................ 63';
+  assert.ok(garbledTextRatio(contents) < 0.35, `目录页不得判为乱码，得到 ${garbledTextRatio(contents)}`);
+});
+
+test('ordinary AIP text stays well clear of the threshold', () => {
+  for (const sample of [
+    'ARP coordinates and site at AD 013826N 1034013E In front of AFRS station.',
+    'NAV Specification VPA/TCH Speed Limit (KT) Distance (NM) Altitude (FT) Turn Direction',
+    'RNAV 1 WITH GNSS REQUIRED AL DHAFRA MIL ZAYED INTL KANIP MEKRI ATUDO',
+  ]) assert.ok(garbledTextRatio(sample) < 0.2, `${sample.slice(0, 30)} -> ${garbledTextRatio(sample)}`);
+});
+
+test('empty text yields no garbling signal', () => {
+  assert.equal(garbledTextRatio(''), 0);
+  assert.equal(garbledTextRatio('   \n  '), 0);
 });
