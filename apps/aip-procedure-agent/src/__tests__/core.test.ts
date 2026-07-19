@@ -413,3 +413,25 @@ test('non-blocker severities and anchors are preserved', () => {
   assert.equal(validations[0].fieldPath, 'fixes.KJ706');
   assert.match(validations[0].message, /source page 35/);
 });
+
+// 视觉转写输出的是带度分秒符号的格式（"02° 03' 57.10\" N"），而符号被换成空格后，
+// 原先按 2 个以上空白切分恰好把这一组切碎，导致转写出来的坐标表一个都读不出来——
+// 转写辛苦读回来的数据在解析这一步全丢了。
+test('parses the degree-minute-second form produced by visual transcription', () => {
+  const value = parseCoordinate('ADLOV 02° 03\' 57.10" N 103° 46\' 40.10" E');
+  assert.ok(Math.abs(value.latitude! - 2.065861) < 1e-5, String(value.latitude));
+  assert.ok(Math.abs(value.longitude! - 103.777806) < 1e-5, String(value.longitude));
+});
+
+test('a waypoint identifier containing digits does not derail the scan', () => {
+  // KJ706：扫描正则若不强制要求半球符，会先在 "706 01 37" 上匹配一个无半球符的三元组、
+  // 丢弃它的同时把位置推过真正的度分秒，于是带数字的点名读不出坐标、不带数字的却能读出来。
+  const value = parseCoordinate('KJ706 01° 37\' 03.66" N 103° 29\' 46.28" E');
+  assert.ok(Math.abs(value.latitude! - 1.617683) < 1e-5, String(value.latitude));
+  assert.ok(Math.abs(value.longitude! - 103.496189) < 1e-5, String(value.longitude));
+});
+
+test('table numbers without a hemisphere are never read as coordinates', () => {
+  assert.deepEqual(parseCoordinate('010 CA - - 160° - - +1000 - RNAV 1'), {});
+  assert.deepEqual(parseCoordinate('030 TF SABKA - 317° 18.6 - +6000'), {});
+});
