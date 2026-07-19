@@ -1,0 +1,61 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["featureCollection", "unresolvedLegs", "decisionSummary"],
+  "properties": {
+    "featureCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "features"],
+      "properties": {
+        "type": { "type": "string", "enum": ["FeatureCollection"] },
+        "features": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type", "geometry", "properties"],
+            "properties": {
+              "type": { "type": "string", "enum": ["Feature"] },
+              "geometry": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["type", "coordinates"],
+                "properties": {
+                  "type": { "type": "string", "enum": ["Point", "LineString", "MultiLineString"] },
+                  "coordinates": { "type": "array" }
+                }
+              },
+              "properties": {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["featureType"],
+                "properties": {
+                  "featureType": { "type": "string", "enum": ["LEG", "FIX", "RUNWAY", "HOLDING", "ANNOTATION"] },
+                  "legId": { "type": ["string", "null"] },
+                  "fixId": { "type": ["string", "null"] },
+                  "pathTerminator": { "type": ["string", "null"] },
+                  "openEnded": { "type": ["boolean", "null"] },
+                  "label": { "type": ["string", "null"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "unresolvedLegs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["legId", "reason"],
+        "properties": {
+          "legId": { "type": "string" },
+          "reason": { "type": "string" }
+        }
+      }
+    },
+    "decisionSummary": { "type": "string" }
+  }
+}

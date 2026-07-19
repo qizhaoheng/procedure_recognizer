@@ -8,13 +8,35 @@ import { executeCorrectiveLegExtraction, executePlannedRecognition, materializeE
 import { carryOverManualEdits } from './fragmentMerger';
 import { deviationsToValidations, verifyAgainstSourceChart } from './chartOverlay';
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from './sourcePreflight';
-import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan } from './domain';
+import { generate424WithAi, generateGeometryWithAi, type GenerationDiff } from './aiGeneration';
+import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan, ValidationResult } from './domain';
 import { PdfDocumentTools, garbledTextRatio } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
 import { saveAgentTask, taskDir, writeArtifact } from './storage';
 
 const running = new Map<string, AbortController>();
 const executionMode = () => (process.env.AGENT_EXECUTION_MODE === 'single' ? 'single' : 'planned');
+const aiGenerationEnabled = () => process.env.AGENT_AI_GENERATION !== 'off';
+
+/** 生成偏差进 validations，让它们和识别期的问题一样出现在质量面板里，而不是埋在产物内部。 */
+function generationDiffsToValidations(diffs: GenerationDiff[], geometry: { diffs: GenerationDiff[]; unresolvedLegs: Array<{ legId: string; reason: string }> }): ValidationResult[] {
+  const out: ValidationResult[] = [];
+  for (const diff of [...diffs, ...geometry.diffs]) {
+    out.push({
+      ruleCode: `AI_GENERATION_${diff.code}`,
+      // 生成偏差不推翻识别结果，标 WARNING；识别本身的对错由 validatePir 判定。
+      severity: diff.code === 'UNPARSEABLE' || diff.code === 'NO_RECORDS_PARSED' || diff.code === 'EMPTY_OUTPUT' ? 'ERROR' : 'WARNING',
+      fieldPath: diff.kind === 'ARINC424' ? 'candidate424' : 'geojson',
+      message: diff.detail,
+      evidence: [],
+      autoRepairable: false,
+    });
+  }
+  for (const leg of geometry.unresolvedLegs) {
+    out.push({ ruleCode: 'AI_GENERATION_LEG_UNRESOLVED', severity: 'WARNING', fieldPath: 'geojson', message: `Leg ${leg.legId} could not be drawn: ${leg.reason}`, evidence: [], autoRepairable: false });
+  }
+  return out;
+}
 
 export function startAgentTask(task: AgentTask) { startTaskAnalysis(task); }
 export function startTaskAnalysis(task: AgentTask) { launch(task, (signal) => analyzeAirportFiles(task, signal)); }
@@ -303,8 +325,20 @@ async function recognizePackage(task: AgentTask, pkg: BusinessProcedurePackage, 
     pir.validation.results = validations;
     procedure.validations = validations;
     const gate = applyQualityGate(pir, validations);
-    procedure.geojson = compileGeoJson(pir);
-    procedure.candidate424 = compile424Candidate(pir, validations);
+    // 产出由 AI 生成，确定性编译器退为参照物：往返核对差异如实记录，不改写 AI 的输出、也不拒出。
+    // 关掉 AI 生成时（AGENT_AI_GENERATION=off）回落到确定性编译，便于对照。
+    if (aiGenerationEnabled()) {
+      const generated424 = await step(task, `ARINC424_GENERATION:${pkg.procedureKey}`, () => generate424WithAi(task, pir, signal, { procedureId: procedure.procedureId, encodingContext: { airportIcao: pir.airport.icao } }));
+      const generatedGeometry = await step(task, `GEOMETRY_GENERATION:${pkg.procedureKey}`, () => generateGeometryWithAi(task, pir, signal, { procedureId: procedure.procedureId, referenceData: { runwayData: pir.runwayData ?? [] } }));
+      procedure.candidate424 = generated424;
+      procedure.geojson = generatedGeometry.featureCollection as Record<string, unknown>;
+      validations = [...validations, ...generationDiffsToValidations(generated424.diffs, generatedGeometry)];
+      procedure.validations = validations;
+      pir.validation.results = validations;
+    } else {
+      procedure.geojson = compileGeoJson(pir);
+      procedure.candidate424 = compile424Candidate(pir, validations);
+    }
     await materializeEvidenceCrops(task, pir, procedure.procedureId);
     procedure.status = 'COMPLETED';
     pkg.status = gate;

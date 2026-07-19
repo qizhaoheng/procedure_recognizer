@@ -1,0 +1,51 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["legs", "missingFields", "decisionSummary"],
+  "properties": {
+    "legs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["procedureName", "procedureCode", "category", "runway", "sequence", "fix", "pathTerminator"],
+        "properties": {
+          "procedureName": { "type": "string" },
+          "procedureCode": { "type": "string" },
+          "category": { "type": "string", "enum": ["SID", "STAR", "APPROACH"] },
+          "runway": { "type": "string" },
+          "transitionName": { "type": ["string", "null"] },
+          "branchRole": { "type": ["string", "null"], "enum": ["RUNWAY", "COMMON", "ENROUTE", null] },
+          "routeTypeChar": { "type": ["string", "null"] },
+          "sequence": { "type": "string" },
+          "fix": { "type": "string" },
+          "fixSection": { "type": ["string", "null"] },
+          "pathTerminator": { "type": "string" },
+          "turnDirection": { "type": ["string", "null"], "enum": ["L", "R", "", null] },
+          "courseDegMag": { "type": ["number", "null"] },
+          "distanceNm": { "type": ["number", "null"] },
+          "altitudeSign": { "type": ["string", "null"], "enum": ["+", "-", "", null] },
+          "altitudeValue": { "type": ["number", "null"] },
+          "altitudeUpperFt": { "type": ["number", "null"] },
+          "speedLimitKias": { "type": ["number", "null"] },
+          "recommendedNavaid": { "type": ["string", "null"] },
+          "holdingAtFix": { "type": ["boolean", "null"] },
+          "endOfProcedure": { "type": ["boolean", "null"] }
+        }
+      }
+    },
+    "missingFields": { "type": "array", "items": { "type": "string" } },
+    "decisionSummary": { "type": "string" },
+    "encodingProfile": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["assumptions"],
+      "properties": {
+        "customerArea": { "type": ["string", "null"] },
+        "sectionCode": { "type": ["string", "null"] },
+        "subsectionCode": { "type": ["string", "null"] },
+        "assumptions": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}
