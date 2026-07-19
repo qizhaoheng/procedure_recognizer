@@ -8,7 +8,7 @@ import { derivePackageSources, selectGroupingImagePages } from '../orchestrator'
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
 import { verify424Text, verifyGeometry } from '../aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from '../airportReference';
-import { createEmptyPir, mergeFragment } from '../fragmentMerger';
+import { createEmptyPir, mergeFragment, resolveRunwayFixes } from '../fragmentMerger';
 import { deriveRouteCode } from '../../../../server/src/services/jeppesen424/routeCode';
 import { completenessFindingsToValidations } from '../completenessAudit';
 import { simpleLegsTo424Text } from '../../../../server/src/services/jeppesen424/simpleLegsTo424Text';
@@ -484,4 +484,49 @@ test('spelled-out designators accept both official and common phonetic spellings
 
 test('a radar-vectored departure genuinely has no route code', () => {
   assert.equal(deriveRouteCode('JOHOR RADAR TWO DEPARTURE'), undefined);
+});
+
+// ---- 跑道 fix 坐标的确定性补齐 ----
+// AD 2.12 页里白纸黑字的 "THR coordinates 013919.83N 1033950.29E" 已经进了 PIR 的
+// runwayData，却没有任何环节把它接到航段引用的那个跑道 fix 上——于是 RW16 一直
+// UNRESOLVED，离场起点锚不住、机场画不出来、下游一连串腿无法绘制。
+function pirWithRunway(role: 'DER' | 'NONE'): ProcedurePIR {
+  const pir = samplePir();
+  pir.fixes = [{ fixId: 'rw', identifier: 'RW16', type: 'RUNWAY', role, latitude: null, longitude: null, coordinateSourceType: 'UNRESOLVED', evidence: [], confidence: 1, status: 'UNRESOLVED', allowFor424: true }];
+  pir.legs = []; pir.routes[0].legIds = [];
+  pir.runwayData = [{ runwayId: 'RWY-16', designator: '16', thresholdLatitude: 1.655508, thresholdLongitude: 103.663969, derLatitude: 1.623244, derLongitude: 103.675697, evidence: ['p10'], status: 'CONFIRMED' }];
+  return pir;
+}
+
+test('a departure-end runway fix takes the far end of the runway', () => {
+  const pir = pirWithRunway('DER');
+  assert.equal(resolveRunwayFixes(pir), 1);
+  const fix = pir.fixes[0];
+  assert.equal(fix.latitude, 1.623244, '从 16 号跑道起飞，离场端是跑道另一头');
+  assert.equal(fix.coordinateSourceType, 'RUNWAY_DATABASE');
+  assert.equal(fix.status, 'DERIVED');
+  assert.match(fix.derivation!, /departure end/);
+  assert.deepEqual(fix.evidence, ['p10'], '证据要跟着跑道数据一起带过来');
+});
+
+test('a non-departure runway fix takes the threshold', () => {
+  const pir = pirWithRunway('NONE');
+  resolveRunwayFixes(pir);
+  assert.equal(pir.fixes[0].latitude, 1.655508);
+  assert.match(pir.fixes[0].derivation!, /threshold/);
+});
+
+test('an already-resolved fix is left alone', () => {
+  const pir = pirWithRunway('DER');
+  pir.fixes[0].latitude = 9.9; pir.fixes[0].longitude = 99.9;
+  pir.fixes[0].coordinateSourceType = 'EXPLICIT_TABLE';
+  assert.equal(resolveRunwayFixes(pir), 0);
+  assert.equal(pir.fixes[0].latitude, 9.9, '已有坐标不得被覆盖');
+});
+
+test('a runway fix with no matching runway data stays unresolved', () => {
+  const pir = pirWithRunway('DER');
+  pir.runwayData[0].designator = '34';
+  assert.equal(resolveRunwayFixes(pir), 0);
+  assert.equal(pir.fixes[0].latitude, null, '没有对应跑道就保持未解析，不得瞎凑');
 });

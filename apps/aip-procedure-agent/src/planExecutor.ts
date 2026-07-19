@@ -1,7 +1,7 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { budgets, callModel } from './modelGateway';
-import { carryOverManualEdits, createEmptyPir, mergeFragment, type PirFragment } from './fragmentMerger';
+import { carryOverManualEdits, createEmptyPir, mergeFragment, resolveRunwayFixes, type PirFragment } from './fragmentMerger';
 import { validatePir } from './validation';
 import type { AgentTask, BusinessProcedurePackage, PageAsset, ProcedurePIR, RecognitionAction, RecognitionPlan } from './domain';
 import { saveAgentTask, taskDir, writeArtifact } from './storage';
@@ -76,6 +76,9 @@ export async function executePlannedRecognition(
     }
   }
   finalizeQuality(pir);
+  // 跑道 fix 的坐标从已提取的跑道数据确定性补齐。放在人工编辑回填之前，
+  // 这样人工值仍然优先，而自动值不会因为没人做这一步而空着。
+  resolveRunwayFixes(pir);
   carryOverManualEdits(options.previousPir, pir);
   await writeArtifact(task.taskId, `procedures/${options.procedureId}/plan-executions.json`, executions);
   return { pir, executions };
@@ -84,9 +87,24 @@ export async function executePlannedRecognition(
 function normalizePlanSteps(plan: RecognitionPlan, pkg: BusinessProcedurePackage) {
   type Step = { sequence: number; action: RecognitionAction; sourcePages: Array<{ documentId: string; pageNumber: number }>; appended?: boolean };
   const allPages = pkg.packagePages.map((p) => ({ documentId: p.documentId, pageNumber: p.pageNumber }));
+  /**
+   * 机场级参考页（跑道 AD 2.12 / 导航台 AD 2.19）无条件并进每个提取步骤。
+   *
+   * 它们是确定性挂到包上的共享数据，不该由规划器决定读不读——实测规划器把
+   * EXTRACT_FIX_COORDINATES 只绑到航路点坐标表，跑道页虽然在包里却从没被读，
+   * 于是 runwayData 为空、跑道 fix 一直 UNRESOLVED，离场起点锚不住、机场画不出来。
+   * 规划器"忘了绑"不应该让一整类数据消失。
+   */
+  const referencePages = pkg.packagePages
+    .filter((p) => p.pageRole === 'RUNWAY_DATA' || p.pageRole === 'NAVAID_DATA')
+    .map((p) => ({ documentId: p.documentId, pageNumber: p.pageNumber }));
+  const withReference = (pages: Array<{ documentId: string; pageNumber: number }>) => {
+    const seen = new Set(pages.map((p) => `${p.documentId}:${p.pageNumber}`));
+    return [...pages, ...referencePages.filter((p) => !seen.has(`${p.documentId}:${p.pageNumber}`))];
+  };
   const steps: Step[] = (plan.recognitionPlan || [])
     .filter((s) => ACTION_PROMPT[s.action as RecognitionAction] || ['VALIDATE_PROCEDURE_STRUCTURE'].includes(s.action))
-    .map((s) => ({ sequence: s.sequence, action: s.action as RecognitionAction, sourcePages: s.sourcePages?.length ? s.sourcePages : allPages }));
+    .map((s) => ({ sequence: s.sequence, action: s.action as RecognitionAction, sourcePages: withReference(s.sourcePages?.length ? s.sourcePages : allPages) }));
   for (const action of BASELINE) if (!steps.some((s) => s.action === action)) steps.push({ sequence: steps.length + 1, action, sourcePages: allPages, appended: true });
   if (pkg.procedureCategory === 'APPROACH' && !steps.some((s) => s.action === 'EXTRACT_MINIMA')) steps.push({ sequence: steps.length + 1, action: 'EXTRACT_MINIMA', sourcePages: allPages, appended: true });
   const planMentionsHolding = /hold/i.test(`${plan.geometryStrategy || ''} ${plan.arinc424Strategy || ''}`) || plan.detectedStructure?.hasMissedApproach;

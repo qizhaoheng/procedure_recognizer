@@ -14,7 +14,7 @@ import { auditResultCompleteness, completenessFindingsToValidations } from './co
 import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan, ValidationResult } from './domain';
 import { PdfDocumentTools, garbledTextRatio } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
-import { claimTaskRun, releaseTaskRun, saveAgentTask, taskDir, touchTaskRun, writeArtifact } from './storage';
+import { claimTaskRun, readAgentTask, releaseTaskRun, saveAgentTask, TaskRunConflictError, taskDir, touchTaskRun, writeArtifact } from './storage';
 
 const running = new Map<string, AbortController>();
 const executionMode = () => (process.env.AGENT_EXECUTION_MODE === 'single' ? 'single' : 'planned');
@@ -40,31 +40,36 @@ function generationDiffsToValidations(diffs: GenerationDiff[], geometry: { diffs
   return out;
 }
 
-export function startAgentTask(task: AgentTask) { startTaskAnalysis(task); }
-export function startTaskAnalysis(task: AgentTask) { launch(task, (signal) => analyzeAirportFiles(task, signal), 'analyze'); }
-export function startTaskRegrouping(task: AgentTask) { launch(task, (signal) => regroupExistingPages(task, signal), 'regroup'); }
-export function startPackagePlanning(task: AgentTask, pkg: BusinessProcedurePackage) { launch(task, (signal) => planPackage(task, pkg, signal)); }
-export function startPackageRecognition(task: AgentTask, pkg: BusinessProcedurePackage) { launch(task, (signal) => recognizePackage(task, pkg, signal)); }
-export function startPackagesRecognition(task: AgentTask, packages: BusinessProcedurePackage[]) { launch(task, (signal) => recognizePackages(task, packages, signal)); }
+export function startAgentTask(task: AgentTask) { return startTaskAnalysis(task); }
+export function startTaskAnalysis(task: AgentTask) { return launch(task, (signal) => analyzeAirportFiles(task, signal), 'analyze'); }
+export function startTaskRegrouping(task: AgentTask) { return launch(task, (signal) => regroupExistingPages(task, signal), 'regroup'); }
+export function startPackagePlanning(task: AgentTask, pkg: BusinessProcedurePackage) { return launch(task, (signal) => planPackage(task, pkg, signal), 'plan'); }
+export function startPackageRecognition(task: AgentTask, pkg: BusinessProcedurePackage) { return launch(task, (signal) => recognizePackage(task, pkg, signal), 'recognize'); }
+export function startPackagesRecognition(task: AgentTask, packages: BusinessProcedurePackage[]) { return launch(task, (signal) => recognizePackages(task, packages, signal), 'recognize'); }
 export function cancelAgentTask(taskId: string) { running.get(taskId)?.abort(new Error('Task cancelled by user.')); }
 
 /** 心跳间隔要远小于 storage 的失效阈值，否则一次长模型调用期间心跳过期，任务会被误判为已死并被接管。 */
 const RUN_HEARTBEAT_MS = 30_000;
 
-function launch(task: AgentTask, runner: (signal: AbortSignal) => Promise<void>, description = 'agent run') {
+/**
+ * 抢到执行权后才在后台跑，抢不到就让返回的 promise 拒绝——调用方必须能区分
+ * "已启动"和"被拒绝"。早先的实现把抢占失败 throw 进后台的 catch，那里试图把状态写成
+ * FAILED，而这次写入本身又因归属冲突被拒、再被吞掉，于是一次被拒绝的启动和一次
+ * 正在进行的运行从外面看一模一样——正是这套机制要防的静默失败，却在它自己身上重演。
+ */
+async function launch(task: AgentTask, runner: (signal: AbortSignal) => Promise<void>, description = 'agent run') {
   if (running.has(task.taskId)) throw new Error('Task is already running.');
-  const controller = new AbortController(); running.set(task.taskId, controller);
   // 进程内的 Map 只挡得住同进程重入；跨进程（dev server + 一次性脚本、或两个服务实例）
   // 必须靠落盘的归属标记。实测两个进程同跑一个任务会互相覆盖写：调用成对重复、
   // 计数往回退、procedure 记录消失，而两边都以为自己跑得好好的。
+  if (!await claimTaskRun(task, description)) {
+    const stored = await readAgentTask(task.taskId).catch(() => undefined);
+    throw new TaskRunConflictError(task.taskId, stored?.activeRun?.owner ?? '未知');
+  }
+  const controller = new AbortController(); running.set(task.taskId, controller);
+  const heartbeat = setInterval(() => { void touchTaskRun(task).catch(() => undefined); }, RUN_HEARTBEAT_MS);
   void (async () => {
-    let heartbeat: NodeJS.Timeout | undefined;
     try {
-      if (!await claimTaskRun(task, description)) {
-        running.delete(task.taskId);
-        throw new Error(`任务已被另一个运行者执行中（${task.activeRun?.owner ?? '未知'}），本次未启动。`);
-      }
-      heartbeat = setInterval(() => { void touchTaskRun(task).catch(() => undefined); }, RUN_HEARTBEAT_MS);
       await runner(controller.signal);
     } catch (error) {
       task.status = controller.signal.aborted ? 'CANCELLED' : 'FAILED';
@@ -73,7 +78,7 @@ function launch(task: AgentTask, runner: (signal: AbortSignal) => Promise<void>,
       task.errorCount += 1;
       await saveAgentTask(task).catch(() => undefined);
     } finally {
-      if (heartbeat) clearInterval(heartbeat);
+      clearInterval(heartbeat);
       await releaseTaskRun(task).catch(() => undefined);
       running.delete(task.taskId);
     }
@@ -332,7 +337,11 @@ async function recognizePackages(task: AgentTask, packages: BusinessProcedurePac
 }
 
 async function recognizePackage(task: AgentTask, pkg: BusinessProcedurePackage, signal: AbortSignal, finalizeTask = true) {
-  if (!pkg.recognitionPlan) await planPackage(task, pkg, signal);
+  // 计划粘在包上，改了规划提示词再识别一次也不会重新规划——实测因此白跑一轮：
+  // fragment 都加了"只提取本程序"，却仍在一份写着"提取整套 SID、在 UDOSU 分支"的旧计划下执行，
+  // 产出与上一轮逐字相同。规划提示词版本变了就重新规划。
+  const plannerVersion = (await loadPrompt('procedure-recognition-planner')).version;
+  if (!pkg.recognitionPlan || pkg.recognitionPlan.promptVersion !== plannerVersion) await planPackage(task, pkg, signal);
   pkg.warnings = pkg.warnings.filter((warning) => !warning.includes('后端服务重启导致识别中断'));
   pkg.status = 'RECOGNIZING'; task.status = 'RUNNING'; task.stage = 'RECOGNIZING'; task.currentProcedure = pkg.procedureName; await saveAgentTask(task);
   const previous = task.procedures.filter((p) => p.packageId === pkg.packageId).sort((a, b) => b.version - a.version)[0];
