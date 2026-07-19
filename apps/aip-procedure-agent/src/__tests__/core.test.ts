@@ -7,6 +7,8 @@ import type { BusinessProcedurePackage, PageAsset, ProcedurePIR } from '../domai
 import { derivePackageSources, selectGroupingImagePages } from '../orchestrator';
 import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
 import { verify424Text, verifyGeometry } from '../aiGeneration';
+import { attachAirportReferencePages, findAirportReferencePages } from '../airportReference';
+import { simpleLegsTo424Text } from '../../../../server/src/services/jeppesen424/simpleLegsTo424Text';
 
 test('parses compact AIP coordinates', () => { const value = parseCoordinate('N012030.00 E1034500.00'); assert.ok(Math.abs(value.latitude! - 1.3416667) < 1e-5); assert.equal(value.longitude, 103.75); });
 test('converts DMS and validates components', () => { assert.equal(dmsToDecimal(1, 30, 0, 'S'), -1.5); assert.throws(() => dmsToDecimal(1, 60, 0)); });
@@ -288,4 +290,79 @@ test('open-ended legs are not required to terminate on a fix', () => {
   };
   const codes = verifyGeometry(feature, pir).map((d) => d.code);
   assert.ok(!codes.includes('VERTEX_OFF_FIX'), `开放腿不该因终点不在 fix 上而报错: ${codes.join(',')}`);
+});
+
+// 424 覆盖度比对：不比记录总数。424 要求每条路线自带完整记录集，公共段会在各路线代码下
+// 重复出现——WMKJ 四条 1J SID 共用起始段，12 条记录对 9 条 PIR 腿是正确编码。
+test('replicated common segments are not reported as a leg-count difference', () => {
+  const pir = samplePir(); // 1 条腿：TF 到 BBBBB
+  // 同一条腿在两个路线代码下各出现一次——合法的 424 复制
+  const text = simpleLegsTo424Text([
+    { procedureName: 'TEST1A', procedureCode: 'TEST1A', routeKey: 'TEST1A', category: 'SID', runway: 'RW02', sequence: '010', fix: 'BBBBB', pathTerminator: 'TF', source: 'AI' },
+    { procedureName: 'TEST1B', procedureCode: 'TEST1B', routeKey: 'TEST1B', category: 'SID', runway: 'RW02', sequence: '010', fix: 'BBBBB', pathTerminator: 'TF', source: 'AI' },
+  ], { airportIcao: 'WSSS' });
+  const codes = verify424Text(text, pir).map((d) => d.code);
+  assert.ok(!codes.includes('LEG_COUNT'), `不该再有 LEG_COUNT: ${codes.join(',')}`);
+  assert.ok(!codes.includes('LEG_NOT_ENCODED'), `腿已被编出，不该报缺失: ${codes.join(',')}`);
+});
+
+test('a PIR leg that never made it into the records is reported', () => {
+  const pir = samplePir();
+  const text = simpleLegsTo424Text([
+    { procedureName: 'TEST1A', procedureCode: 'TEST1A', routeKey: 'TEST1A', category: 'SID', runway: 'RW02', sequence: '010', fix: 'AAAAA', pathTerminator: 'IF', source: 'AI' },
+  ], { airportIcao: 'WSSS' });
+  const diffs = verify424Text(text, pir);
+  assert.ok(diffs.some((d) => d.code === 'LEG_NOT_ENCODED'), diffs.map((d) => d.code).join(','));
+});
+
+test('a record terminating at a fix the PIR does not contain is reported', () => {
+  const pir = samplePir();
+  const text = simpleLegsTo424Text([
+    { procedureName: 'TEST1A', procedureCode: 'TEST1A', routeKey: 'TEST1A', category: 'SID', runway: 'RW02', sequence: '010', fix: 'BBBBB', pathTerminator: 'TF', source: 'AI' },
+    { procedureName: 'TEST1A', procedureCode: 'TEST1A', routeKey: 'TEST1A', category: 'SID', runway: 'RW02', sequence: '020', fix: 'GHOST', pathTerminator: 'TF', source: 'AI' },
+  ], { airportIcao: 'WSSS' });
+  const diffs = verify424Text(text, pir);
+  assert.ok(diffs.some((d) => d.code === 'RECORD_FIX_NOT_IN_PIR' && d.detail.includes('GHOST')), diffs.map((d) => d.code).join(','));
+});
+
+// ---- 机场级参考页挂载 ----
+// 跑道 AD 2.12 / 导航台 AD 2.19 不属于任何一条程序，分组不会带上它们，但每条程序都需要：
+// 没有跑道入口坐标，离场起点就锚不住（WMKJ 的 RWY16 一直 UNRESOLVED，4-5 条腿画不出来）。
+// 实测：挂载后 WMKJ 预检 12/23 -> 23/23、OMAA 78/82 -> 82/82，NAVAID/RUNWAY 缺失全部清零。
+function referencePage(pageNumber: number, text: string): PageAsset {
+  const page = omaaPage(pageNumber, 1200, 0.5);
+  page.nativeText = text;
+  return page;
+}
+
+test('ICAO AD 2.12 and AD 2.19 sections are recognized as airport reference pages', () => {
+  const pages = [
+    // 坐标被拆成多行——nativeText 是每个 textSpan 各占一行拼出来的，真实数据就长这样
+    referencePage(10, 'WMKJ AD 2.12 RUNWAY PHYSICAL CHARACTERISTICS\n013919.83N\n1033950.29E\n013723.68N\n1034032.51E'),
+    referencePage(13, 'WMKJ AD 2.19 RADIO NAVIGATION AND LANDING AIDS\nVOR/DME 113.4'),
+    referencePage(33, 'STANDARD DEPARTURE CHART'),
+  ];
+  const found = findAirportReferencePages(pages);
+  assert.deepEqual(found.runwayPages.map((p) => p.pageNumber), [10]);
+  assert.deepEqual(found.navaidPages.map((p) => p.pageNumber), [13]);
+});
+
+test('a page that merely cites AD 2.12 without coordinates is not a runway page', () => {
+  const found = findAirportReferencePages([referencePage(50, 'For runway details refer to AD 2.12 of this AIP.')]);
+  assert.deepEqual(found.runwayPages, [], '只是引用小节号、没有坐标，不算跑道数据页');
+});
+
+test('reference pages are attached once and marked shared', () => {
+  const pages = [
+    referencePage(10, 'AD 2.12 RUNWAY PHYSICAL CHARACTERISTICS\n013919.83N\n1033950.29E\n013723.68N\n1034032.51E'),
+    referencePage(13, 'AD 2.19 RADIO NAVIGATION AND LANDING AIDS'),
+  ];
+  const found = findAirportReferencePages(pages);
+  const pkg = pkgWith([{ page: 33, role: 'PROCEDURE_CHART' }]);
+  assert.equal(attachAirportReferencePages(pkg, found), 2);
+  assert.equal(attachAirportReferencePages(pkg, found), 0, '重复挂载必须是空操作');
+  const attached = pkg.packagePages.filter((p) => p.pageNumber === 10 || p.pageNumber === 13);
+  assert.equal(attached.length, 2);
+  assert.ok(attached.every((p) => p.isShared), '机场级页面是共享页');
+  assert.deepEqual(attached.map((p) => p.pageRole).sort(), ['NAVAID_DATA', 'RUNWAY_DATA']);
 });

@@ -132,16 +132,51 @@ export function verify424Text(text: string, pir: ProcedurePIR): GenerationDiff[]
   }
   if (!reparsed.length) return [{ kind: 'ARINC424', code: 'NO_RECORDS_PARSED', detail: 'Emitted text parsed to zero records — column alignment is likely wrong.' }];
 
+  diffs.push(...compareLegCoverage(reparsed, pir));
+
   const reference = compile424Candidate(pir);
-  if (reference.status === '424_INCOMPLETE' || !reference.text.trim()) {
-    // 编译器自己都编不出来（多半是 PIR 有 BLOCKER），此时没有可比的参照，只报腿数。
-    if (reparsed.length !== pir.legs.length) diffs.push({ kind: 'ARINC424', code: 'LEG_COUNT', detail: `Emitted ${reparsed.length} records for ${pir.legs.length} PIR legs.` });
-    return diffs;
-  }
+  if (reference.status === '424_INCOMPLETE' || !reference.text.trim()) return diffs;
   const referenceLegs = parseJeppesen424Text(reference.text);
-  if (reparsed.length !== referenceLegs.length) diffs.push({ kind: 'ARINC424', code: 'LEG_COUNT', detail: `Emitted ${reparsed.length} records; the deterministic reference yields ${referenceLegs.length}.` });
   for (const mismatch of fieldLevelRoundTrip(referenceLegs, reparsed)) {
     diffs.push({ kind: 'ARINC424', code: `FIELD_${mismatch.field.toUpperCase()}`, detail: `${mismatch.key}: reference ${JSON.stringify(mismatch.emitted)} vs emitted ${JSON.stringify(mismatch.reparsed)}.` });
+  }
+  return diffs;
+}
+
+/**
+ * 按覆盖度比对，不比记录总数。
+ *
+ * 424 要求每条路线自带完整记录集，公共段会在各路线代码下重复出现——WMKJ 的四条 1J SID
+ * 共用起始段，12 条记录对 9 条 PIR 腿是**正确编码**，早先按总数比会把它误报成差异。
+ * 真正该问的是两件事：PIR 里的腿有没有都被编出来，编出来的记录有没有 PIR 里不存在的点。
+ */
+function compareLegCoverage(reparsed: SimpleProcedureLeg[], pir: ProcedurePIR): GenerationDiff[] {
+  const diffs: GenerationDiff[] = [];
+  const upper = (value?: string | null) => String(value ?? '').trim().toUpperCase();
+  const emittedByFixAndPt = new Set(reparsed.map((leg) => `${upper(leg.fix)}|${upper(leg.pathTerminator)}`));
+  const emittedPathTerminators = new Set(reparsed.map((leg) => upper(leg.pathTerminator)));
+  const fixNameById = new Map(pir.fixes.map((fix) => [fix.fixId, upper(fix.identifier)]));
+
+  for (const leg of pir.legs) {
+    const pathTerminator = upper(leg.pathTerminator);
+    const fixName = leg.toFixId ? fixNameById.get(leg.toFixId) : undefined;
+    if (fixName) {
+      if (!emittedByFixAndPt.has(`${fixName}|${pathTerminator}`)) {
+        diffs.push({ kind: 'ARINC424', code: 'LEG_NOT_ENCODED', detail: `PIR leg ${leg.legId} (${pathTerminator} to ${fixName}) has no matching 424 record.` });
+      }
+    } else if (!emittedPathTerminators.has(pathTerminator)) {
+      // 开放腿（CA/VA 等）没有终点 fix，只能核对该路径终止符是否出现过。
+      diffs.push({ kind: 'ARINC424', code: 'LEG_NOT_ENCODED', detail: `PIR leg ${leg.legId} (open-ended ${pathTerminator}) has no matching 424 record.` });
+    }
+  }
+
+  const knownFixes = new Set(fixNameById.values());
+  const reported = new Set<string>();
+  for (const record of reparsed) {
+    const fix = upper(record.fix);
+    if (!fix || knownFixes.has(fix) || reported.has(fix)) continue;
+    reported.add(fix);
+    diffs.push({ kind: 'ARINC424', code: 'RECORD_FIX_NOT_IN_PIR', detail: `Emitted a record terminating at ${fix}, which is not a fix in the PIR.` });
   }
   return diffs;
 }
