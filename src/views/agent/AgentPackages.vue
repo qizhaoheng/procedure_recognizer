@@ -63,6 +63,13 @@ const selectedOverlay = computed(() =>
   selectedResult.value ? overlayBundles.value[selectedResult.value.procedureId] : undefined,
 );
 const selectedValidations = computed(() => selectedResult.value?.validations || []);
+// "源上有、结果没有"单独成组：这是最需要人去补的一类，混在通用校验里会被淹没。
+const completenessFindings = computed(() =>
+  selectedValidations.value.filter((v: any) => String(v.ruleCode || "").startsWith("SOURCE_COMPLETENESS_")),
+);
+const otherValidations = computed(() =>
+  selectedValidations.value.filter((v: any) => !String(v.ruleCode || "").startsWith("SOURCE_COMPLETENESS_")),
+);
 const validationCounts = computed(() => {
   const counts: Record<string, number> = { BLOCKER: 0, ERROR: 0, WARNING: 0, INFO: 0 };
   for (const v of selectedValidations.value) counts[v.severity] = (counts[v.severity] || 0) + 1;
@@ -751,7 +758,19 @@ function msg(e: unknown) {
               }}
               字段差异
             </small>
+            <!-- 产出由谁生成、依据是什么，要能看见：AI 的编码判断不该埋在产物内部 -->
+            <span v-if="selectedResult.candidate424?.generatedBy === 'AI'" class="generated-by">
+              AI 生成
+            </span>
           </div>
+          <p v-if="selectedResult.candidate424?.decisionSummary" class="decision-summary">
+            {{ selectedResult.candidate424.decisionSummary }}
+          </p>
+          <ul v-if="selectedResult.candidate424?.diffs?.length" class="generation-diffs">
+            <li v-for="(diff, index) in selectedResult.candidate424.diffs" :key="index">
+              <b>{{ diff.code }}</b> {{ diff.detail }}
+            </li>
+          </ul>
           <pre>{{
             selectedResult.candidate424?.text || "尚未生成 424 Candidate"
           }}</pre>
@@ -818,7 +837,21 @@ function msg(e: unknown) {
           <p v-if="!selectedValidations.length && !openConflicts.length && !selectedPir?.quality?.unresolvedFields?.length" class="quality-ok">
             全部校验通过，无未解决字段。
           </p>
-          <article v-for="(v, i) in selectedValidations" :key="i" :class="['validation', v.severity]">
+          <section v-if="completenessFindings.length" class="completeness-block">
+            <h4>源页比对：结果中缺失的内容（{{ completenessFindings.length }}）</h4>
+            <p class="completeness-note">
+              由 AI 读原始页面得出，供人复核——它与识别同源，不作为拒出依据。
+            </p>
+            <article v-for="(v, i) in completenessFindings" :key="'c' + i" :class="['validation', v.severity]">
+              <header>
+                <span class="severity">{{ v.severity }}</span>
+                <b>{{ v.ruleCode.replace("SOURCE_COMPLETENESS_", "") }}</b>
+              </header>
+              <p>{{ v.message }}</p>
+              <small v-if="v.fieldPath">{{ v.fieldPath }}</small>
+            </article>
+          </section>
+          <article v-for="(v, i) in otherValidations" :key="i" :class="['validation', v.severity]">
             <header>
               <span class="severity">{{ v.severity }}</span>
               <b>{{ v.ruleCode }}</b>
@@ -1519,6 +1552,50 @@ button:disabled {
 }
 .candidate-head small {
   color: #627d98;
+}
+.completeness-block {
+  border: 1px solid #f0d9a8;
+  border-radius: 8px;
+  padding: 12px;
+  margin-bottom: 14px;
+  background: #fffdf7;
+}
+.completeness-block h4 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  color: #7a4f01;
+}
+.completeness-note {
+  margin: 0 0 10px;
+  font-size: 11px;
+  color: #92610a;
+}
+.generated-by {
+  font-size: 11px;
+  color: #174ea6;
+  background: #e8f1ff;
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+.decision-summary {
+  color: #486581;
+  font-size: 12px;
+  line-height: 1.6;
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+}
+/* 生成偏差用中性琥珀色：它是"待人复核"，不是"这条已经错了" */
+.generation-diffs {
+  background: #fdf3d8;
+  border-radius: 6px;
+  padding: 10px 10px 10px 26px;
+  margin-top: 8px;
+  font-size: 12px;
+  color: #7a4f01;
+}
+.generation-diffs b {
+  font-family: ui-monospace, monospace;
+  margin-right: 6px;
 }
 .mismatch-list {
   background: #fff7e6;
