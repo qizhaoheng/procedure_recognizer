@@ -29,6 +29,7 @@ import {
   readAgentTask,
   saveAgentTask,
   writeArtifact,
+  TaskRunConflictError,
 } from "./storage";
 
 export const agentRouter = express.Router();
@@ -700,3 +701,23 @@ function applyManualEdit(root: any, pathText: string, value: unknown) {
     root.legs[+parts[1]].fieldStatus[parts.slice(2).join(".")] =
       "MANUALLY_EDITED";
 }
+
+// 放在所有路由之后：saveAgentTask 现在会在任务被别的运行者持有时抛错（此前它从不抛）。
+// 不接住的话，一次并发编辑会变成挂死的请求；409 才说得清"没写进去，且原因是什么"。
+agentRouter.use(
+  (
+    error: unknown,
+    _req: express.Request,
+    res: express.Response,
+    next: express.NextFunction,
+  ) => {
+    if (error instanceof TaskRunConflictError) {
+      return res.status(409).json({
+        error: error.message,
+        code: "TASK_RUN_CONFLICT",
+        holder: error.holder,
+      });
+    }
+    return next(error);
+  },
+);
