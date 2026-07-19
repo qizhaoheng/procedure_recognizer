@@ -530,3 +530,46 @@ test('a runway fix with no matching runway data stays unresolved', () => {
   assert.equal(resolveRunwayFixes(pir), 0);
   assert.equal(pir.fixes[0].latitude, null, '没有对应跑道就保持未解析，不得瞎凑');
 });
+
+// 跑道 fix 的坐标必须与它自己声明的角色一致。实测：fix 标着 role=DER，坐标却是入口的，
+// 两端相距约 3.6 公里，离场起点因此偏掉。依据就在同一份 PIR 的 runwayData 里（两端俱全），
+// 所以这是自相矛盾而非信息不足——但只报不改，覆盖模型给的坐标交给人判断。
+function pirWithRunwayFix(role: 'DER' | 'NONE', latitude: number, longitude: number): ProcedurePIR {
+  const pir = samplePir();
+  pir.fixes = [{ fixId: 'rw', identifier: 'RWY16', type: 'RUNWAY', role, latitude, longitude, coordinateSourceType: 'RUNWAY_DATABASE', evidence: [], confidence: 1, status: 'CONFIRMED', allowFor424: true }];
+  pir.legs = []; pir.routes[0].legIds = [];
+  pir.runwayData = [{ runwayId: 'WMKJ-16', designator: '16', thresholdLatitude: 1.655508, thresholdLongitude: 103.663969, derLatitude: 1.623244, derLongitude: 103.675697, evidence: ['p10'], status: 'CONFIRMED' }];
+  return pir;
+}
+
+test('a DER-role fix holding the threshold coordinate is reported', () => {
+  const results = validatePir(pirWithRunwayFix('DER', 1.655508, 103.663969));
+  const finding = results.find((v) => v.ruleCode === 'RUNWAY_FIX_END_MISMATCH');
+  assert.ok(finding, results.map((v) => v.ruleCode).join(','));
+  assert.equal(finding!.severity, 'ERROR');
+  assert.match(finding!.message, /matches the threshold instead/);
+});
+
+test('a DER-role fix holding the departure end passes', () => {
+  const results = validatePir(pirWithRunwayFix('DER', 1.623244, 103.675697));
+  assert.equal(results.filter((v) => v.ruleCode === 'RUNWAY_FIX_END_MISMATCH').length, 0);
+});
+
+test('a threshold-role fix holding the threshold passes', () => {
+  const results = validatePir(pirWithRunwayFix('NONE', 1.655508, 103.663969));
+  assert.equal(results.filter((v) => v.ruleCode === 'RUNWAY_FIX_END_MISMATCH').length, 0);
+});
+
+// 渲染器的硬契约：非进近的腿必须有合法跑道号或过渡名之一，两者皆空会被拒。
+// 这条契约此前只写在渲染器里，424 writer 的提示词凭我对 424 的印象写成了
+// "公共航段两者都留空"，模型照做后被渲染器当场拒绝——提示词该照着代码的实际契约写。
+test('a leg with neither runway nor transition name is rejected by the renderer', () => {
+  const leg = { procedureName: 'X 1A', procedureCode: 'X1A', routeKey: 'X1A', category: 'SID' as const, runway: '', sequence: '030', fix: 'ABCDE', pathTerminator: 'TF', source: 'AI' as const };
+  assert.throws(() => simpleLegsTo424Text([leg], { airportIcao: 'WMKJ' }), /缺少有效跑道/);
+});
+
+test('a common-route leg carrying the procedure runway renders', () => {
+  const leg = { procedureName: 'X 1A', procedureCode: 'X1A', routeKey: 'X1A', category: 'SID' as const, runway: 'RW16', sequence: '030', fix: 'ABCDE', pathTerminator: 'TF', source: 'AI' as const };
+  const text = simpleLegsTo424Text([leg], { airportIcao: 'WMKJ' });
+  assert.match(text, /RW16/);
+});
