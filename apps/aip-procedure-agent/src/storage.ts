@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
-import type { AgentTask } from "./domain";
+import type { ActiveRun, AgentTask } from "./domain";
 
 const root = path.resolve(
   process.cwd(),
@@ -15,8 +15,75 @@ export const taskDir = (taskId: string) => path.join(root, taskId);
 export async function ensureAgentStorage() {
   await fs.mkdir(root, { recursive: true });
 }
+/**
+ * 本进程的运行者标识。跨进程唯一——同一台机器上的 dev server 与一次性脚本会拿到不同的值。
+ *
+ * 之所以需要它：旧实现里"任务是否已在运行"只由 orchestrator 进程内的一个 Map 判断，
+ * 跨进程完全不设防；而 saveAgentTask 是整份 JSON 覆盖写，没有归属校验。
+ * 实测后果是两个进程各持一份内存态互相覆盖：模型调用成对重复、计数往回退、
+ * procedure 记录凭空消失——数据被悄悄写坏，而两边都以为自己跑得好好的。
+ */
+export const RUN_OWNER = `${process.pid}:${crypto.randomUUID().slice(0, 8)}`;
+/** 心跳超过这个时长即视为持有者已死，允许接管。必须大于最长的单次模型调用（LLM_TIMEOUT_MS 默认 10 分钟）。 */
+const RUN_STALE_MS = 15 * 60 * 1000;
+
+export class TaskRunConflictError extends Error {
+  constructor(readonly taskId: string, readonly holder: string) {
+    super(`任务 ${taskId} 正在被另一个运行者执行（${holder}），本次写入已拒绝以免覆盖它的进度。`);
+    this.name = "TaskRunConflictError";
+  }
+}
+
+function runIsLive(run?: ActiveRun | null) {
+  return !!run && Date.now() - new Date(run.heartbeatAt).getTime() < RUN_STALE_MS;
+}
+
+async function storedTask(taskId: string): Promise<AgentTask | undefined> {
+  try {
+    return JSON.parse(await fs.readFile(path.join(taskDir(taskId), "task.json"), "utf8")) as AgentTask;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 声明对任务的执行权。已被他人持有且心跳新鲜时返回 false——调用方必须据此放弃，
+ * 而不是继续跑。心跳过期（进程已死）则允许接管。
+ */
+export async function claimTaskRun(task: AgentTask, description: string): Promise<boolean> {
+  const stored = await storedTask(task.taskId);
+  if (runIsLive(stored?.activeRun) && stored!.activeRun!.owner !== RUN_OWNER) return false;
+  const now = new Date().toISOString();
+  task.activeRun = { owner: RUN_OWNER, startedAt: now, heartbeatAt: now, description };
+  await saveAgentTask(task);
+  return true;
+}
+
+export async function touchTaskRun(task: AgentTask) {
+  if (task.activeRun?.owner !== RUN_OWNER) return;
+  task.activeRun.heartbeatAt = new Date().toISOString();
+  await saveAgentTask(task);
+}
+
+export async function releaseTaskRun(task: AgentTask) {
+  if (task.activeRun && task.activeRun.owner !== RUN_OWNER) return;
+  task.activeRun = null;
+  await saveAgentTask(task);
+}
+
 export async function saveAgentTask(task: AgentTask) {
+  // 落盘前确认执行权仍属自己：别人正持有且心跳新鲜时拒绝写入，
+  // 否则就是把对方的进度整份覆盖掉——这正是之前数据被写坏的方式。
+  const stored = await storedTask(task.taskId);
+  const holder = stored?.activeRun;
+  // 只认 RUN_OWNER。不能因为"我手上的 task 也带着同一个 activeRun"就放行——
+  // 另一个进程 read 任务时会把持有者的 activeRun 一并读进来，那样恰好放过了
+  // 最该拦的路径（路由 read-mutate-save 覆盖正在跑的识别）。
+  if (runIsLive(holder) && holder!.owner !== RUN_OWNER) {
+    throw new TaskRunConflictError(task.taskId, holder!.owner);
+  }
   task.updatedAt = new Date().toISOString();
+  if (task.activeRun?.owner === RUN_OWNER) task.activeRun.heartbeatAt = task.updatedAt;
   await fs.mkdir(taskDir(task.taskId), { recursive: true });
   await atomicJson(path.join(taskDir(task.taskId), "task.json"), task);
 }

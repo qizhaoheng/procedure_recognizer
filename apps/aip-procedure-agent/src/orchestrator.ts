@@ -14,7 +14,7 @@ import { auditResultCompleteness, completenessFindingsToValidations } from './co
 import type { AgentProcedure, AgentStep, AgentTask, AirportPackageAnalysis, BusinessProcedurePackage, PackagePageRef, PageAsset, ProcedurePIR, RecognitionPlan, ValidationResult } from './domain';
 import { PdfDocumentTools, garbledTextRatio } from './pdfPreprocessor';
 import { loadPrompt } from './promptRegistry';
-import { saveAgentTask, taskDir, writeArtifact } from './storage';
+import { claimTaskRun, releaseTaskRun, saveAgentTask, taskDir, touchTaskRun, writeArtifact } from './storage';
 
 const running = new Map<string, AbortController>();
 const executionMode = () => (process.env.AGENT_EXECUTION_MODE === 'single' ? 'single' : 'planned');
@@ -47,10 +47,36 @@ export function startPackageRecognition(task: AgentTask, pkg: BusinessProcedureP
 export function startPackagesRecognition(task: AgentTask, packages: BusinessProcedurePackage[]) { launch(task, (signal) => recognizePackages(task, packages, signal)); }
 export function cancelAgentTask(taskId: string) { running.get(taskId)?.abort(new Error('Task cancelled by user.')); }
 
-function launch(task: AgentTask, runner: (signal: AbortSignal) => Promise<void>) {
+/** 心跳间隔要远小于 storage 的失效阈值，否则一次长模型调用期间心跳过期，任务会被误判为已死并被接管。 */
+const RUN_HEARTBEAT_MS = 30_000;
+
+function launch(task: AgentTask, runner: (signal: AbortSignal) => Promise<void>, description = 'agent run') {
   if (running.has(task.taskId)) throw new Error('Task is already running.');
   const controller = new AbortController(); running.set(task.taskId, controller);
-  void runner(controller.signal).catch(async (error) => { task.status = controller.signal.aborted ? 'CANCELLED' : 'FAILED'; task.stage = 'FAILED'; task.error = messageOf(error); task.errorCount += 1; await saveAgentTask(task); }).finally(() => running.delete(task.taskId));
+  // 进程内的 Map 只挡得住同进程重入；跨进程（dev server + 一次性脚本、或两个服务实例）
+  // 必须靠落盘的归属标记。实测两个进程同跑一个任务会互相覆盖写：调用成对重复、
+  // 计数往回退、procedure 记录消失，而两边都以为自己跑得好好的。
+  void (async () => {
+    let heartbeat: NodeJS.Timeout | undefined;
+    try {
+      if (!await claimTaskRun(task, description)) {
+        running.delete(task.taskId);
+        throw new Error(`任务已被另一个运行者执行中（${task.activeRun?.owner ?? '未知'}），本次未启动。`);
+      }
+      heartbeat = setInterval(() => { void touchTaskRun(task).catch(() => undefined); }, RUN_HEARTBEAT_MS);
+      await runner(controller.signal);
+    } catch (error) {
+      task.status = controller.signal.aborted ? 'CANCELLED' : 'FAILED';
+      task.stage = 'FAILED';
+      task.error = messageOf(error);
+      task.errorCount += 1;
+      await saveAgentTask(task).catch(() => undefined);
+    } finally {
+      if (heartbeat) clearInterval(heartbeat);
+      await releaseTaskRun(task).catch(() => undefined);
+      running.delete(task.taskId);
+    }
+  })();
 }
 
 // ============================== 阶段 A：文档分析与程序包分组 ==============================
