@@ -17,6 +17,8 @@ const mapModalOpen = ref(false);
 const resultBundles = ref<Record<string, any>>({});
 const overlayBundles = ref<Record<string, any>>({});
 const compareState = ref<{ open: boolean; text: string; running: boolean; report?: any; error?: string }>({ open: false, text: "", running: false });
+// 对比暂时收起。后端接口和 runCompare424 都留着，改回 true 即恢复。
+const COMPARE_VISIBLE = false;
 const debugOpen = ref(false);
 const ROUTE_TYPES = [
   { value: "RUNWAY_TRANSITION", label: "跑道过渡" },
@@ -781,7 +783,7 @@ function msg(e: unknown) {
             </details>
           </section>
         </section>
-        <section v-else-if="selectedResult && resultTab === '424'" class="inline-424">
+        <section v-else-if="selectedResult && resultTab === '424'" :class="['inline-424', { 'no-compare': !COMPARE_VISIBLE }]">
           <!-- 这块只放 424 本身：round-trip、决策说明、缺失字段一类的元信息
                归到"识别结果"，压在记录上方会把正文挤下去。 -->
           <pre>{{
@@ -789,7 +791,7 @@ function msg(e: unknown) {
           }}</pre>
           <!-- 对比紧跟在 424 下面：参考记录是用来读上面那段的，分成两个标签
                就得来回切，看不到被比对的原文。 -->
-          <section class="inline-compare">
+          <section v-if="COMPARE_VISIBLE" class="inline-compare">
             <h4>与 Jeppesen 424 对比</h4>
             <p class="compare-hint">粘贴同一程序的参考记录，逐字段比对上面的结果。</p>
             <textarea
@@ -1479,6 +1481,7 @@ button:disabled {
   font-size: 11px;
   color: #b42318;
 }
+.inline-424.no-compare pre{max-height:calc(100vh - 260px)}
 .inline-424 .inline-compare{margin-top:16px;border-top:1px solid #edf1f5;padding-top:12px}
 .inline-424 .inline-compare h4{margin:0 0 4px;font-size:13px}
 .inline-result .gen-meta{margin-top:14px;border-top:1px solid #edf1f5;padding-top:10px}
