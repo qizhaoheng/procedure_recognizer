@@ -121,3 +121,33 @@ function compactIdentity(name: string) { const match = name.toUpperCase().match(
 // OMAA 4 个 RNP AR 进近被误报 PROCEDURE_IDENTITY_UNCLEAR。跑道号后面允许跟
 // (AR)/(RF)/(GNSS) 这类限定后缀，锚定本就是附带的，改为只要求名称里点明了跑道。
 function approachIdentity(name: string) { const compact = name.toUpperCase().replace(/\bOR\b/g, '').replace(/[^A-Z0-9]/g, ''); return /RWY\d{2}[LRC]?/.test(compact) ? compact : undefined; }
+
+/**
+ * 把一个包里挤着的多条程序拆开。
+ *
+ * 分组提示词已明确"一张图纸写了几条程序就出几个包"，但这是单次调用，模型时灵时不灵：
+ * 同一份 WMKJ 两次分组，一次拆成 44 个包、一次又合成 21 个。靠提示词保证不了，
+ * 而合并的后果是实打实的——腿失去归属，某条程序名下发布的点会被算到另一条头上
+ * （实测 KJ706 从 SABKA 1J 串到了 PIMOK 1J），424 也因为四条程序共用一个 PIR 而漏编。
+ *
+ * 判据是程序代号的形态：<标识> <数字><字母>，如 AROSO 1J。出现两个以上即为混装。
+ * 进近名（ILS Z OR LOC Z RWY 16 / RNP Z RWY 34 (AR)）没有这种形态，不会被误拆。
+ */
+const PROCEDURE_DESIGNATOR = /\b([A-Z]{3,5})\s+(\d[A-Z])\b/g;
+
+export function splitMultiProcedurePackages(pkg: BusinessProcedurePackage): BusinessProcedurePackage[] {
+  const designators = [...new Set(
+    [...pkg.procedureName.toUpperCase().matchAll(PROCEDURE_DESIGNATOR)].map((match) => `${match[1]} ${match[2]}`),
+  )];
+  if (designators.length < 2) return [pkg];
+  return designators.map((designator, index) => ({
+    ...pkg,
+    // 首个沿用原 packageId，其余新建：已经引用了这个包的地方不至于全部失效。
+    packageId: index === 0 ? pkg.packageId : `${pkg.packageId}-${designator.replace(/\s+/g, '')}`,
+    procedureKey: `${pkg.procedureKey}-${designator.replace(/\s+/g, '')}`,
+    procedureName: designator,
+    // 页面在各条程序间共享，这正是 424 期望的形态：每条程序自带完整记录集。
+    packagePages: pkg.packagePages.map((page) => ({ ...page, isShared: true })),
+    warnings: [...new Set([...(pkg.warnings || []), `SPLIT_FROM_COMBINED_PACKAGE: 原包 "${pkg.procedureName}" 含 ${designators.length} 条程序，已按程序代号拆分。`])],
+  }));
+}

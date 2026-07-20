@@ -5,7 +5,7 @@ import { arc, compile424Candidate, compileGeoJson, validatePir } from '../compil
 import { garbledTextRatio } from '../pdfPreprocessor';
 import type { BusinessProcedurePackage, PageAsset, ProcedurePIR } from '../domain';
 import { derivePackageSources, selectGroupingImagePages } from '../orchestrator';
-import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from '../sourcePreflight';
+import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles, splitMultiProcedurePackages } from '../sourcePreflight';
 import { verify424Text, verifyGeometry } from '../aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from '../airportReference';
 import { createEmptyPir, mergeFragment, resolveRunwayFixes } from '../fragmentMerger';
@@ -600,4 +600,42 @@ test('every prompt schema compiles, so validation cannot fail for the wrong reas
     const schema = JSON.parse(await fsp.readFile(`apps/aip-procedure-agent/prompts/${dir}/output-schema.json`, 'utf8'));
     assert.doesNotThrow(() => ajv.compile(schema), `${dir} 的 schema 无法编译`);
   }
+});
+
+// ---- 一图多程序的确定性拆分 ----
+// 分组提示词已要求"图上写了几条程序就出几个包"，但那是单次调用、时灵时不灵：
+// 同一份 WMKJ 两次分组，一次拆成 44 个包、一次又合成 21 个。合并的后果是腿失去归属
+// （实测 KJ706 从 SABKA 1J 串到了 PIMOK 1J），424 也因四条程序共用一个 PIR 而漏编。
+test('a package naming several procedures is split by designator', () => {
+  const pkg = pkgWith([{ page: 33, role: 'PROCEDURE_CHART' }, { page: 34, role: 'PROCEDURE_TABLE' }], 'RNAV AROSO 1J ADLOV 1J PIMOK 1J SABKA 1J');
+  const split = splitMultiProcedurePackages(pkg);
+  assert.deepEqual(split.map((p) => p.procedureName), ['AROSO 1J', 'ADLOV 1J', 'PIMOK 1J', 'SABKA 1J']);
+  assert.equal(split[0].packageId, pkg.packageId, '首个沿用原 id，已有引用不至于全部失效');
+  assert.equal(new Set(split.map((p) => p.packageId)).size, 4, 'packageId 必须互不相同');
+  for (const item of split) {
+    assert.deepEqual(item.packagePages.map((p) => p.pageNumber), [33, 34], '各条程序共用同一批页面');
+    assert.ok(item.packagePages.every((p) => p.isShared), '共用的页面要标为 shared');
+    assert.ok(item.warnings.some((w) => w.startsWith('SPLIT_FROM_COMBINED_PACKAGE')), '确定性覆盖要留痕');
+  }
+});
+
+test('approach names are never split by the designator rule', () => {
+  // 进近名里没有 <标识> <数字字母> 形态，13 个真实进近包实测零误拆
+  for (const name of ['ILS Z OR LOC Z RWY 16', 'VOR Y RWY 16', 'RNP Z RWY 34 (AR)', 'RNP X RWY 16']) {
+    const split = splitMultiProcedurePackages(pkgWith([{ page: 57, role: 'PROCEDURE_CHART' }], name, 'APPROACH'));
+    assert.equal(split.length, 1, `${name} 不该被拆`);
+    assert.equal(split[0].procedureName, name);
+  }
+});
+
+test('a single-procedure package passes through untouched', () => {
+  const pkg = pkgWith([{ page: 33, role: 'PROCEDURE_CHART' }], 'AROSO 1J');
+  const split = splitMultiProcedurePackages(pkg);
+  assert.equal(split.length, 1);
+  assert.equal(split[0], pkg, '未拆分时应原样返回，不产生副本');
+});
+
+test('a radar-vectored departure has no designator and is left alone', () => {
+  const split = splitMultiProcedurePackages(pkgWith([{ page: 31, role: 'PROCEDURE_CHART' }], 'JOHOR RADAR TWO DEPARTURE'));
+  assert.equal(split.length, 1);
 });
