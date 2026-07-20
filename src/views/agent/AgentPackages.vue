@@ -12,7 +12,7 @@ const checked = ref<string[]>([]);
 const error = ref("");
 const saving = ref(false);
 // 右侧常驻区域留给 424 / 对比 / 识别结果；航迹图改为按钮弹窗。
-const resultTab = ref<"424" | "compare" | "result" | "overlay">("424");
+const resultTab = ref<"424" | "result" | "overlay">("424");
 const mapModalOpen = ref(false);
 const resultBundles = ref<Record<string, any>>({});
 const overlayBundles = ref<Record<string, any>>({});
@@ -703,12 +703,6 @@ function msg(e: unknown) {
             ARINC 424
           </button>
           <button
-            :class="{ active: resultTab === 'compare' }"
-            @click="resultTab = 'compare'"
-          >
-            Jeppesen 对比
-          </button>
-          <button
             :class="{ active: resultTab === 'result' }"
             @click="resultTab = 'result'"
           >
@@ -759,94 +753,80 @@ function msg(e: unknown) {
           <p v-if="blockingValidations.length" class="blocking-summary">
             另有 {{ blockingValidations.length }} 项规则校验未通过：{{ blockingValidations.map((v: any) => v.ruleCode).join("、") }}
           </p>
-        </section>
-        <section
-          v-else-if="selectedResult && resultTab === 'compare'"
-          class="inline-compare"
-        >
-          <p class="compare-hint">粘贴同一程序的 Jeppesen 424 参考记录，逐字段比对识别结果。</p>
-          <textarea
-            v-model="compareState.text"
-            rows="8"
-            placeholder="粘贴参考 424 静态文本（132 列记录）"
-          ></textarea>
-          <button
-            class="primary"
-            :disabled="compareState.running || !compareState.text.trim() || !selectedResult.candidate424?.text"
-            @click="runCompare424"
-          >
-            {{ compareState.running ? "对比中…" : "运行对比" }}
-          </button>
-          <p v-if="!selectedResult.candidate424?.text" class="compare-hint">本程序尚未生成 424，无法对比。</p>
-          <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
-          <div v-if="compareState.report" class="compare-report">
+          <!-- 424 生成过程的元信息从 424 标签挪到这里：那边只放记录本身。 -->
+          <section v-if="selectedResult.candidate424" class="gen-meta">
+            <h4>424 生成</h4>
             <p>
-              <b>匹配率
-                {{
-                  compareState.report.matchRate == null
-                    ? "—"
-                    : Math.round(compareState.report.matchRate * 100) + "%"
-                }}</b>
-              · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
-              {{ compareState.report.partialLegs }} 部分 ·
-              {{ compareState.report.mismatchedLegs }} 不匹配
+              <span :class="['candidate-state', selectedResult.candidate424.status]">{{ selectedResult.candidate424.status }}</span>
+              <span v-if="selectedResult.candidate424.generatedBy === 'AI'" class="generated-by">AI 生成</span>
+              <small v-if="selectedResult.candidate424.roundTrip">
+                Round-trip {{ selectedResult.candidate424.roundTrip.parsedLegs }}/{{ selectedResult.candidate424.roundTrip.emittedLegs }} 腿 ·
+                {{ selectedResult.candidate424.roundTrip.fieldMismatches?.length || 0 }} 字段差异
+              </small>
             </p>
-            <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
-              <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
-              <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
-                #{{ legResult.sequence }} {{ legResult.status }}：
-                {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
+            <p v-if="selectedResult.candidate424.decisionSummary" class="decision-summary">
+              {{ selectedResult.candidate424.decisionSummary }}
+            </p>
+            <p v-for="(diff, i) in selectedResult.candidate424.diffs || []" :key="'d' + i" class="finding">
+              <b>{{ diff.code }}</b> {{ diff.detail }}
+            </p>
+            <p v-for="field in selectedResult.candidate424.missingFields || []" :key="field" class="finding">
+              缺字段：{{ field }}
+            </p>
+            <details v-if="selectedResult.candidate424.roundTrip?.fieldMismatches?.length" class="mismatch-list">
+              <summary>Round-trip 字段差异</summary>
+              <p v-for="(m, i) in selectedResult.candidate424.roundTrip.fieldMismatches" :key="i">
+                {{ m.key }} · {{ m.field }}：导出 {{ m.emitted ?? "—" }} / 回读 {{ m.reparsed ?? "—" }}
               </p>
-            </div>
-          </div>
+            </details>
+          </section>
         </section>
         <section v-else-if="selectedResult && resultTab === '424'" class="inline-424">
-          <div class="candidate-head">
-            <span
-              :class="['candidate-state', selectedResult.candidate424?.status]"
-              >{{ selectedResult.candidate424?.status }}</span
-            >
-            <small v-if="selectedResult.candidate424?.roundTrip">
-              Round-trip {{ selectedResult.candidate424.roundTrip.parsedLegs }}/{{
-                selectedResult.candidate424.roundTrip.emittedLegs
-              }}
-              腿 ·
-              {{
-                selectedResult.candidate424.roundTrip.fieldMismatches?.length || 0
-              }}
-              字段差异
-            </small>
-            <!-- 产出由谁生成、依据是什么，要能看见：AI 的编码判断不该埋在产物内部 -->
-            <span v-if="selectedResult.candidate424?.generatedBy === 'AI'" class="generated-by">
-              AI 生成
-            </span>
-          </div>
-          <p v-if="selectedResult.candidate424?.decisionSummary" class="decision-summary">
-            {{ selectedResult.candidate424.decisionSummary }}
-          </p>
-          <ul v-if="selectedResult.candidate424?.diffs?.length" class="generation-diffs">
-            <li v-for="(diff, index) in selectedResult.candidate424.diffs" :key="index">
-              <b>{{ diff.code }}</b> {{ diff.detail }}
-            </li>
-          </ul>
+          <!-- 这块只放 424 本身：round-trip、决策说明、缺失字段一类的元信息
+               归到"识别结果"，压在记录上方会把正文挤下去。 -->
           <pre>{{
             selectedResult.candidate424?.text || "尚未生成 424 Candidate"
           }}</pre>
-          <ul v-if="selectedResult.candidate424?.missingFields?.length">
-            <li
-              v-for="field in selectedResult.candidate424.missingFields"
-              :key="field"
+          <!-- 对比紧跟在 424 下面：参考记录是用来读上面那段的，分成两个标签
+               就得来回切，看不到被比对的原文。 -->
+          <section class="inline-compare">
+            <h4>与 Jeppesen 424 对比</h4>
+            <p class="compare-hint">粘贴同一程序的参考记录，逐字段比对上面的结果。</p>
+            <textarea
+              v-model="compareState.text"
+              rows="6"
+              placeholder="粘贴参考 424 静态文本（132 列记录）"
+            ></textarea>
+            <button
+              class="primary"
+              :disabled="compareState.running || !compareState.text.trim() || !selectedResult.candidate424?.text"
+              @click="runCompare424"
             >
-              {{ field }}
-            </li>
-          </ul>
-          <details v-if="selectedResult.candidate424?.roundTrip?.fieldMismatches?.length" class="mismatch-list">
-            <summary>Round-trip 字段差异</summary>
-            <p v-for="(m, i) in selectedResult.candidate424.roundTrip.fieldMismatches" :key="i">
-              {{ m.key }} · {{ m.field }}：导出 {{ m.emitted ?? "—" }} / 回读 {{ m.reparsed ?? "—" }}
-            </p>
-          </details>
-
+              {{ compareState.running ? "对比中…" : "运行对比" }}
+            </button>
+            <p v-if="!selectedResult.candidate424?.text" class="compare-hint">本程序尚未生成 424，无法对比。</p>
+            <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
+            <div v-if="compareState.report" class="compare-report">
+              <p>
+                <b>匹配率
+                  {{
+                    compareState.report.matchRate == null
+                      ? "—"
+                      : Math.round(compareState.report.matchRate * 100) + "%"
+                  }}</b>
+                · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
+                {{ compareState.report.partialLegs }} 部分 ·
+                {{ compareState.report.mismatchedLegs }} 不匹配
+              </p>
+              <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
+                <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
+                <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
+                  #{{ legResult.sequence }} {{ legResult.status }}：
+                  {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
+                </p>
+              </div>
+            </div>
+          </section>
         </section>
         <section v-else-if="selectedResult && resultTab === 'overlay'" class="inline-overlay">
           <template v-if="selectedOverlay?.overlays?.length">
@@ -1499,6 +1479,10 @@ button:disabled {
   font-size: 11px;
   color: #b42318;
 }
+.inline-424 .inline-compare{margin-top:16px;border-top:1px solid #edf1f5;padding-top:12px}
+.inline-424 .inline-compare h4{margin:0 0 4px;font-size:13px}
+.inline-result .gen-meta{margin-top:14px;border-top:1px solid #edf1f5;padding-top:10px}
+.inline-result .gen-meta h4{margin:0 0 6px;font-size:13px}
 .inline-compare .compare-hint {
   font-size: 11px;
   color: #627d98;
@@ -1581,7 +1565,8 @@ button:disabled {
   background: #10233e;
   color: #dcecff;
   padding: 10px;
-  max-height: calc(100vh - 260px);
+  max-height: calc(100vh - 430px);
+  min-height: 220px;
   overflow: auto;
   font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
   font-size: 11px;
