@@ -160,7 +160,7 @@ async function executeAction(
       pir.notes.push({ text: `Tool budget exhausted during ${step.action}; proceeding with partial context.`, evidence: [] });
       return toolCallsUsed;
     }
-    const cropImages: Array<{ pageNo?: number; dataUrl: string }> = [];
+    const cropImages: Array<{ pageNo: number; aipPageNo: string; dataUrl: string }> = [];
     toolResults = [];
     for (const request of requests) {
       toolCallsUsed += 1;
@@ -202,7 +202,7 @@ function knownPirContext(pir: ProcedurePIR, action: RecognitionAction) {
   }
 }
 
-async function executeTool(task: AgentTask, request: { name: string; arguments: any }, cropImages: Array<{ pageNo?: number; dataUrl: string }>) {
+async function executeTool(task: AgentTask, request: { name: string; arguments: any }, cropImages: Array<{ pageNo: number; aipPageNo: string; dataUrl: string }>) {
   try {
     const args = request.arguments || {};
     const page = findPage(task, args.documentId, args.pageNumber);
@@ -227,7 +227,7 @@ async function executeTool(task: AgentTask, request: { name: string; arguments: 
         if (!page || !args.bbox) return { error: 'crop_page requires documentId, pageNumber and bbox.' };
         const dataUrl = await cropPageImage(task, page, args.bbox);
         if (!dataUrl) return { error: 'Crop failed.' };
-        cropImages.push({ pageNo: page.pageNumber, dataUrl });
+        cropImages.push({ pageNo: page.pageNumber, aipPageNo: `${page.documentId}:${page.pageNumber}`, dataUrl });
         return { attachedImage: true, pageNumber: page.pageNumber, bbox: args.bbox };
       }
       default: return { error: `Tool ${request.name} is not allowed.` };

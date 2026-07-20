@@ -1,5 +1,6 @@
 import { callModel } from './modelGateway';
 import type { AgentTask, BusinessProcedurePackage, PageAsset, ProcedurePIR, ValidationResult } from './domain';
+import type { AiInputImage } from '../../../server/src/services/llm/llmClient';
 
 /**
  * 结果完整性核查：拿源页图像直接问"源上有什么、结果里没有什么"。
@@ -35,7 +36,7 @@ export async function auditResultCompleteness(
   pkg: BusinessProcedurePackage,
   pir: ProcedurePIR,
   pages: PageAsset[],
-  images: Array<{ pageNo?: number; aipPageNo?: string; dataUrl: string }>,
+  images: AiInputImage[],
   context: { arinc424Text?: string; geometrySummary?: unknown; procedureId?: string },
   signal: AbortSignal,
 ): Promise<CompletenessAudit> {

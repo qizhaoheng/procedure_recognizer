@@ -1,36 +1,25 @@
 import { createRouter, createWebHistory } from 'vue-router';
-import PdfProcedureRecognizer from '../views/PdfProcedureRecognizer.vue';
-import ProcedureGeoJsonViewer from '../views/ProcedureGeoJsonViewer.vue';
 import AgentTaskList from '../views/agent/AgentTaskList.vue';
 import AgentTaskUpload from '../views/agent/AgentTaskUpload.vue';
-import AgentPackages from '../views/agent/AgentPackages.vue';
-import AgentResults from '../views/agent/AgentResults.vue';
+import ProductionWorkbench from '../views/v4/ProductionWorkbench.vue';
 
 const router = createRouter({
   history: createWebHistory(),
   routes: [
-    { path: '/', redirect: '/pdf-procedure-recognizer' },
+    { path: '/', redirect: '/production' },
     {
-      path: '/autonomous-recognition',
-      name: 'AutonomousRecognitionTasks',
+      path: '/production',
+      name: 'ProductionTasks',
       component: AgentTaskList,
-      meta: { title: '自主识别任务' },
+      meta: { title: '机场航行数据生产' },
     },
-    { path: '/agent-tasks/:taskId/upload', name: 'AgentTaskUpload', component: AgentTaskUpload, meta: { title: '上传机场文件' } },
-    { path: '/agent-tasks/:taskId/packages', name: 'AgentPackages', component: AgentPackages, meta: { title: 'AI 程序包分组' } },
-    { path: '/agent-tasks/:taskId/results/:packageId', name: 'AgentResults', component: AgentResults, meta: { title: '识别结果' } },
-    {
-      path: '/pdf-procedure-recognizer',
-      name: 'PdfProcedureRecognizer',
-      component: PdfProcedureRecognizer,
-      meta: { title: 'PDF 程序识别流程' },
-    },
-    {
-      path: '/procedure-geojson',
-      name: 'ProcedureGeoJsonViewer',
-      component: ProcedureGeoJsonViewer,
-      meta: { title: 'GeoJSON 程序图预览器' },
-    },
+    { path: '/production-tasks/:taskId/intake', name: 'ProductionIntake', component: AgentTaskUpload, meta: { title: '机场资料准备' } },
+    { path: '/production-tasks/:taskId', name: 'ProductionWorkbench', component: ProductionWorkbench, meta: { title: '机场生产工作台' } },
+    { path: '/autonomous-recognition', redirect: '/production' },
+    { path: '/agent-tasks/:taskId/upload', redirect: (to) => `/production-tasks/${to.params.taskId}/intake` },
+    { path: '/agent-tasks/:taskId/packages', redirect: (to) => `/production-tasks/${to.params.taskId}` },
+    { path: '/agent-tasks/:taskId/results/:packageId', redirect: (to) => `/production-tasks/${to.params.taskId}?package=${to.params.packageId}` },
+    { path: '/:pathMatch(.*)*', redirect: '/production' },
   ],
 });
 

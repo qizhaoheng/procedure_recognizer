@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import Ajv, { type ValidateFunction } from 'ajv';
 import { getLlmRuntimeConfig, runVisionRecognition } from '../../../server/src/services/llm/llmClient';
+import type { AiInputImage } from '../../../server/src/services/llm/llmClient';
 import type { AgentTask, ModelCall } from './domain';
 import { loadPrompt, renderTemplate } from './promptRegistry';
 import { saveAgentTask, writeArtifact } from './storage';
@@ -44,7 +45,7 @@ export async function callModel(
   task: AgentTask,
   promptName: string,
   values: Record<string, unknown>,
-  images: Array<{ pageNo?: number; aipPageNo?: string; dataUrl: string }>,
+  images: AiInputImage[],
   stepName: string,
   signal: AbortSignal,
   options: ModelCallOptions = {},

@@ -32,6 +32,7 @@ import {
   writeArtifact,
   TaskRunConflictError,
 } from "./storage";
+import { assessTaskForProduction } from "./productionControl";
 
 export const agentRouter = express.Router();
 const upload = multer({
@@ -97,6 +98,21 @@ agentRouter.get("/tasks/:id", async (req, res) => {
   try {
     const task = await readAgentTask(req.params.id);
     res.json(req.query.view === "workspace" ? workspaceTask(task) : task);
+  } catch {
+    res.status(404).json({ error: "任务不存在。" });
+  }
+});
+agentRouter.get("/tasks/:id/production-summary", async (req, res) => {
+  try {
+    res.json(assessTaskForProduction(await readAgentTask(req.params.id)));
+  } catch {
+    res.status(404).json({ error: "任务不存在。" });
+  }
+});
+agentRouter.get("/tasks/:id/exceptions", async (req, res) => {
+  try {
+    const summary = assessTaskForProduction(await readAgentTask(req.params.id));
+    res.json(summary.assessments.flatMap((item) => item.exceptions));
   } catch {
     res.status(404).json({ error: "任务不存在。" });
   }
@@ -579,6 +595,7 @@ function guessAirport(files: Express.Multer.File[]) {
   );
 }
 function taskSummary(task: AgentTask) {
+  const production = assessTaskForProduction(task);
   return {
     taskId: task.taskId,
     taskName: task.taskName,
@@ -591,6 +608,15 @@ function taskSummary(task: AgentTask) {
     recognizedCount: task.packages.filter((p) =>
       ["COMPLETED", "COMPLETED_WITH_WARNINGS"].includes(p.status),
     ).length,
+    production: {
+      pendingPackages: production.pendingPackages,
+      autoPassPackages: production.autoPassPackages,
+      reviewPackages: production.reviewPackages,
+      blockedPackages: production.blockedPackages,
+      autoPassRate: production.autoPassRate,
+      releaseReady: production.releaseReady,
+      openExceptionCount: production.openExceptionCount,
+    },
     status: task.status,
     stage: task.stage,
     progress: task.progress,

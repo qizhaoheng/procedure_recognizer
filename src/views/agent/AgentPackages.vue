@@ -7,6 +7,7 @@ const route = useRoute(),
   router = useRouter(),
   id = String(route.params.taskId);
 const task = ref<any>();
+const production = ref<any>();
 const selectedId = ref("");
 const checked = ref<string[]>([]);
 const error = ref("");
@@ -59,6 +60,9 @@ const selected = computed(
     task.value?.packages?.find((p: any) => p.packageId === selectedId.value) ||
     task.value?.packages?.[0],
 );
+const productionByPackage = computed(() => new Map(
+  (production.value?.assessments || []).map((item: any) => [item.packageId, item]),
+));
 const selectedBundle = computed(() =>
   selected.value ? resultBundles.value[selected.value.packageId] : undefined,
 );
@@ -114,6 +118,10 @@ function packagesOf(category: string) {
 /** 左栏色条：把生命周期压成四档，卡片上就不用再写一行状态文字。 */
 function railState(pkg: any) {
   if (isPackageRunning(pkg)) return "running";
+  const disposition = (productionByPackage.value.get(pkg.packageId) as any)?.disposition;
+  if (disposition === "BLOCKED") return "failed";
+  if (disposition === "REVIEW_REQUIRED") return "review";
+  if (disposition === "AUTO_PASS") return "done";
   if (pkg.status === "FAILED") return "failed";
   // 带警告完成的也走琥珀档：实测 SID RNP RWY04 是 COMPLETED_WITH_WARNINGS
   // 却带着 4 条 ERROR，给它一条绿条等于说"这个不用看了"。
@@ -210,7 +218,12 @@ function schedulePoll() {
 }
 async function load(bg = false) {
   try {
-    task.value = await agentRequest(`/tasks/${id}?view=workspace`);
+    const [workspace, productionSummary] = await Promise.all([
+      agentRequest(`/tasks/${id}?view=workspace`),
+      agentRequest(`/tasks/${id}/production-summary`),
+    ]);
+    task.value = workspace;
+    production.value = productionSummary;
     if (!selectedId.value && task.value.packages?.length)
       selectedId.value = task.value.packages[0].packageId;
     for (const pkg of task.value.packages || []) {
@@ -522,6 +535,22 @@ function msg(e: unknown) {
       </div>
     </header>
     <p v-if="error" class="error">{{ error }}</p>
+    <section v-if="production" class="production-strip">
+      <div>
+        <small>V4生产状态</small>
+        <b>{{ production.releaseReady ? "具备机场放行条件" : "尚未具备机场放行条件" }}</b>
+      </div>
+      <dl>
+        <div><dt>自动通过</dt><dd>{{ production.autoPassPackages }}</dd></div>
+        <div><dt>待专业复核</dt><dd class="review-count">{{ production.reviewPackages }}</dd></div>
+        <div><dt>阻塞</dt><dd class="blocked-count">{{ production.blockedPackages }}</dd></div>
+        <div><dt>未完成</dt><dd>{{ production.pendingPackages }}</dd></div>
+        <div><dt>自动通过率</dt><dd>{{ production.autoPassRate == null ? "—" : `${production.autoPassRate}%` }}</dd></div>
+      </dl>
+      <p v-if="production.openExceptionCount">
+        {{ production.openExceptionCount }} 项有效例外等待处理；警告不计入阻塞。
+      </p>
+    </section>
     <section v-if="task.stage === 'FAILED'" class="failed-state">
       <h2>分析未完成</h2>
       <p>{{ task.error || "后端分析失败，请重新分析。" }}</p>
@@ -932,6 +961,32 @@ function msg(e: unknown) {
   margin: 0;
   white-space: nowrap;
   font-size: 12px;
+}
+.production-strip {
+  display: grid;
+  grid-template-columns: minmax(220px, .8fr) minmax(480px, 1.4fr) minmax(220px, .8fr);
+  gap: 20px;
+  align-items: center;
+  margin: 0 0 10px;
+  padding: 12px 16px;
+  background: #fff;
+  border: 1px solid #dce5ee;
+  border-radius: 10px;
+  flex: 0 0 auto;
+}
+.production-strip small,
+.production-strip p,
+.production-strip dt { color: #64748b; }
+.production-strip b { display: block; margin-top: 3px; }
+.production-strip dl { display: grid; grid-template-columns: repeat(5, 1fr); margin: 0; }
+.production-strip dl div { padding: 0 10px; border-left: 1px solid #e7edf3; text-align: center; }
+.production-strip dt { font-size: 11px; }
+.production-strip dd { margin: 3px 0 0; font-size: 18px; font-weight: 700; }
+.production-strip .review-count { color: #a16207; }
+.production-strip .blocked-count { color: #b42318; }
+.production-strip p { margin: 0; font-size: 12px; line-height: 1.5; }
+@media (max-width: 1080px) {
+  .production-strip { grid-template-columns: 1fr; }
 }
 .stage-chip {
   color: #174ea6;
