@@ -11,7 +11,9 @@ const selectedId = ref("");
 const checked = ref<string[]>([]);
 const error = ref("");
 const saving = ref(false);
-const resultTab = ref<"legs" | "424" | "quality" | "overlay">("legs");
+// 右侧常驻区域留给 424 / 对比 / 识别结果；航迹图改为按钮弹窗。
+const resultTab = ref<"424" | "compare" | "result" | "overlay">("424");
+const mapModalOpen = ref(false);
 const resultBundles = ref<Record<string, any>>({});
 const overlayBundles = ref<Record<string, any>>({});
 const compareState = ref<{ open: boolean; text: string; running: boolean; report?: any; error?: string }>({ open: false, text: "", running: false });
@@ -76,6 +78,29 @@ const validationCounts = computed(() => {
   return counts;
 });
 const openConflicts = computed(() => (selectedPir.value?.conflicts || []).filter((c: any) => c.status === "OPEN"));
+const blockingValidations = computed(() =>
+  otherValidations.value.filter((v: any) => v.severity === "BLOCKER" || v.severity === "ERROR"),
+);
+const resolvedFixCount = computed(
+  () => (selectedPir.value?.fixes || []).filter((f: any) => f.latitude != null && f.longitude != null).length,
+);
+function legsOfRoute(route: any) {
+  return (selectedPir.value?.legs || [])
+    .filter((leg: any) => leg.routeId === route.routeId)
+    .sort((a: any, b: any) => a.sequence - b.sequence);
+}
+function constraintText(constraint: any) {
+  if (!constraint) return "—";
+  const unit = constraint.unit === "FL" ? "FL" : "FT";
+  const one = (v: any) => (v == null ? "" : unit === "FL" ? `FL${v}` : `${v}FT`);
+  switch (constraint.type) {
+    case "AT": return one(constraint.altitude1);
+    case "AT_OR_ABOVE": return `${one(constraint.altitude1)}+`;
+    case "AT_OR_BELOW": return `${one(constraint.altitude1)}-`;
+    case "BETWEEN": return `${one(constraint.altitude2)}~${one(constraint.altitude1)}`;
+    default: return one(constraint.altitude1) || "—";
+  }
+}
 const usedRouteTypes = computed(() => {
   const present = new Set((selectedPir.value?.routes || []).map((r: any) => r.routeType));
   return ROUTE_TYPES.filter((t) => present.has(t.value));
@@ -657,24 +682,10 @@ function msg(e: unknown) {
                 >{{ selectedPir.quality.unresolvedFields.length }} 个未解决字段</span
               >
             </div>
-            <div v-if="usedRouteTypes.length > 1" class="route-layers">
-              <label v-for="t in usedRouteTypes" :key="t.value">
-                <input
-                  type="checkbox"
-                  :checked="visibleRouteTypes.includes(t.value)"
-                  @change="toggleRouteType(t.value)"
-                />
-                {{ t.label }}
-              </label>
-            </div>
-            <div class="result-map">
-              <AgentResultMap
-                :geojson="selectedResult.geojson"
-                :selected-leg-id="selectedLegId"
-                :visible-route-types="visibleRouteTypes"
-                @select-leg="selectedLegId = $event"
-              />
-            </div>
+            <button class="open-map" @click="mapModalOpen = true">
+              打开航迹图
+              <small>{{ (selectedResult.geojson?.features?.length || 0) }} 个要素</small>
+            </button>
           </template>
           <div v-else class="result-loading">该程序包尚无识别结果。</div>
         </section>
@@ -686,22 +697,22 @@ function msg(e: unknown) {
         </div>
         <nav class="result-tabs">
           <button
-            :class="{ active: resultTab === 'legs' }"
-            @click="resultTab = 'legs'"
-          >
-            航段
-          </button>
-          <button
             :class="{ active: resultTab === '424' }"
             @click="resultTab = '424'"
           >
             ARINC 424
           </button>
           <button
-            :class="{ active: resultTab === 'quality', alert: validationCounts.BLOCKER + validationCounts.ERROR > 0 }"
-            @click="resultTab = 'quality'"
+            :class="{ active: resultTab === 'compare' }"
+            @click="resultTab = 'compare'"
           >
-            校验 {{ selectedValidations.length || "" }}
+            Jeppesen 对比
+          </button>
+          <button
+            :class="{ active: resultTab === 'result' }"
+            @click="resultTab = 'result'"
+          >
+            识别结果
           </button>
           <button
             :class="{ active: resultTab === 'overlay' }"
@@ -709,38 +720,85 @@ function msg(e: unknown) {
           >
             原图叠加
           </button>
+          <!-- 地图移出常驻区域：右侧留给 424 与对比，地图按需弹出 -->
+          <button class="map-open" @click="mapModalOpen = true">航迹图</button>
         </nav>
         <section v-if="resultLoading" class="result-loading">正在加载…</section>
         <section
-          v-else-if="selectedResult && resultTab === 'legs'"
-          class="inline-legs"
+          v-else-if="selectedResult && resultTab === 'result'"
+          class="inline-result"
         >
+          <div class="summary">
+            <p><span>航路</span><b>{{ selectedPir?.routes?.length || 0 }}</b></p>
+            <p><span>航段</span><b>{{ selectedPir?.legs?.length || 0 }}</b></p>
+            <p><span>航路点</span><b>{{ resolvedFixCount }}/{{ selectedPir?.fixes?.length || 0 }}</b></p>
+          </div>
+          <div v-for="route in selectedPir?.routes || []" :key="route.routeId" class="result-route">
+            <h4>{{ route.identifier }}<em>{{ route.routeType }}</em></h4>
+            <p v-if="route.climbGradient?.percent" class="climb-gradient">
+              最低爬升梯度 {{ route.climbGradient.percent }}%<template v-if="route.climbGradient.untilAltitudeFt">，直至通过 {{ route.climbGradient.untilAltitudeFt }} FT</template>
+            </p>
+            <table>
+              <tr v-for="leg in legsOfRoute(route)" :key="leg.legId">
+                <td class="seq">{{ leg.sequence }}</td>
+                <td class="pt">{{ leg.pathTerminator }}</td>
+                <td>{{ fixName(leg.fromFixId) }} → {{ fixName(leg.toFixId) }}</td>
+                <td class="num">{{ leg.course ?? "—" }}°</td>
+                <td class="num">{{ leg.distanceNm ?? "—" }} NM</td>
+                <td class="alt">{{ constraintText(leg.altitudeConstraint) }}</td>
+              </tr>
+            </table>
+          </div>
+          <!-- 第 5 点要求的"提示缺失信息"保留在这里：校验标签去掉了，但源页比对的缺失清单
+               是这套流程最该让人看到的产出，不该跟着标签一起消失。 -->
+          <section v-if="completenessFindings.length" class="completeness-block">
+            <h4>源页比对：结果中缺失的内容（{{ completenessFindings.length }}）</h4>
+            <p class="completeness-note">由 AI 读原始页面得出，供人复核——它与识别同源，不作为拒出依据。</p>
+            <p v-for="(v, i) in completenessFindings" :key="i" class="finding">{{ v.message }}</p>
+          </section>
+          <p v-if="blockingValidations.length" class="blocking-summary">
+            另有 {{ blockingValidations.length }} 项规则校验未通过：{{ blockingValidations.map((v: any) => v.ruleCode).join("、") }}
+          </p>
+        </section>
+        <section
+          v-else-if="selectedResult && resultTab === 'compare'"
+          class="inline-compare"
+        >
+          <p class="compare-hint">粘贴同一程序的 Jeppesen 424 参考记录，逐字段比对识别结果。</p>
+          <textarea
+            v-model="compareState.text"
+            rows="8"
+            placeholder="粘贴参考 424 静态文本（132 列记录）"
+          ></textarea>
           <button
-            v-for="leg in selectedPir?.legs || []"
-            :key="leg.legId"
-            :class="{ active: selectedLegId === leg.legId }"
-            @click="selectedLegId = leg.legId"
+            class="primary"
+            :disabled="compareState.running || !compareState.text.trim() || !selectedResult.candidate424?.text"
+            @click="runCompare424"
           >
-            <b>{{ leg.sequence }} · {{ leg.pathTerminator }}</b>
-            <span
-              >{{ fixName(leg.fromFixId) }} → {{ fixName(leg.toFixId) }}</span
-            >
-            <em>{{ leg.course ?? "—" }}° · {{ leg.distanceNm ?? "—" }} NM</em>
+            {{ compareState.running ? "对比中…" : "运行对比" }}
           </button>
-          <dl v-if="selectedLeg" class="selected-leg-detail">
-            <dt>From / To</dt>
-            <dd>
-              {{ fixName(selectedLeg.fromFixId) }} →
-              {{ fixName(selectedLeg.toFixId) }}
-            </dd>
-            <dt>航向 / 距离</dt>
-            <dd>
-              {{ selectedLeg.course ?? "—" }}° /
-              {{ selectedLeg.distanceNm ?? "—" }} NM
-            </dd>
-            <dt>置信度</dt>
-            <dd>{{ selectedLeg.confidence ?? "—" }}</dd>
-          </dl>
+          <p v-if="!selectedResult.candidate424?.text" class="compare-hint">本程序尚未生成 424，无法对比。</p>
+          <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
+          <div v-if="compareState.report" class="compare-report">
+            <p>
+              <b>匹配率
+                {{
+                  compareState.report.matchRate == null
+                    ? "—"
+                    : Math.round(compareState.report.matchRate * 100) + "%"
+                }}</b>
+              · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
+              {{ compareState.report.partialLegs }} 部分 ·
+              {{ compareState.report.mismatchedLegs }} 不匹配
+            </p>
+            <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
+              <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
+              <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
+                #{{ legResult.sequence }} {{ legResult.status }}：
+                {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
+              </p>
+            </div>
+          </div>
         </section>
         <section v-else-if="selectedResult && resultTab === '424'" class="inline-424">
           <div class="candidate-head">
@@ -788,96 +846,7 @@ function msg(e: unknown) {
               {{ m.key }} · {{ m.field }}：导出 {{ m.emitted ?? "—" }} / 回读 {{ m.reparsed ?? "—" }}
             </p>
           </details>
-          <section class="compare-block">
-            <button
-              class="compare"
-              :disabled="!selectedResult.candidate424?.text"
-              @click="compareState.open = !compareState.open"
-            >
-              与 Jeppesen 424 参考数据对比
-            </button>
-            <template v-if="compareState.open">
-              <textarea
-                v-model="compareState.text"
-                rows="5"
-                placeholder="粘贴参考 424 静态文本（132 列记录）"
-              ></textarea>
-              <button
-                class="primary"
-                :disabled="compareState.running || !compareState.text.trim()"
-                @click="runCompare424"
-              >
-                {{ compareState.running ? "对比中…" : "运行对比" }}
-              </button>
-              <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
-              <div v-if="compareState.report" class="compare-report">
-                <p>
-                  <b>匹配率
-                    {{
-                      compareState.report.matchRate == null
-                        ? "—"
-                        : Math.round(compareState.report.matchRate * 100) + "%"
-                    }}</b>
-                  · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
-                  {{ compareState.report.partialLegs }} 部分 ·
-                  {{ compareState.report.mismatchedLegs }} 不匹配
-                </p>
-                <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
-                  <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
-                  <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
-                    #{{ legResult.sequence }} {{ legResult.status }}：
-                    {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
-                  </p>
-                </div>
-              </div>
-            </template>
-          </section>
-        </section>
-        <section v-else-if="selectedResult && resultTab === 'quality'" class="inline-quality">
-          <p v-if="!selectedValidations.length && !openConflicts.length && !selectedPir?.quality?.unresolvedFields?.length" class="quality-ok">
-            全部校验通过，无未解决字段。
-          </p>
-          <section v-if="completenessFindings.length" class="completeness-block">
-            <h4>源页比对：结果中缺失的内容（{{ completenessFindings.length }}）</h4>
-            <p class="completeness-note">
-              由 AI 读原始页面得出，供人复核——它与识别同源，不作为拒出依据。
-            </p>
-            <article v-for="(v, i) in completenessFindings" :key="'c' + i" :class="['validation', v.severity]">
-              <header>
-                <span class="severity">{{ v.severity }}</span>
-                <b>{{ v.ruleCode.replace("SOURCE_COMPLETENESS_", "") }}</b>
-              </header>
-              <p>{{ v.message }}</p>
-              <small v-if="v.fieldPath">{{ v.fieldPath }}</small>
-            </article>
-          </section>
-          <article v-for="(v, i) in otherValidations" :key="i" :class="['validation', v.severity]">
-            <header>
-              <span class="severity">{{ v.severity }}</span>
-              <b>{{ v.ruleCode }}</b>
-            </header>
-            <p>{{ v.message }}</p>
-            <small v-if="v.fieldPath">{{ v.fieldPath }}</small>
-            <div v-if="evidenceOf(v.evidence).length" class="evidence-links">
-              <button v-for="ev in evidenceOf(v.evidence)" :key="ev.evidenceId" @click="openEvidence(ev)">
-                查看证据 P{{ ev.pageNumber }}
-              </button>
-            </div>
-          </article>
-          <section v-if="openConflicts.length">
-            <h3>提取冲突（{{ openConflicts.length }}）</h3>
-            <article v-for="conflict in openConflicts" :key="conflict.conflictId" class="validation WARNING">
-              <header><span class="severity">CONFLICT</span><b>{{ conflict.fieldPath }}</b></header>
-              <p>{{ conflict.reason }}</p>
-              <p v-for="(candidate, ci) in conflict.candidates" :key="ci" class="candidate-row">
-                候选 {{ ci + 1 }}（{{ candidate.source }}）：{{ JSON.stringify(candidate.value) }}
-              </p>
-            </article>
-          </section>
-          <section v-if="selectedPir?.quality?.unresolvedFields?.length">
-            <h3>未解决字段（{{ selectedPir.quality.unresolvedFields.length }}）</h3>
-            <p v-for="field in selectedPir.quality.unresolvedFields" :key="field" class="unresolved-field">{{ field }}</p>
-          </section>
+
         </section>
         <section v-else-if="selectedResult && resultTab === 'overlay'" class="inline-overlay">
           <template v-if="selectedOverlay?.overlays?.length">
@@ -947,6 +916,32 @@ function msg(e: unknown) {
           :src="pdfPreviewUrl"
           :title="pdfPreview.fileName"
         ></iframe>
+      </article>
+    </div>
+    <div v-if="mapModalOpen && selectedResult" class="modal map-modal" @click.self="mapModalOpen = false">
+      <article>
+        <header>
+          <h3>{{ selected?.procedureName }} · 航迹图</h3>
+          <div v-if="usedRouteTypes.length > 1" class="route-layers">
+            <label v-for="t in usedRouteTypes" :key="t.value">
+              <input
+                type="checkbox"
+                :checked="visibleRouteTypes.includes(t.value)"
+                @change="toggleRouteType(t.value)"
+              />
+              {{ t.label }}
+            </label>
+          </div>
+          <button class="close" @click="mapModalOpen = false">关闭</button>
+        </header>
+        <div class="map-body">
+          <AgentResultMap
+            :geojson="selectedResult.geojson"
+            :selected-leg-id="selectedLegId"
+            :visible-route-types="visibleRouteTypes"
+            @select-leg="selectedLegId = $event"
+          />
+        </div>
       </article>
     </div>
   </main>
@@ -1387,14 +1382,135 @@ button:disabled {
   color: #102a43;
   margin-left: 4px;
 }
-.result-map {
+.open-map {
+  align-self: flex-start;
+  border: 1px solid #c8d2df;
+  background: #fff;
+  border-radius: 8px;
+  padding: 9px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.open-map small {
+  color: #627d98;
+  margin-left: 8px;
+  font-size: 11px;
+}
+.map-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 2000;
+  display: grid;
+  place-items: center;
+  background: #102a4370;
+}
+.map-modal article {
+  width: min(1180px, 94vw);
+  height: min(860px, 92vh);
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 18px 50px #102a4340;
+}
+.map-modal header {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 14px;
+  border-bottom: 1px solid #dfe6ee;
+}
+.map-modal header h3 {
+  margin: 0;
+  font-size: 14px;
+}
+.map-modal header .close {
+  margin-left: auto;
+  border: 1px solid #c8d2df;
+  background: #fff;
+  border-radius: 6px;
+  padding: 7px 10px;
+}
+.map-modal .map-body {
   flex: 1;
   min-height: 0;
-  border-radius: 9px;
-  overflow: hidden;
 }
-.result-map :deep(.map) {
+.map-modal .map-body :deep(.map) {
   min-height: 0;
+  height: 100%;
+}
+.result-tabs .map-open {
+  margin-left: auto;
+}
+.inline-result .summary {
+  display: flex;
+  gap: 16px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid #edf1f5;
+}
+.inline-result .summary p {
+  margin: 0;
+  font-size: 11px;
+  color: #627d98;
+}
+.inline-result .summary b {
+  display: block;
+  font-size: 16px;
+  color: #102a43;
+}
+.result-route h4 {
+  margin: 12px 0 4px;
+  font-size: 13px;
+}
+.result-route h4 em {
+  color: #627d98;
+  font-size: 11px;
+  font-style: normal;
+  margin-left: 6px;
+}
+.result-route .climb-gradient {
+  margin: 0 0 4px;
+  font-size: 11px;
+  color: #b45309;
+}
+.result-route table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.result-route td {
+  padding: 3px 4px;
+  border-bottom: 1px solid #f1f5f9;
+}
+.result-route .seq,
+.result-route .pt {
+  color: #627d98;
+  white-space: nowrap;
+}
+.result-route .num,
+.result-route .alt {
+  text-align: right;
+  white-space: nowrap;
+}
+.blocking-summary {
+  margin-top: 12px;
+  font-size: 11px;
+  color: #b42318;
+}
+.inline-compare .compare-hint {
+  font-size: 11px;
+  color: #627d98;
+}
+.inline-compare textarea {
+  width: 100%;
+  box-sizing: border-box;
+  margin: 8px 0;
+  font-family: monospace;
+  font-size: 10px;
+  border: 1px solid #ccd6e0;
+  border-radius: 7px;
+  padding: 8px;
 }
 .candidate-state {
   display: inline-block;

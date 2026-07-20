@@ -374,7 +374,13 @@ function empty(): any {
       v-else-if="!geojson?.features?.some((f: any) => f.geometry)"
       class="empty"
     >
-      当前程序坐标不足，尚无可绘制航迹
+      <!-- 空 features 的成因不止"坐标不足"：几何生成本身也可能没落笔。
+           把两种情况分开说，才不会再把人往错的方向引。 -->
+      {{
+        geojson?.features?.length
+          ? "已生成要素但都没有几何：几何写入步骤未落笔，请重跑该程序包"
+          : "尚未生成任何几何要素"
+      }}
     </div>
   </div>
 </template>
