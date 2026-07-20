@@ -1068,8 +1068,9 @@ function msg(e: unknown) {
   min-height: 0;
   overflow: hidden;
 }
+/* 出结果后 424 是主角：中间那列只剩包头和统计，收窄让位给右侧结果区。 */
 .workspace.has-result {
-  grid-template-columns: 320px minmax(480px, 1fr) 320px;
+  grid-template-columns: 280px 300px minmax(560px, 1fr);
 }
 .workspace > aside,
 .sources {
@@ -1343,7 +1344,7 @@ button:disabled {
     grid-template-columns: 250px minmax(420px, 1fr);
   }
   .workspace.has-result {
-    grid-template-columns: 250px minmax(420px, 1fr) 280px;
+    grid-template-columns: 220px 260px minmax(440px, 1fr);
   }
   .page {
     padding: 14px;
@@ -1574,15 +1575,18 @@ button:disabled {
 .selected-leg-detail dd {
   margin: 0;
 }
+/* 132 列定宽记录：换行会毁掉列对齐，宁可横向滚动也要保持一行一记录。 */
 .inline-424 pre {
-  white-space: pre-wrap;
-  word-break: break-all;
+  white-space: pre;
   background: #10233e;
   color: #dcecff;
   padding: 10px;
   max-height: calc(100vh - 260px);
   overflow: auto;
-  font-size: 10px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  tab-size: 4;
 }
 .pdf-modal {
   position: fixed;
