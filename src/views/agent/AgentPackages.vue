@@ -19,6 +19,7 @@ const overlayBundles = ref<Record<string, any>>({});
 const compareState = ref<{ open: boolean; text: string; running: boolean; report?: any; error?: string }>({ open: false, text: "", running: false });
 // 对比暂时收起。后端接口和 runCompare424 都留着，改回 true 即恢复。
 const COMPARE_VISIBLE = false;
+const showRuler = ref(true);
 const debugOpen = ref(false);
 const ROUTE_TYPES = [
   { value: "RUNWAY_TRANSITION", label: "跑道过渡" },
@@ -95,14 +96,62 @@ function constraintText(constraint: any) {
   if (!constraint) return "—";
   const unit = constraint.unit === "FL" ? "FL" : "FT";
   const one = (v: any) => (v == null ? "" : unit === "FL" ? `FL${v}` : `${v}FT`);
+  // 限制类型有、高度值没有时不能只印一个 "+"：那看着像个高度限制，其实什么都没说。
+  const low = one(constraint.altitude1);
+  const high = one(constraint.altitude2);
+  if (!low && !high) return "—";
   switch (constraint.type) {
-    case "AT": return one(constraint.altitude1);
-    case "AT_OR_ABOVE": return `${one(constraint.altitude1)}+`;
-    case "AT_OR_BELOW": return `${one(constraint.altitude1)}-`;
-    case "BETWEEN": return `${one(constraint.altitude2)}~${one(constraint.altitude1)}`;
-    default: return one(constraint.altitude1) || "—";
+    case "AT": return low;
+    case "AT_OR_ABOVE": return `${low}+`;
+    case "AT_OR_BELOW": return `${low}-`;
+    case "BETWEEN": return `${high}~${low}`;
+    default: return low || "—";
   }
 }
+function packagesOf(category: string) {
+  return (task.value?.packages || []).filter((p: any) => p.procedureCategory === category);
+}
+/** 左栏色条：把生命周期压成四档，卡片上就不用再写一行状态文字。 */
+function railState(pkg: any) {
+  if (isPackageRunning(pkg)) return "running";
+  if (pkg.status === "FAILED") return "failed";
+  // 带警告完成的也走琥珀档：实测 SID RNP RWY04 是 COMPLETED_WITH_WARNINGS
+  // 却带着 4 条 ERROR，给它一条绿条等于说"这个不用看了"。
+  if (hasResult(pkg) && ["REQUIRES_REVIEW", "COMPLETED_WITH_WARNINGS"].includes(pkg.status)) return "review";
+  if (hasResult(pkg)) return "done";
+  return "pending";
+}
+
+const recordLines = computed(() =>
+  String(selectedResult.value?.candidate424?.text || "").split("\n").filter((line: string) => line.trim()),
+);
+/** 每条腿两行（主记录 1E + 续行 2P），交替底色让 12 行读成 6 条腿。 */
+function legBand(index: number) {
+  return Math.floor(index / 2) % 2 ? "band" : "";
+}
+
+// 132 列是位置编码，列位就是语义。标尺按渲染器（simpleLegsTo424Text）的实际写入
+// 下标标注，两边改了要一起改——标错的标尺比没有标尺更坏。
+// 标签只能用半角：中文在等宽字体里占两格，一个中文标签就会把整条标尺推错位。
+const RULER_FIELDS: Array<[number, string]> = [
+  [0, "HDR"], [6, "ARPT"], [10, "RG"], [12, "S"], [13, "ROUTE"], [19, "T"],
+  [20, "QUALIF"], [26, "SEQ"], [29, "FIX"], [34, "RG"], [36, "SC"], [38, "C"],
+  [39, "DS"], [43, "T"], [47, "PT"], [50, "NAVAID"], [70, "CRS"], [74, "DIST"],
+  [82, "S"], [84, "ALT"], [89, "ALT2"], [99, "SPD"], [106, "NAVAID"], [118, "QL"],
+];
+const rulerLabels = computed(() => {
+  const chars = new Array<string>(132).fill(" ");
+  for (const [pos, label] of RULER_FIELDS) {
+    for (let i = 0; i < label.length && pos + i < 132; i += 1) chars[pos + i] = label[i];
+  }
+  return chars.join("").replace(/\s+$/, "");
+});
+const rulerTicks = computed(() => {
+  const chars = new Array<string>(132).fill(".");
+  for (const [pos] of RULER_FIELDS) chars[pos] = "|";
+  return chars.join("");
+});
+
 const usedRouteTypes = computed(() => {
   const present = new Set((selectedPir.value?.routes || []).map((r: any) => r.routeType));
   return ROUTE_TYPES.filter((t) => present.has(t.value));
@@ -490,102 +539,66 @@ function msg(e: unknown) {
       <h2>AI 正在分析全部机场文件</h2>
       <p>正在识别文件关系并划分逻辑飞行程序包…</p>
     </section>
-    <section v-else :class="['workspace', { 'has-result': showingResult }]">
-      <aside>
-        <div v-for="category in ['SID', 'STAR', 'APPROACH']" :key="category">
-          <h3>{{ category }}</h3>
-          <div
-            v-for="pkg in task.packages.filter(
-              (p: any) => p.procedureCategory === category,
-            )"
-            :key="pkg.packageId"
-            :class="[
-              'package-row',
-              { active: selected?.packageId === pkg.packageId },
-            ]"
-          >
-            <input
-              type="checkbox"
-              :checked="checked.includes(pkg.packageId)"
-              @click="toggle(pkg.packageId)"
-            />
-            <button class="package-select" @click="selectPackage(pkg)">
-              <b>{{ pkg.procedureName }}</b>
-              <small>
-                RWY {{ pkg.runways.join(", ") || "—" }} ·
-                {{ pkg.packagePages.length }} 页
-              </small>
-              <!-- 来源质量与生命周期状态是两条独立的轴，分开显示，不要挤进状态徽章 -->
-              <span v-if="sourceIssues(pkg).length" class="source-quality">
-                {{ sourceIssues(pkg).join(" · ") }}
-              </span>
-              <em
-                :class="{
-                  running: isPackageRunning(pkg),
-                  failed: pkg.status === 'FAILED',
-                }"
-              >
-                {{
-                  packageFeedback[pkg.packageId]?.message ||
-                  statusText(pkg.status)
-                }}
-              </em>
-            </button>
-            <button
-              class="package-action"
-              :class="{
-                result: hasResult(pkg) && pkg.status !== 'REQUIRES_REVIEW',
-                review: hasResult(pkg) && pkg.status === 'REQUIRES_REVIEW',
-              }"
-              :disabled="isPackageRunning(pkg) || anotherPackageRunning(pkg)"
-              @click="actOnPackage(pkg)"
+    <section v-else class="workspace">
+      <!-- 左栏只回答一个问题：该看哪个包。名称能扫、状态用色条、来源问题收成一个角标。
+           原来每张卡片都印同一串"程序身份不明确·缺编码表·缺坐标源·缺跑道数据"，
+           14 个包印 14 遍——对所有包都成立的信息不能区分任何包，只是噪声。 -->
+      <aside class="rail">
+        <template v-for="category in ['SID', 'STAR', 'APPROACH']" :key="category">
+          <div v-if="packagesOf(category).length" class="rail-group">
+            <h3>{{ category }}<em>{{ packagesOf(category).length }}</em></h3>
+            <div
+              v-for="pkg in packagesOf(category)"
+              :key="pkg.packageId"
+              :class="['rail-item', railState(pkg), { active: selected?.packageId === pkg.packageId }]"
             >
-              {{ packageAction(pkg) }}
-            </button>
+              <input
+                type="checkbox"
+                :checked="checked.includes(pkg.packageId)"
+                :aria-label="`选择 ${pkg.procedureName}`"
+                @click="toggle(pkg.packageId)"
+              />
+              <button class="rail-pick" @click="selectPackage(pkg)">
+                <b>{{ pkg.procedureName }}</b>
+                <small>
+                  RWY {{ pkg.runways.join(", ") || "—" }} · {{ pkg.packagePages.length }} 页
+                  <span v-if="sourceIssues(pkg).length" class="rail-warn" :title="sourceIssues(pkg).join(' · ')">
+                    ⚠ {{ sourceIssues(pkg).length }}
+                  </span>
+                </small>
+              </button>
+              <span v-if="isPackageRunning(pkg)" class="mini-spinner"></span>
+            </div>
           </div>
-        </div>
+        </template>
       </aside>
-      <section v-if="selected" class="sources">
-        <div class="title">
-          <div>
-            <span>{{ selected.procedureCategory }}</span>
+
+      <section v-if="selected" class="main">
+        <!-- 包头把原来中间那一整列压成三行：身份、来源、指标。
+             中间列在识别完成后只剩这些内容，却占着 1fr 的宽度。 -->
+        <header class="main-head">
+          <div class="head-line">
+            <span class="cat">{{ selected.procedureCategory }}</span>
             <h2>{{ selected.procedureName }}</h2>
-          </div>
-          <button
-            v-if="!showingResult"
-            class="primary"
-            :disabled="
-              isPackageRunning(selected) || anotherPackageRunning(selected)
-            "
-            @click="actOnPackage(selected)"
-          >
-            {{ packageAction(selected) }}
-          </button>
-        </div>
-        <div
-          v-if="packageFeedback[selected.packageId]"
-          :class="[
-            'package-feedback',
-            packageFeedback[selected.packageId].state,
-          ]"
-        >
-          <span v-if="isPackageRunning(selected)" class="mini-spinner"></span>
-          {{ packageFeedback[selected.packageId].message }}
-        </div>
-        <template v-if="!showingResult">
-          <div
-            v-for="[docId, pages] in groupedPages"
-            :key="docId"
-            class="document"
-          >
+            <small>RWY {{ selected.runways.join(", ") || "—" }}</small>
+            <span :class="['run-state', railState(selected)]">
+              {{ packageFeedback[selected.packageId]?.message || statusText(selected.status) }}
+            </span>
             <button
-              class="pdf-link"
-              @click="openPdf(docId, pages[0]?.pageNumber || 1)"
+              class="primary head-act"
+              :disabled="isPackageRunning(selected) || anotherPackageRunning(selected)"
+              @click="recognize([selected.packageId])"
             >
-              <span>PDF</span>{{ docName(docId) }}
+              {{ hasResult(selected) ? "重新识别" : packageAction(selected) }}
             </button>
-            <div class="page-chips">
-              <span v-for="page in pages" :key="page.pageNumber">
+          </div>
+
+          <div class="head-sources">
+            <template v-for="[docId, pages] in groupedPages" :key="docId">
+              <button class="pdf-link" @click="openPdf(docId, pages[0]?.pageNumber || 1)">
+                <span>PDF</span>{{ docName(docId) }}
+              </button>
+              <span v-for="page in pages" :key="page.pageNumber" class="page-chip">
                 <button
                   class="page-open"
                   :title="`仅预览第 ${page.pageNumber} 页`"
@@ -593,29 +606,21 @@ function msg(e: unknown) {
                 >
                   P{{ page.pageNumber }} · {{ page.pageRole }}
                 </button>
-                <button aria-label="移除页面" @click="removePage(page)">
-                  ×
-                </button>
+                <button v-if="!showingResult" aria-label="移除页面" @click="removePage(page)">×</button>
               </span>
-            </div>
-          </div>
-          <div class="add">
+            </template>
             <select
+              v-if="!showingResult"
+              class="add-page"
               @change="
                 addPage(($event.target as HTMLSelectElement).value);
                 ($event.target as HTMLSelectElement).value = '';
               "
             >
-              <option value="">+ 向程序包增加页面</option>
-              <optgroup
-                v-for="doc in task.documents"
-                :key="doc.documentId"
-                :label="doc.fileName"
-              >
+              <option value="">+ 加页</option>
+              <optgroup v-for="doc in task.documents" :key="doc.documentId" :label="doc.fileName">
                 <option
-                  v-for="page in availablePages.filter(
-                    (p: any) => p.documentId === doc.documentId,
-                  )"
+                  v-for="page in availablePages.filter((p: any) => p.documentId === doc.documentId)"
                   :key="page.pageNumber"
                   :value="`${doc.documentId}:${page.pageNumber}`"
                 >
@@ -624,233 +629,183 @@ function msg(e: unknown) {
               </optgroup>
             </select>
           </div>
-        </template>
-        <section v-else class="inline-result">
-          <div class="result-sources">
-            <div
-              v-for="[docId, pages] in groupedPages"
-              :key="docId"
-              class="result-source-doc"
-            >
-              <button class="pdf-link" @click="openPdf(docId, pages[0]?.pageNumber || 1)">
-                <span>PDF</span>{{ docName(docId) }}
-              </button>
-              <div class="page-chips">
-                <span v-for="page in pages" :key="page.pageNumber">
-                  <button
-                    class="page-open"
-                    :title="`仅预览第 ${page.pageNumber} 页`"
-                    @click="openPage(docId, page.pageNumber)"
-                  >
-                    P{{ page.pageNumber }} · {{ page.pageRole }}
-                  </button>
-                </span>
-              </div>
-            </div>
+
+          <!-- 指标行允许换行。原来它在 300px 的列里横向溢出，把 "⛔ 4 ERROR"
+               ——整屏最该看见的一条——裁在滚动条外面。 -->
+          <div v-if="showingResult && selectedResult" class="head-stats">
+            <span
+              v-if="validationCounts.BLOCKER || validationCounts.ERROR"
+              class="stat bad"
+            >⛔ {{ validationCounts.BLOCKER }} BLOCKER · {{ validationCounts.ERROR }} ERROR</span>
+            <span v-else-if="validationCounts.WARNING" class="stat warn">⚠ {{ validationCounts.WARNING }} 警告</span>
+            <span v-else class="stat ok">✓ 校验通过</span>
+            <span :class="['stat', 'code', selectedResult.candidate424?.status]">
+              {{ selectedResult.candidate424?.status }}
+            </span>
+            <span class="stat">Route <b>{{ selectedPir?.routes?.length || 0 }}</b></span>
+            <span class="stat">Leg <b>{{ selectedPir?.legs?.length || 0 }}</b></span>
+            <span class="stat">Fix <b>{{ resolvedFixCount }}/{{ selectedPir?.fixes?.length || 0 }}</b></span>
+            <span v-if="selectedPir?.quality?.unresolvedFields?.length" class="stat warn">
+              {{ selectedPir.quality.unresolvedFields.length }} 个未解决字段
+            </span>
           </div>
-          <div v-if="resultLoading" class="result-loading">
-            <span class="mini-spinner"></span>正在加载识别结果…
-          </div>
-          <template v-else-if="selectedResult">
-            <div class="result-stats">
-              <span
-                >Route <b>{{ selectedPir?.routes?.length || 0 }}</b></span
-              >
-              <span
-                >Leg <b>{{ selectedPir?.legs?.length || 0 }}</b></span
-              >
-              <span
-                >Fix <b>{{ selectedPir?.fixes?.length || 0 }}</b></span
-              >
-              <span
-                :class="[
-                  'candidate-state',
-                  selectedResult.candidate424?.status,
-                ]"
-                >{{ selectedResult.candidate424?.status }}</span
-              >
-              <span
-                v-if="validationCounts.BLOCKER || validationCounts.ERROR"
-                class="quality-flag bad"
-                >⛔ {{ validationCounts.BLOCKER }} BLOCKER ·
-                {{ validationCounts.ERROR }} ERROR</span
-              >
-              <span v-else-if="validationCounts.WARNING" class="quality-flag warn"
-                >⚠ {{ validationCounts.WARNING }} 警告</span
-              >
-              <span
-                v-if="selectedPir?.quality?.unresolvedFields?.length"
-                class="quality-flag warn"
-                >{{ selectedPir.quality.unresolvedFields.length }} 个未解决字段</span
-              >
-            </div>
-            <button class="open-map" @click="mapModalOpen = true">
-              打开航迹图
-              <small>{{ (selectedResult.geojson?.features?.length || 0) }} 个要素</small>
-            </button>
-          </template>
-          <div v-else class="result-loading">该程序包尚无识别结果。</div>
-        </section>
-      </section>
-      <aside v-if="selected && showingResult" class="info">
-        <div class="result-side-title">
-          <h2>识别结果</h2>
-          <span>{{ statusText(selected.status) }}</span>
+        </header>
+
+        <div v-if="!showingResult" class="empty-pane">
+          <p>该程序包尚未识别。</p>
+          <small>确认上面的源页齐了，再点「{{ packageAction(selected) }}」。</small>
         </div>
-        <nav class="result-tabs">
-          <button
-            :class="{ active: resultTab === '424' }"
-            @click="resultTab = '424'"
-          >
-            ARINC 424
-          </button>
-          <button
-            :class="{ active: resultTab === 'result' }"
-            @click="resultTab = 'result'"
-          >
-            识别结果
-          </button>
-          <button
-            :class="{ active: resultTab === 'overlay' }"
-            @click="resultTab = 'overlay'"
-          >
-            原图叠加
-          </button>
-          <!-- 地图移出常驻区域：右侧留给 424 与对比，地图按需弹出 -->
-          <button class="map-open" @click="mapModalOpen = true">航迹图</button>
-        </nav>
-        <section v-if="resultLoading" class="result-loading">正在加载…</section>
-        <section
-          v-else-if="selectedResult && resultTab === 'result'"
-          class="inline-result"
-        >
-          <div class="summary">
-            <p><span>航路</span><b>{{ selectedPir?.routes?.length || 0 }}</b></p>
-            <p><span>航段</span><b>{{ selectedPir?.legs?.length || 0 }}</b></p>
-            <p><span>航路点</span><b>{{ resolvedFixCount }}/{{ selectedPir?.fixes?.length || 0 }}</b></p>
-          </div>
-          <div v-for="route in selectedPir?.routes || []" :key="route.routeId" class="result-route">
-            <h4>{{ route.identifier }}<em>{{ route.routeType }}</em></h4>
-            <p v-if="route.climbGradient?.percent" class="climb-gradient">
-              最低爬升梯度 {{ route.climbGradient.percent }}%<template v-if="route.climbGradient.untilAltitudeFt">，直至通过 {{ route.climbGradient.untilAltitudeFt }} FT</template>
-            </p>
-            <table>
-              <tr v-for="leg in legsOfRoute(route)" :key="leg.legId">
-                <td class="seq">{{ leg.sequence }}</td>
-                <td class="pt">{{ leg.pathTerminator }}</td>
-                <td>{{ fixName(leg.fromFixId) }} → {{ fixName(leg.toFixId) }}</td>
-                <td class="num">{{ leg.course ?? "—" }}°</td>
-                <td class="num">{{ leg.distanceNm ?? "—" }} NM</td>
-                <td class="alt">{{ constraintText(leg.altitudeConstraint) }}</td>
-              </tr>
-            </table>
-          </div>
-          <!-- 第 5 点要求的"提示缺失信息"保留在这里：校验标签去掉了，但源页比对的缺失清单
-               是这套流程最该让人看到的产出，不该跟着标签一起消失。 -->
-          <section v-if="completenessFindings.length" class="completeness-block">
-            <h4>源页比对：结果中缺失的内容（{{ completenessFindings.length }}）</h4>
-            <p class="completeness-note">由 AI 读原始页面得出，供人复核——它与识别同源，不作为拒出依据。</p>
-            <p v-for="(v, i) in completenessFindings" :key="i" class="finding">{{ v.message }}</p>
-          </section>
-          <p v-if="blockingValidations.length" class="blocking-summary">
-            另有 {{ blockingValidations.length }} 项规则校验未通过：{{ blockingValidations.map((v: any) => v.ruleCode).join("、") }}
-          </p>
-          <!-- 424 生成过程的元信息从 424 标签挪到这里：那边只放记录本身。 -->
-          <section v-if="selectedResult.candidate424" class="gen-meta">
-            <h4>424 生成</h4>
-            <p>
-              <span :class="['candidate-state', selectedResult.candidate424.status]">{{ selectedResult.candidate424.status }}</span>
-              <span v-if="selectedResult.candidate424.generatedBy === 'AI'" class="generated-by">AI 生成</span>
-              <small v-if="selectedResult.candidate424.roundTrip">
-                Round-trip {{ selectedResult.candidate424.roundTrip.parsedLegs }}/{{ selectedResult.candidate424.roundTrip.emittedLegs }} 腿 ·
-                {{ selectedResult.candidate424.roundTrip.fieldMismatches?.length || 0 }} 字段差异
-              </small>
-            </p>
-            <p v-if="selectedResult.candidate424.decisionSummary" class="decision-summary">
-              {{ selectedResult.candidate424.decisionSummary }}
-            </p>
-            <p v-for="(diff, i) in selectedResult.candidate424.diffs || []" :key="'d' + i" class="finding">
-              <b>{{ diff.code }}</b> {{ diff.detail }}
-            </p>
-            <p v-for="field in selectedResult.candidate424.missingFields || []" :key="field" class="finding">
-              缺字段：{{ field }}
-            </p>
-            <details v-if="selectedResult.candidate424.roundTrip?.fieldMismatches?.length" class="mismatch-list">
-              <summary>Round-trip 字段差异</summary>
-              <p v-for="(m, i) in selectedResult.candidate424.roundTrip.fieldMismatches" :key="i">
-                {{ m.key }} · {{ m.field }}：导出 {{ m.emitted ?? "—" }} / 回读 {{ m.reparsed ?? "—" }}
-              </p>
-            </details>
-          </section>
-        </section>
-        <section v-else-if="selectedResult && resultTab === '424'" :class="['inline-424', { 'no-compare': !COMPARE_VISIBLE }]">
-          <!-- 这块只放 424 本身：round-trip、决策说明、缺失字段一类的元信息
-               归到"识别结果"，压在记录上方会把正文挤下去。 -->
-          <pre>{{
-            selectedResult.candidate424?.text || "尚未生成 424 Candidate"
-          }}</pre>
-          <!-- 对比紧跟在 424 下面：参考记录是用来读上面那段的，分成两个标签
-               就得来回切，看不到被比对的原文。 -->
-          <section v-if="COMPARE_VISIBLE" class="inline-compare">
-            <h4>与 Jeppesen 424 对比</h4>
-            <p class="compare-hint">粘贴同一程序的参考记录，逐字段比对上面的结果。</p>
-            <textarea
-              v-model="compareState.text"
-              rows="6"
-              placeholder="粘贴参考 424 静态文本（132 列记录）"
-            ></textarea>
-            <button
-              class="primary"
-              :disabled="compareState.running || !compareState.text.trim() || !selectedResult.candidate424?.text"
-              @click="runCompare424"
-            >
-              {{ compareState.running ? "对比中…" : "运行对比" }}
+        <div v-else-if="resultLoading" class="empty-pane">
+          <span class="mini-spinner"></span> 正在加载识别结果…
+        </div>
+        <template v-else-if="selectedResult">
+          <nav class="result-tabs">
+            <button :class="{ active: resultTab === '424' }" @click="resultTab = '424'">ARINC 424</button>
+            <button :class="{ active: resultTab === 'result' }" @click="resultTab = 'result'">识别结果</button>
+            <button :class="{ active: resultTab === 'overlay' }" @click="resultTab = 'overlay'">原图叠加</button>
+            <!-- 航迹图开的是弹窗，不是第四个页签：做成描边按钮，别让它看着像标签页 -->
+            <button class="map-open" @click="mapModalOpen = true">
+              航迹图 <em>{{ selectedResult.geojson?.features?.length || 0 }}</em>
             </button>
-            <p v-if="!selectedResult.candidate424?.text" class="compare-hint">本程序尚未生成 424，无法对比。</p>
-            <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
-            <div v-if="compareState.report" class="compare-report">
-              <p>
-                <b>匹配率
-                  {{
-                    compareState.report.matchRate == null
-                      ? "—"
-                      : Math.round(compareState.report.matchRate * 100) + "%"
-                  }}</b>
-                · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
-                {{ compareState.report.partialLegs }} 部分 ·
-                {{ compareState.report.mismatchedLegs }} 不匹配
-              </p>
-              <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
-                <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
-                <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
-                  #{{ legResult.sequence }} {{ legResult.status }}：
-                  {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
+          </nav>
+
+          <section
+            v-if="resultTab === '424'"
+            :class="['pane', 'pane-424', { 'no-compare': !COMPARE_VISIBLE }]"
+          >
+            <div class="record-toolbar">
+              <label><input v-model="showRuler" type="checkbox" />列标尺</label>
+              <span class="record-count">{{ recordLines.length }} 条记录 · 132 列定宽</span>
+            </div>
+            <!-- 132 列是位置编码：不给标尺，人得用手指在屏幕上数到第 47 列。
+                 标尺与记录同宽同字体、一起横向滚动，列位才对得上。 -->
+            <div class="record-scroll">
+              <pre v-if="recordLines.length" class="records"><code
+                v-if="showRuler"
+                class="ruler"
+              >{{ rulerLabels }}
+{{ rulerTicks }}</code><code
+                v-for="(line, i) in recordLines"
+                :key="i"
+                :class="['record', legBand(i)]"
+              >{{ line }}</code></pre>
+              <p v-else class="empty-pane">尚未生成 424 Candidate</p>
+            </div>
+            <section v-if="COMPARE_VISIBLE" class="inline-compare">
+              <h4>与 Jeppesen 424 对比</h4>
+              <p class="compare-hint">粘贴同一程序的参考记录，逐字段比对上面的结果。</p>
+              <textarea v-model="compareState.text" rows="6" placeholder="粘贴参考 424 静态文本（132 列记录）"></textarea>
+              <button
+                class="primary"
+                :disabled="compareState.running || !compareState.text.trim() || !selectedResult.candidate424?.text"
+                @click="runCompare424"
+              >
+                {{ compareState.running ? "对比中…" : "运行对比" }}
+              </button>
+              <p v-if="!selectedResult.candidate424?.text" class="compare-hint">本程序尚未生成 424，无法对比。</p>
+              <p v-if="compareState.error" class="error">{{ compareState.error }}</p>
+              <div v-if="compareState.report" class="compare-report">
+                <p>
+                  <b>匹配率
+                    {{ compareState.report.matchRate == null ? "—" : Math.round(compareState.report.matchRate * 100) + "%" }}</b>
+                  · {{ compareState.report.matchedLegs }}/{{ compareState.report.totalLegs }} 腿匹配 ·
+                  {{ compareState.report.partialLegs }} 部分 · {{ compareState.report.mismatchedLegs }} 不匹配
                 </p>
+                <div v-for="proc in compareState.report.procedureResults" :key="proc.procedureName + (proc.transitionName || '')">
+                  <b>{{ proc.procedureName }} {{ proc.transitionName || proc.runway }}</b>
+                  <p v-for="legResult in proc.legResults.filter((l: any) => l.status !== 'MATCH')" :key="legResult.sequence" class="compare-diff">
+                    #{{ legResult.sequence }} {{ legResult.status }}：
+                    {{ legResult.fieldResults.filter((f: any) => !f.matched).map((f: any) => `${f.field}: AI=${f.aiValue ?? "—"} / 424=${f.jeppesenValue ?? "—"}`).join("；") || "腿段缺失" }}
+                  </p>
+                </div>
               </div>
-            </div>
+            </section>
           </section>
-        </section>
-        <section v-else-if="selectedResult && resultTab === 'overlay'" class="inline-overlay">
-          <template v-if="selectedOverlay?.overlays?.length">
-            <div v-for="(v, i) in selectedOverlay.verifications" :key="i" class="overlay-meta">
-              <span :class="['candidate-state', v.status === 'VERIFIED' ? '' : '424_INCOMPLETE']">{{ v.status }}</span>
-              <small v-if="v.georeference">控制点 {{ v.georeference.controlPoints }} · 残差 {{ v.georeference.meanResidualPx?.toFixed?.(1) ?? "—" }}px</small>
-              <small v-if="v.overallAssessment"> · {{ v.overallAssessment }}</small>
+
+          <section v-else-if="resultTab === 'result'" class="pane pane-result">
+            <div v-for="route in selectedPir?.routes || []" :key="route.routeId" class="result-route">
+              <h4>{{ route.identifier }}<em>{{ route.routeType }}</em></h4>
+              <p v-if="route.climbGradient?.percent" class="climb-gradient">
+                最低爬升梯度 {{ route.climbGradient.percent }}%<template v-if="route.climbGradient.untilAltitudeFt">，直至通过 {{ route.climbGradient.untilAltitudeFt }} FT</template>
+              </p>
+              <table>
+                <thead>
+                  <tr><th>#</th><th>PT</th><th>航段</th><th>航向</th><th>距离</th><th>高度</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="leg in legsOfRoute(route)" :key="leg.legId">
+                    <td class="seq">{{ leg.sequence }}</td>
+                    <td class="pt">{{ leg.pathTerminator }}</td>
+                    <td>{{ fixName(leg.fromFixId) }} → {{ fixName(leg.toFixId) }}</td>
+                    <td class="num">{{ leg.course ?? "—" }}°</td>
+                    <td class="num">{{ leg.distanceNm ?? "—" }} NM</td>
+                    <td class="num">{{ constraintText(leg.altitudeConstraint) }}</td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            <img
-              v-for="name in selectedOverlay.overlays"
-              :key="name"
-              :src="`/api/agent/procedures/${selectedResult.procedureId}/files/${name}`"
-              :alt="name"
-              class="overlay-img"
-            />
-          </template>
-          <p v-else class="result-loading">
-            {{ selectedOverlay?.verifications?.length ? "叠加未完成配准（控制点不足），已标记 NOT_GEOREFERENCED。" : "该程序尚未生成原图叠加。重新识别后自动执行配准与叠加校验。" }}
-          </p>
-        </section>
-      </aside>
+            <!-- 第 5 点要的"提示缺失信息"：源上有、结果没有 -->
+            <section v-if="completenessFindings.length" class="completeness-block">
+              <h4>源页比对：结果中缺失的内容（{{ completenessFindings.length }}）</h4>
+              <p class="sub">由 AI 读原始页面得出，供人复核——它与识别同源，不作为拒出依据。</p>
+              <p v-for="(v, i) in completenessFindings" :key="i" class="finding">{{ v.message }}</p>
+            </section>
+            <p v-if="blockingValidations.length" class="blocking-summary">
+              另有 {{ blockingValidations.length }} 项规则校验未通过：{{ blockingValidations.map((v: any) => v.ruleCode).join("、") }}
+            </p>
+            <section v-if="selectedResult.candidate424" class="gen-meta">
+              <h4>424 生成</h4>
+              <p>
+                <span :class="['stat', 'code', selectedResult.candidate424.status]">{{ selectedResult.candidate424.status }}</span>
+                <span v-if="selectedResult.candidate424.generatedBy === 'AI'" class="generated-by">AI 生成</span>
+                <small v-if="selectedResult.candidate424.roundTrip">
+                  Round-trip {{ selectedResult.candidate424.roundTrip.parsedLegs }}/{{ selectedResult.candidate424.roundTrip.emittedLegs }} 腿 ·
+                  {{ selectedResult.candidate424.roundTrip.fieldMismatches?.length || 0 }} 字段差异
+                </small>
+              </p>
+              <p v-if="selectedResult.candidate424.decisionSummary" class="decision-summary">
+                {{ selectedResult.candidate424.decisionSummary }}
+              </p>
+              <p v-for="(diff, i) in selectedResult.candidate424.diffs || []" :key="'d' + i" class="finding">
+                <b>{{ diff.code }}</b> {{ diff.detail }}
+              </p>
+              <p v-for="field in selectedResult.candidate424.missingFields || []" :key="field" class="finding">
+                缺字段：{{ field }}
+              </p>
+              <details v-if="selectedResult.candidate424.roundTrip?.fieldMismatches?.length" class="mismatch-list">
+                <summary>Round-trip 字段差异</summary>
+                <p v-for="(m, i) in selectedResult.candidate424.roundTrip.fieldMismatches" :key="i">
+                  {{ m.key }} · {{ m.field }}：导出 {{ m.emitted ?? "—" }} / 回读 {{ m.reparsed ?? "—" }}
+                </p>
+              </details>
+            </section>
+          </section>
+
+          <section v-else class="pane pane-overlay">
+            <template v-if="selectedOverlay?.overlays?.length">
+              <div v-for="(v, i) in selectedOverlay.verifications" :key="i" class="overlay-meta">
+                <span :class="['stat', 'code', v.status === 'VERIFIED' ? '' : '424_INCOMPLETE']">{{ v.status }}</span>
+                <small v-if="v.georeference">控制点 {{ v.georeference.controlPoints }} · 残差 {{ v.georeference.meanResidualPx?.toFixed?.(1) ?? "—" }}px</small>
+                <small v-if="v.overallAssessment"> · {{ v.overallAssessment }}</small>
+              </div>
+              <img
+                v-for="name in selectedOverlay.overlays"
+                :key="name"
+                :src="`/api/agent/procedures/${selectedResult.procedureId}/files/${name}`"
+                :alt="name"
+                class="overlay-img"
+              />
+            </template>
+            <p v-else class="empty-pane">
+              {{ selectedOverlay?.verifications?.length ? "叠加未完成配准（控制点不足），已标记 NOT_GEOREFERENCED。" : "该程序尚未生成原图叠加。重新识别后自动执行配准与叠加校验。" }}
+            </p>
+          </section>
+        </template>
+        <div v-else class="empty-pane">该程序包尚无识别结果。</div>
+      </section>
+      <div v-else class="empty-pane">从左侧选择一个程序包。</div>
     </section>
+
     <details class="debug-drawer" :open="debugOpen" @toggle="debugOpen = ($event.target as HTMLDetailsElement).open">
       <summary>开发调试信息（模型调用 {{ task.modelCalls?.length || 0 }} · 步骤 {{ task.steps?.length || 0 }}）</summary>
       <div class="debug-columns">
@@ -1041,50 +996,75 @@ function msg(e: unknown) {
     transform: rotate(360deg);
   }
 }
+/* 两列：左栏定宽只管选包，右侧主区域全归识别产物。
+   原来是三列（320 / 1fr / 320），中间列在识别完成后只剩包头和统计，
+   却始终占着主宽度；产物被挤到 320px 的右栏里横竖都不够看。 */
 .workspace {
   display: grid;
-  grid-template-columns: 320px minmax(480px, 1fr);
+  grid-template-columns: 260px minmax(0, 1fr);
   background: #fff;
   border-radius: 14px;
   flex: 1;
   min-height: 0;
   overflow: hidden;
 }
-/* 出结果后 424 是主角：中间那列只剩包头和统计，收窄让位给右侧结果区。 */
-.workspace.has-result {
-  grid-template-columns: 280px 300px minmax(560px, 1fr);
-}
-.workspace > aside,
-.sources {
-  padding: 20px;
+.rail {
+  background: #f5f8fb;
+  border-right: 1px solid #e4eaf0;
+  padding: 14px 10px;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.workspace > aside:first-child {
-  background: #f5f8fb;
-}
-.workspace > aside:first-child h3 {
-  font-size: 12px;
+.rail-group h3 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
   color: #829ab1;
-  margin-top: 20px;
+  margin: 16px 0 6px 8px;
 }
-.package-row {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
-  align-items: start;
-  gap: 7px;
-  padding: 10px;
-  margin-bottom: 6px;
+.rail-group:first-child h3 {
+  margin-top: 0;
+}
+.rail-group h3 em {
+  font-style: normal;
+  background: #e2e9f1;
+  color: #52606d;
   border-radius: 9px;
+  padding: 1px 6px;
+  font-size: 10px;
 }
-.package-row.active {
+.rail-item {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px 7px 5px;
+  border-radius: 8px;
+  border-left: 3px solid transparent;
+}
+.rail-item:hover {
+  background: #eef3f9;
+}
+.rail-item.active {
   background: #e6effb;
 }
-.package-row > input {
-  margin-top: 3px;
+/* 状态用左侧色条，不再每张卡片写一行状态文字 */
+.rail-item.done {
+  border-left-color: #35a06a;
 }
-.package-select {
+.rail-item.review {
+  border-left-color: #e0a52e;
+}
+.rail-item.failed {
+  border-left-color: #d0453b;
+}
+.rail-item.running {
+  border-left-color: #1769e0;
+}
+.rail-pick {
   border: 0;
   background: none;
   padding: 0;
@@ -1092,111 +1072,286 @@ function msg(e: unknown) {
   min-width: 0;
   cursor: pointer;
 }
-.package-select b,
-.package-select small,
-.package-select em {
+.rail-pick b {
   display: block;
-}
-.package-select b {
+  font-size: 13px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.package-select small {
-  color: #627d98;
-  margin-top: 4px;
-}
-.package-select em {
-  font-style: normal;
-  color: #237a4b;
+.rail-pick small {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: #7b8ea3;
   font-size: 11px;
-  margin-top: 5px;
+  margin-top: 2px;
 }
-/* 来源质量：与状态徽章视觉上分开，用中性的琥珀色表示"源页有缺"，而非错误红 */
-.package-select .source-quality {
-  display: block;
-  font-size: 11px;
+/* 来源问题收成一个角标：完整清单挂在 title 上，鼠标悬停可看。
+   原来把 4 条问题全文印在每张卡片上，14 个包印了 14 遍同一串字。 */
+.rail-warn {
   color: #92610a;
   background: #fdf3d8;
   border-radius: 4px;
-  padding: 2px 6px;
-  margin-top: 5px;
+  padding: 0 5px;
+  font-size: 10px;
+  cursor: help;
+  flex: 0 0 auto;
 }
-.package-select em.running {
-  color: #1769e0;
-}
-.package-select em.failed {
-  color: #b42318;
-}
-.package-action {
-  grid-column: 2;
-  justify-self: start;
-  border: 1px solid #9db9df;
-  background: #fff;
-  color: #174ea6;
-  border-radius: 6px;
-  padding: 5px 8px;
-  font-size: 11px;
-  cursor: pointer;
-}
-.package-action.result {
-  background: #e7f5ed;
-  border-color: #a7d7b9;
-  color: #237a4b;
-}
-.package-action.review {
-  background: #fff7e6;
-  border-color: #f3d19e;
-  color: #b45309;
-}
-.package-action:disabled,
 button:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
-.sources {
-  border-left: 1px solid #edf1f5;
-  border-right: 1px solid #edf1f5;
+
+.main {
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  min-height: 0;
 }
-.title {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  gap: 12px;
+.main-head {
   flex: 0 0 auto;
+  padding: 14px 18px 10px;
+  border-bottom: 1px solid #e4eaf0;
 }
-.title span {
+.head-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.head-line .cat {
   font-size: 11px;
   background: #e8f1ff;
   color: #174ea6;
-  padding: 4px 7px;
+  padding: 3px 7px;
   border-radius: 5px;
 }
-.title h2 {
-  margin: 8px 0;
-  font-size: 18px;
+.head-line h2 {
+  margin: 0;
+  font-size: 17px;
 }
-.view-tabs,
-.result-tabs {
-  display: flex;
-  gap: 4px;
+.head-line small {
+  color: #7b8ea3;
+  font-size: 12px;
+}
+.head-line .run-state {
+  font-size: 12px;
+  color: #52606d;
+}
+.head-line .run-state.done {
+  color: #237a4b;
+}
+.head-line .run-state.review {
+  color: #b45309;
+}
+.head-line .run-state.failed {
+  color: #b42318;
+}
+.head-line .run-state.running {
+  color: #1769e0;
+}
+.head-act {
   margin-left: auto;
 }
-.view-tabs button,
-.result-tabs button {
-  border: 0;
+.head-sources {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+.head-sources .page-chip {
+  display: inline-flex;
+}
+.add-page {
+  border: 1px dashed #c8d2df;
+  background: #fff;
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-size: 11px;
+  color: #52606d;
+}
+/* 指标行换行，不横向滚动。原来它在 300px 的列里溢出，
+   把 "⛔ 4 ERROR"——整屏最该被看见的一条——裁到滚动条外面去了。 */
+.head-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.head-stats .stat {
+  font-size: 11px;
   background: #f1f5f9;
   color: #52606d;
-  padding: 7px 10px;
-  border-radius: 6px;
+  border-radius: 5px;
+  padding: 3px 8px;
 }
-.view-tabs button.active,
+.head-stats .stat b {
+  color: #102a43;
+}
+.head-stats .stat.ok {
+  background: #e7f5ed;
+  color: #237a4b;
+}
+.head-stats .stat.warn {
+  background: #fff7e6;
+  color: #b45309;
+}
+.head-stats .stat.bad {
+  background: #feeceb;
+  color: #b42318;
+  font-weight: 700;
+}
+.stat.code {
+  background: #e7f5ed;
+  color: #237a4b;
+  font-family: ui-monospace, Consolas, monospace;
+}
+/* 类名以数字开头，CSS 里必须转义首字符：\34 是 "4"，后面的空格是转义终止符。 */
+.stat.code.\34 24_INCOMPLETE,
+.stat.code.\34 24_DERIVED {
+  background: #fff7e6;
+  color: #b45309;
+}
+
+.result-tabs {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 0 18px;
+  border-bottom: 1px solid #e4eaf0;
+}
+/* 下划线式页签，不是撑满整行的大色块 */
+.result-tabs button {
+  border: 0;
+  background: none;
+  color: #52606d;
+  padding: 10px 12px;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
 .result-tabs button.active {
-  background: #dfeafa;
   color: #174ea6;
   font-weight: 700;
+  border-bottom-color: #1769e0;
+}
+/* 航迹图开的是弹窗，做成描边按钮，别让它看着像第四个页签 */
+.result-tabs .map-open {
+  margin-left: auto;
+  border: 1px solid #c8d2df;
+  border-radius: 6px;
+  padding: 5px 10px;
+  font-size: 12px;
+}
+.result-tabs .map-open em {
+  font-style: normal;
+  color: #829ab1;
+  margin-left: 4px;
+}
+.result-tabs .map-open:hover {
+  border-color: #9db9df;
+  color: #174ea6;
+}
+
+.pane {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 14px 18px 18px;
+}
+.pane-424 {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.record-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: #7b8ea3;
+  padding-bottom: 8px;
+}
+.record-toolbar label {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  cursor: pointer;
+}
+.record-count {
+  margin-left: auto;
+}
+.record-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  background: #10233e;
+  border-radius: 8px;
+}
+/* 132 列定宽：不折行，横向滚动，标尺与记录同宽同字体一起滚 */
+.records {
+  margin: 0;
+  padding: 10px 12px;
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre;
+  display: table;
+}
+.records code {
+  display: block;
+  color: #dcecff;
+}
+.records .ruler {
+  position: sticky;
+  top: -10px;
+  background: #10233e;
+  color: #6d90bd;
+  border-bottom: 1px solid #24405f;
+  padding-bottom: 2px;
+  margin-bottom: 4px;
+  z-index: 1;
+}
+/* 一条腿两行（主记录 1E + 续行 2P）：隔条底色让 12 行读成 6 条腿 */
+.records .record.band {
+  background: #16304f;
+}
+.empty-pane {
+  padding: 28px 18px;
+  color: #7b8ea3;
+  font-size: 13px;
+}
+.empty-pane small {
+  display: block;
+  margin-top: 6px;
+  color: #9fb0c2;
+}
+.pane-result table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.pane-result thead th {
+  text-align: left;
+  font-weight: 600;
+  color: #829ab1;
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  border-bottom: 1px solid #e4eaf0;
+  padding: 4px;
+}
+.pane-result thead th:nth-child(n + 4) {
+  text-align: right;
+}
+.pane-overlay .overlay-img {
+  width: 100%;
+  border: 1px solid #dbe4ee;
+  border-radius: 7px;
+  margin-bottom: 8px;
 }
 .package-feedback {
   display: flex;
