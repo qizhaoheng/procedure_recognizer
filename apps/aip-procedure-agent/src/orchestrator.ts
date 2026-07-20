@@ -7,7 +7,7 @@ import { budgets, callModel } from './modelGateway';
 import { executeCorrectiveLegExtraction, executePlannedRecognition, materializeEvidenceCrops } from './planExecutor';
 import { carryOverManualEdits } from './fragmentMerger';
 import { deviationsToValidations, verifyAgainstSourceChart } from './chartOverlay';
-import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles } from './sourcePreflight';
+import { assessPackageSources, pageVectorPathCount, repairInvertedChartRoles, splitMultiProcedurePackages } from './sourcePreflight';
 import { generate424WithAi, generateGeometryWithAi, type GenerationDiff } from './aiGeneration';
 import { attachAirportReferencePages, findAirportReferencePages } from './airportReference';
 import { auditResultCompleteness, completenessFindingsToValidations } from './completenessAudit';
@@ -128,6 +128,11 @@ async function groupAndOrganize(task: AgentTask, signal: AbortSignal) {
   const analysis = await step(task, 'AIRPORT_PACKAGE_GROUPING', () => groupAirportPackages(task, signal));
   task.airportIcao = analysis.airport.icao || null; task.airportName = analysis.airport.name || null;
   task.packages = analysis.packages.map((item) => toBusinessPackage(item, task));
+  // 一图多程序按程序代号确定性拆开。分组提示词已要求这么做，但那是单次调用、时灵时不灵：
+  // 同一份 WMKJ 两次分组，一次拆成 44 个包、一次又合成 21 个。合并的后果是腿失去归属。
+  const splitCount = task.packages.length;
+  task.packages = task.packages.flatMap((pkg) => splitMultiProcedurePackages(pkg));
+  if (task.packages.length > splitCount) task.warningCount += task.packages.length - splitCount;
   markSharedPages(task.packages);
   // 先按矢量密度纠正图/表角色倒置（改 pageRole 后必须重算派生的 sources），再做来源完整性预检。
   const roleRepairs = task.packages.flatMap((pkg) => {
