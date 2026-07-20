@@ -10,6 +10,7 @@ import type {
 import {
   assessPackageForProduction,
   assessTaskForProduction,
+  productionFingerprint,
 } from "../productionControl";
 
 test("a recognized package is not production-ready merely because its lifecycle says completed", () => {
@@ -40,12 +41,12 @@ test("deterministically compiled, evidenced and clean output is eligible for aut
   assert.equal(result.evidenceCoverage, 1);
 });
 
-test("model-authored 424 text is routed to review instead of auto-pass", () => {
+test("model-authored 424 text is blocked from production release", () => {
   const pir = samplePir();
   const procedure = sampleProcedure(pir);
   procedure.candidate424!.generatedBy = "AI";
   const result = assessPackageForProduction(samplePackage(), procedure);
-  assert.equal(result.disposition, "REVIEW_REQUIRED");
+  assert.equal(result.disposition, "BLOCKED");
   assert.ok(result.exceptions.some((item) => item.code === "ARINC424_AI_GENERATED"));
 });
 
@@ -78,6 +79,43 @@ test("task production summary measures automatic coverage and release readiness"
   assert.equal(summary.reviewPackages, 1);
   assert.equal(summary.autoPassRate, 50);
   assert.equal(summary.releaseReady, false);
+});
+
+test("a reviewed exception becomes human-confirmed and permits airport release", () => {
+  const task = sampleTask();
+  const pir = samplePir();
+  pir.quality.reviewRequired = true;
+  task.packages = [samplePackage()];
+  task.procedures = [sampleProcedure(pir)];
+  const issue = assessTaskForProduction(task).assessments[0].exceptions.find((item) => item.code === "QUALITY_REVIEW_REQUIRED")!;
+  task.production = {
+    fieldEdits: [], releases: [],
+    exceptionDecisions: [{
+      decisionId: "decision", exceptionId: issue.exceptionId, packageId: issue.packageId,
+      procedureId: issue.procedureId, procedureVersion: 1, decision: "CONFIRMED_CORRECT", reviewer: "NAV-01",
+      decidedAt: "2026-07-20T01:00:00.000Z",
+    }],
+  };
+  const summary = assessTaskForProduction(task);
+  assert.equal(summary.assessments[0].disposition, "HUMAN_CONFIRMED");
+  assert.equal(summary.humanConfirmedPackages, 1);
+  assert.equal(summary.openExceptionCount, 0);
+  assert.equal(summary.releaseReady, true);
+});
+
+test("release metadata does not change the production fingerprint but a procedure edit does", () => {
+  const task = sampleTask();
+  task.packages = [samplePackage()];
+  task.procedures = [sampleProcedure(samplePir())];
+  const original = productionFingerprint(task);
+  task.production = {
+    exceptionDecisions: [], fieldEdits: [],
+    releases: [{ releaseId: "release", reviewer: "NAV-01", releasedAt: "2026-07-20T01:00:00.000Z", fingerprint: original, manifestPath: "manifest", arinc424Path: "424", programCount: 1, recordCount: 1 }],
+  };
+  assert.equal(productionFingerprint(task), original);
+  task.procedures[0].version += 1;
+  assert.notEqual(productionFingerprint(task), original);
+  assert.equal(assessTaskForProduction(task).releaseCurrent, false);
 });
 
 function sampleTask(): AgentTask {

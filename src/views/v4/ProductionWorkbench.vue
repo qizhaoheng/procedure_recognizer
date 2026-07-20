@@ -4,7 +4,7 @@ import { useRoute, useRouter } from "vue-router";
 import AgentResultMap from "../../components/agent/AgentResultMap.vue";
 import { agentRequest } from "../../services/agentApi";
 
-type Filter = "ALL" | "REVIEW_REQUIRED" | "BLOCKED" | "AUTO_PASS" | "PENDING";
+type Filter = "ALL" | "REVIEW_REQUIRED" | "BLOCKED" | "AUTO_PASS" | "HUMAN_CONFIRMED" | "PENDING";
 type Tab = "EXCEPTIONS" | "DATA" | "MAP" | "ARINC424";
 
 const route = useRoute();
@@ -19,6 +19,10 @@ const tab = ref<Tab>("EXCEPTIONS");
 const search = ref("");
 const busy = ref(false);
 const error = ref("");
+const reviewer = ref(localStorage.getItem("v4-production-reviewer") || "");
+const reviewNote = ref("");
+const editPath = ref("");
+const editValue = ref("");
 let timer: number | undefined;
 
 const assessmentMap = computed(() => new Map((production.value?.assessments || []).map((item: any) => [item.packageId, item])));
@@ -64,12 +68,12 @@ async function loadResult(packageId: string) {
 async function selectPackage(packageId: string) {
   selectedId.value = packageId;
   bundle.value = undefined;
-  tab.value = selectedAssessment.value?.disposition === "AUTO_PASS" ? "DATA" : "EXCEPTIONS";
+  tab.value = ["AUTO_PASS", "HUMAN_CONFIRMED"].includes(selectedAssessment.value?.disposition) ? "DATA" : "EXCEPTIONS";
   await loadResult(packageId);
 }
 async function recognize(packageIds?: string[]) {
   const ids = packageIds?.length ? packageIds : (production.value?.assessments || [])
-    .filter((item: any) => item.disposition !== "AUTO_PASS")
+    .filter((item: any) => !["AUTO_PASS", "HUMAN_CONFIRMED"].includes(item.disposition))
     .map((item: any) => item.packageId);
   if (!ids.length) return;
   busy.value = true;
@@ -87,10 +91,58 @@ async function analyze() {
   catch (e) { error.value = message(e); }
   finally { busy.value = false; }
 }
+async function decide(issue: any, decision: "CONFIRMED_CORRECT" | "CORRECTION_REQUIRED") {
+  if (!reviewer.value.trim()) { error.value = "请先填写生产确认人。"; return; }
+  busy.value = true;
+  try {
+    localStorage.setItem("v4-production-reviewer", reviewer.value.trim());
+    production.value = await agentRequest(`/tasks/${taskId}/exception-decisions`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ exceptionId: issue.exceptionId, decision, reviewer: reviewer.value, note: reviewNote.value }),
+    });
+    error.value = "";
+  } catch (e) { error.value = message(e); }
+  finally { busy.value = false; }
+}
+async function correctAndRecompile() {
+  if (!reviewer.value.trim() || !editPath.value.trim()) { error.value = "请填写修改人和 PIR 字段路径。"; return; }
+  let value: unknown = editValue.value;
+  try { value = JSON.parse(editValue.value); } catch { /* keep text */ }
+  busy.value = true;
+  try {
+    const response = await agentRequest<any>(`/procedures/${selectedAssessment.value.procedureId}/fields`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewer: reviewer.value, note: reviewNote.value, edits: [{ path: editPath.value, value }] }),
+    });
+    production.value = response.production;
+    await loadResult(selectedId.value);
+    editValue.value = "";
+    error.value = "";
+  } catch (e) { error.value = message(e); }
+  finally { busy.value = false; }
+}
+async function releaseAirport() {
+  if (!reviewer.value.trim()) { error.value = "请先填写机场放行人。"; return; }
+  busy.value = true;
+  try {
+    const response = await agentRequest<any>(`/tasks/${taskId}/release`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ reviewer: reviewer.value, note: reviewNote.value }),
+    });
+    production.value = response.production;
+    error.value = "";
+  } catch (e) { error.value = message(e); }
+  finally { busy.value = false; }
+}
+function downloadRelease(kind: "424" | "manifest") {
+  const id = production.value?.latestRelease?.releaseId;
+  if (id) window.open(`/api/agent/tasks/${taskId}/releases/${id}/${kind}`, "_blank", "noopener");
+}
 function openSource(page: any) {
   window.open(`/api/agent/tasks/${taskId}/documents/${page.documentId}/file#page=${page.pageNumber}`, "_blank", "noopener");
 }
 function dispositionLabel(value: string) {
+  if (value === "HUMAN_CONFIRMED") return "人工确认通过";
   return ({ AUTO_PASS: "自动通过", REVIEW_REQUIRED: "待专业复核", BLOCKED: "生产阻塞", PENDING: "待生产" } as Record<string, string>)[value] || value;
 }
 function ownerLabel(value: string) { return value === "CHART_SPECIALIST" ? "航图制图员" : "424编码员"; }
@@ -123,6 +175,15 @@ function message(e: unknown) { return e instanceof Error ? e.message : String(e)
     </header>
 
     <p v-if="error" class="error">{{ error }}</p>
+    <section class="production-control">
+      <label>生产确认人<input v-model="reviewer" placeholder="姓名或工号" /></label>
+      <label>处理说明<input v-model="reviewNote" placeholder="可选；写入审计记录与放行清单" /></label>
+      <button v-if="production.releaseReady && !production.releaseCurrent" class="release-button" :disabled="busy" @click="releaseAirport">批准机场放行</button>
+      <template v-if="production.latestRelease">
+        <span :class="production.releaseCurrent ? 'current' : 'stale'">{{ production.releaseCurrent ? '当前版本已放行' : '已有放行已因变更失效' }}</span>
+        <button @click="downloadRelease('424')">下载 424</button><button @click="downloadRelease('manifest')">下载清单</button>
+      </template>
+    </section>
     <section class="metrics">
       <article><span>自动通过率</span><b>{{ production.autoPassRate == null ? '—' : `${production.autoPassRate}%` }}</b><small>目标 90%+</small></article>
       <article class="pass"><span>自动通过</span><b>{{ production.autoPassPackages }}</b><small>无需逐字段检查</small></article>
@@ -139,7 +200,7 @@ function message(e: unknown) { return e instanceof Error ? e.message : String(e)
         <div class="aside-head"><h2>生产项</h2><span>{{ packages.length }}/{{ task.packages.length }}</span></div>
         <input v-model="search" class="search" placeholder="搜索程序、跑道…" />
         <div class="filters">
-          <button v-for="item in [['ALL','全部'],['REVIEW_REQUIRED','待复核'],['BLOCKED','阻塞'],['AUTO_PASS','已通过'],['PENDING','待生产']]" :key="item[0]" :class="{ active: filter === item[0] }" @click="filter = item[0] as Filter">{{ item[1] }}</button>
+          <button v-for="item in [['ALL','全部'],['REVIEW_REQUIRED','待复核'],['BLOCKED','阻塞'],['AUTO_PASS','自动通过'],['HUMAN_CONFIRMED','人工通过'],['PENDING','待生产']]" :key="item[0]" :class="{ active: filter === item[0] }" @click="filter = item[0] as Filter">{{ item[1] }}</button>
         </div>
         <div class="program-list">
           <button v-for="pkg in packages" :key="pkg.packageId" :class="['program', (assessmentMap.get(pkg.packageId) as any)?.disposition?.toLowerCase(), { selected: selectedId === pkg.packageId }]" @click="selectPackage(pkg.packageId)">
@@ -153,7 +214,7 @@ function message(e: unknown) { return e instanceof Error ? e.message : String(e)
       <article v-if="selectedPackage" class="detail">
         <header class="detail-head">
           <div><span :class="['disposition', selectedAssessment?.disposition?.toLowerCase()]">{{ dispositionLabel(selectedAssessment?.disposition) }}</span><h2>{{ selectedPackage.procedureName }}</h2><p>{{ selectedPackage.procedureCategory }} · RWY {{ runwayLabel(selectedPackage.runways) }} · {{ selectedPackage.navigationType || '导航类型待确认' }}</p></div>
-          <button v-if="selectedAssessment?.disposition !== 'AUTO_PASS'" :disabled="busy || running" @click="recognize([selectedPackage.packageId])">重新生产此项</button>
+          <button v-if="!['AUTO_PASS','HUMAN_CONFIRMED'].includes(selectedAssessment?.disposition)" :disabled="busy || running" @click="recognize([selectedPackage.packageId])">重新生产此项</button>
         </header>
         <nav class="tabs">
           <button :class="{ active: tab === 'EXCEPTIONS' }" @click="tab='EXCEPTIONS'">例外 <i v-if="exceptions.length">{{ exceptions.length }}</i></button>
@@ -168,7 +229,19 @@ function message(e: unknown) { return e instanceof Error ? e.message : String(e)
             <span>{{ issue.severity === 'BLOCKER' ? '阻塞' : issue.severity === 'REVIEW' ? '复核' : '提示' }}</span>
             <div><b>{{ issueMessage(issue) }}</b><p>{{ issue.code }}<template v-if="issue.fieldPath"> · {{ issue.fieldPath }}</template></p></div>
             <em>{{ ownerLabel(issue.owner) }}</em>
+            <div v-if="issue.severity === 'REVIEW'" class="decision-actions">
+              <small v-if="issue.decision?.decision === 'CONFIRMED_CORRECT'">{{ issue.decision.reviewer }} 已确认</small>
+              <button v-else :disabled="busy" @click="decide(issue, 'CONFIRMED_CORRECT')">确认与源图一致</button>
+              <button :disabled="busy" @click="decide(issue, 'CORRECTION_REQUIRED')">标记需修改</button>
+            </div>
           </article>
+          <section v-if="selectedAssessment?.procedureId && exceptions.some((item:any) => item.severity !== 'WARNING')" class="correction">
+            <b>字段修正并确定性重新编译</b>
+            <p>按 Canonical PIR 路径修改。保存后自动重跑校验、GeoJSON 与 424 编译，阻断项不能人工跳过。</p>
+            <input v-model="editPath" placeholder="例如 legs[0].course" />
+            <input v-model="editValue" placeholder="新值；数字/布尔/JSON 会自动解析" />
+            <button :disabled="busy" @click="correctAndRecompile">保存修改并重新编译</button>
+          </section>
         </div>
 
         <div v-else-if="tab === 'DATA'" class="tab-body data-view">
@@ -199,5 +272,6 @@ function message(e: unknown) { return e instanceof Error ? e.message : String(e)
 </template>
 
 <style scoped>
+.production-control{display:flex;align-items:end;gap:8px;background:#fff;border:1px solid #dfe7ec;border-radius:9px;padding:9px 12px;margin:10px 0}.production-control label{font-size:10px;color:#607787}.production-control input{display:block;border:1px solid #ccd8e1;border-radius:6px;padding:7px 8px;margin-top:3px;min-width:145px}.production-control label:nth-child(2){flex:1}.production-control label:nth-child(2) input{width:100%;box-sizing:border-box}.production-control button,.correction button,.decision-actions button{border:1px solid #b9cbd5;background:#fff;color:#27566b;border-radius:6px;padding:7px 9px;cursor:pointer}.production-control .release-button{background:#08705a;color:#fff;border-color:#08705a}.production-control .current{color:#08705a;font-weight:700}.production-control .stale{color:#b33a33;font-weight:700}.program.human_confirmed .rail{background:#3978b8}.disposition.human_confirmed{background:#e5effa;color:#245f99}.decision-actions{display:flex!important;flex:0 0 auto!important;gap:5px;align-items:center}.decision-actions small{color:#08705a}.correction{background:#f5f8fa;border:1px solid #dce5ea;border-radius:8px;padding:12px;margin-top:12px}.correction p{color:#6d8190;font-size:11px}.correction input{border:1px solid #c9d6de;border-radius:6px;padding:8px;margin-right:6px;min-width:210px}
 .workbench{min-height:calc(100vh - 48px);padding:18px 22px 24px;background:#f3f6f8;color:#142d40;box-sizing:border-box}.topbar{display:flex;align-items:center;gap:13px}.back{width:34px;height:34px;border:1px solid #ccd8e1;background:#fff;border-radius:8px;color:#496477;cursor:pointer}.airport span{font-size:10px;letter-spacing:.1em;text-transform:uppercase;color:#23826d;font-weight:800}.airport h1{display:inline;margin:0 8px;font-size:23px}.airport p{display:inline;color:#6b7f8f;font-size:12px}.top-actions{margin-left:auto}.top-actions button,.detail-head button{border:1px solid #bdccd7;background:#fff;color:#36566c;padding:9px 13px;border-radius:7px;margin-left:8px;cursor:pointer}.top-actions .primary{background:#0d6b57;color:#fff;border-color:#0d6b57}.error{background:#ffedeb;color:#a12d28;padding:10px 13px;border-radius:8px}.metrics{display:grid;grid-template-columns:repeat(6,1fr);gap:9px;margin:16px 0}.metrics article{background:#fff;border:1px solid #dfe7ec;border-radius:10px;padding:12px 14px}.metrics span,.metrics small{display:block;color:#708493;font-size:11px}.metrics b{display:block;font-size:25px;margin:3px 0}.metrics .pass b{color:#08735a}.metrics .review b{color:#a36308}.metrics .blocked b{color:#b33a33}.metrics .release{font-size:17px;margin:9px 0 8px}.notice{display:flex;align-items:center;gap:13px;background:#eaf5f2;border:1px solid #cce6de;padding:12px 16px;border-radius:9px;margin-bottom:10px}.notice i{width:18px;height:18px;border:2px solid #49a48d;border-top-color:transparent;border-radius:50%;animation:spin 1s linear infinite}.notice p{margin:3px 0 0;color:#628177;font-size:12px}@keyframes spin{to{transform:rotate(360deg)}}.workspace{display:grid;grid-template-columns:270px minmax(520px,1fr) 290px;gap:10px;height:calc(100vh - 208px);min-height:580px}.programs,.detail,.sources{background:#fff;border:1px solid #dfe7ec;border-radius:11px;overflow:hidden}.aside-head{display:flex;justify-content:space-between;align-items:center;padding:14px 15px}.aside-head h2{margin:0;font-size:15px}.aside-head span{color:#718697;font-size:12px}.search{box-sizing:border-box;width:calc(100% - 24px);margin:0 12px 9px;padding:8px 10px;border:1px solid #d3dee6;border-radius:7px}.filters{display:flex;gap:4px;padding:0 10px 9px;overflow:auto}.filters button{border:0;background:#edf2f5;color:#657a8a;padding:5px 7px;border-radius:5px;white-space:nowrap;font-size:11px;cursor:pointer}.filters button.active{background:#dcefe9;color:#086a55;font-weight:700}.program-list{overflow:auto;height:calc(100% - 106px)}.program{position:relative;width:100%;display:flex;align-items:center;gap:9px;border:0;border-top:1px solid #edf1f4;background:#fff;padding:11px 11px 11px 15px;text-align:left;cursor:pointer}.program.selected{background:#f0f7f5}.program .rail{position:absolute;left:0;width:4px;height:100%;background:#aebcc6}.program.auto_pass .rail{background:#189477}.program.review_required .rail{background:#d18a1d}.program.blocked .rail{background:#cf4b43}.program div{min-width:0;flex:1}.program b,.program small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.program small{color:#728696;margin-top:4px;font-size:10px}.program em{font-style:normal;background:#f6e8d2;color:#9b620d;border-radius:10px;min-width:18px;text-align:center}.detail{display:flex;flex-direction:column}.detail-head{display:flex;justify-content:space-between;align-items:center;padding:16px 18px;border-bottom:1px solid #e8edf1}.detail-head h2{display:inline;margin:0 8px;font-size:19px}.detail-head p{margin:5px 0 0;color:#708391;font-size:12px}.disposition{font-size:10px;padding:4px 6px;border-radius:4px;background:#edf2f5;color:#587080}.disposition.auto_pass{background:#e1f3ed;color:#08705a}.disposition.review_required{background:#fff0db;color:#975c05}.disposition.blocked{background:#fee8e6;color:#aa332d}.tabs{display:flex;border-bottom:1px solid #e5ebef;padding:0 12px}.tabs button{border:0;background:none;padding:11px 12px;color:#687d8c;cursor:pointer;border-bottom:2px solid transparent}.tabs button.active{color:#0b6b57;border-bottom-color:#0b6b57;font-weight:700}.tabs i{font-style:normal;background:#f4d9b3;color:#925b0a;border-radius:8px;padding:1px 5px}.tab-body{flex:1;overflow:auto}.exception-list{padding:12px}.exception-list article{display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid #e4eaee;border-radius:8px;margin-bottom:8px}.exception-list article>span{font-size:10px;padding:4px 6px;border-radius:4px;background:#eef2f5}.exception-list article.blocker{border-left:4px solid #c9433c}.exception-list article.review{border-left:4px solid #d58b18}.exception-list article.warning{opacity:.72}.exception-list article div{flex:1}.exception-list article p{margin:5px 0 0;color:#788a98;font-size:11px}.exception-list article em{font-style:normal;font-size:11px;color:#4f697a}.clear{padding:50px;text-align:center;color:#237760}.clear p{color:#748b82}.data-stats{display:grid;grid-template-columns:repeat(5,1fr);border-bottom:1px solid #e5ebef}.data-stats span{padding:13px;text-align:center;color:#6a7f8d;font-size:11px}.data-stats b{display:block;color:#17384b;font-size:19px}table{width:100%;border-collapse:collapse;font-size:11px}th,td{padding:8px;border-bottom:1px solid #edf1f3;text-align:left}th{position:sticky;top:0;background:#f7f9fa;color:#657988}.map-view{min-height:420px}.map-view :deep(.map-wrap){height:100%}.artifact-head{display:flex;justify-content:space-between;padding:13px 16px;border-bottom:1px solid #e5ebef}.artifact-head p{margin:4px 0 0;color:#768997;font-size:11px}.arinc-view pre{margin:0;padding:14px;min-width:max-content;font:11px/1.55 Consolas,monospace;background:#10283a;color:#d7e5ec}.sources{overflow:auto}.sources section{border-top:1px solid #e6ecef;padding:11px}.sources h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#718593;margin:0 0 8px}.sources section button{display:flex;width:100%;align-items:center;gap:8px;border:0;background:#f6f8f9;margin-bottom:6px;padding:8px;border-radius:6px;text-align:left;cursor:pointer}.sources section button>span{font-size:10px;color:#396177;background:#e5edf2;padding:4px;border-radius:4px}.sources section button div{min-width:0;flex:1}.sources section button b,.sources section button small{display:block;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.sources section button b{font-size:11px}.sources section button small{font-size:9px;color:#7c8d99;margin-top:3px}.sources section button em{font-style:normal;font-size:10px;color:#0b715b}.empty{text-align:center;color:#81929e;padding:35px}.error{margin-bottom:10px}@media(max-width:1200px){.workspace{grid-template-columns:250px 1fr}.sources{display:none}.metrics{grid-template-columns:repeat(3,1fr)}}
 </style>

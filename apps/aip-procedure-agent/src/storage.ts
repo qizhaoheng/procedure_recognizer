@@ -1,7 +1,7 @@
 import fs from "node:fs/promises";
 import crypto from "node:crypto";
 import path from "node:path";
-import type { ActiveRun, AgentTask } from "./domain";
+import type { ActiveRun, AgentTask, ProductionBatch } from "./domain";
 
 const root = path.resolve(
   process.cwd(),
@@ -111,6 +111,24 @@ export async function listAgentTasks(): Promise<AgentTask[]> {
     .filter((t): t is AgentTask => !!t)
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
 }
+export async function saveProductionBatch(batch: ProductionBatch) {
+  batch.updatedAt = new Date().toISOString();
+  const file = path.join(root, "production-batches", `${batch.batchId}.json`);
+  await fs.mkdir(path.dirname(file), { recursive: true });
+  await atomicJson(file, batch);
+}
+export async function readProductionBatch(batchId: string): Promise<ProductionBatch> {
+  return JSON.parse(await fs.readFile(path.join(root, "production-batches", `${batchId}.json`), "utf8"));
+}
+export async function listProductionBatches(): Promise<ProductionBatch[]> {
+  const dir = path.join(root, "production-batches");
+  await fs.mkdir(dir, { recursive: true });
+  const entries = await fs.readdir(dir, { withFileTypes: true });
+  const batches = await Promise.all(entries.filter((item) => item.isFile() && item.name.endsWith(".json")).map(async (item) => {
+    try { return await readProductionBatch(item.name.slice(0, -5)); } catch { return undefined; }
+  }));
+  return batches.filter((item): item is ProductionBatch => !!item).sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
 
 export async function recoverInterruptedAgentTasks() {
   const tasks = await listAgentTasks();
@@ -217,6 +235,10 @@ async function renameWithRetry(source: string, destination: string) {
   }
 }
 function normalizeStoredTask(raw: AgentTask): AgentTask {
+  raw.production ||= { exceptionDecisions: [], fieldEdits: [], releases: [] };
+  raw.production.exceptionDecisions ||= [];
+  raw.production.fieldEdits ||= [];
+  raw.production.releases ||= [];
   raw.taskName ||= raw.fileName || "AIP AD-2 自主识别任务";
   // PIR 1.0.0 → 1.1.0 兼容：补齐新集合字段，历史 conflicts（自由对象）转为带候选的规范结构
   for (const procedure of raw.procedures || []) {

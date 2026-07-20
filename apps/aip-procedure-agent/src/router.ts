@@ -7,6 +7,8 @@ import type {
   AgentTask,
   AipDocument,
   BusinessProcedurePackage,
+  ProductionBatch,
+  ProductionWorkflow,
 } from "./domain";
 import {
   cancelAgentTask,
@@ -26,13 +28,21 @@ import {
   agentDataRoot,
   ensureAgentStorage,
   listAgentTasks,
+  listProductionBatches,
   readAgentTask,
+  readProductionBatch,
   saveAgentTask,
+  saveProductionBatch,
   taskDir,
   writeArtifact,
   TaskRunConflictError,
 } from "./storage";
 import { assessTaskForProduction } from "./productionControl";
+import {
+  pauseProductionBatch,
+  productionBatchSummary,
+  startProductionBatch,
+} from "./batchProduction";
 
 export const agentRouter = express.Router();
 const upload = multer({
@@ -85,11 +95,181 @@ agentRouter.post("/tasks", upload.any(), async (req, res) => {
     procedures: [],
     steps: [],
     modelCalls: [],
+    production: { exceptionDecisions: [], fieldEdits: [], releases: [] },
   };
   await ensureAgentStorage();
   await saveAgentTask(task);
   if (req.body.autoAnalyze === "true") await startTaskAnalysis(task);
   res.status(202).json(taskSummary(task));
+});
+agentRouter.post("/production-batches", upload.any(), async (req, res) => {
+  const files = (req.files as Express.Multer.File[] | undefined) || [];
+  if (!files.length) return res.status(400).json({ error: "请至少上传一个 PDF。" });
+  let manifest: Array<{ relativePath?: string }> = [];
+  try {
+    manifest = JSON.parse(String(req.body?.fileManifest || "[]"));
+  } catch {
+    return res.status(400).json({ error: "文件夹清单格式无效。" });
+  }
+  const grouped = new Map<string, { country?: string; files: Express.Multer.File[] }>();
+  const unassignedFiles: string[] = [];
+  files.forEach((file, index) => {
+    const relativePath = String(manifest[index]?.relativePath || file.originalname).replace(/\\/g, "/");
+    const segments = relativePath.split("/").filter(Boolean);
+    const icaoIndex = segments.findIndex((segment) => /^[A-Z]{4}$/.test(segment));
+    const fileMatch = file.originalname.toUpperCase().match(/(?:^|[^A-Z])([A-Z]{4})(?:[^A-Z]|$)/)?.[1];
+    const icao = (icaoIndex >= 0 ? segments[icaoIndex] : fileMatch)?.toUpperCase();
+    if (!icao) {
+      unassignedFiles.push(relativePath);
+      return;
+    }
+    const country = icaoIndex > 0 ? segments[icaoIndex - 1] : segments.length > 1 ? segments[0] : undefined;
+    const entry = grouped.get(icao) || { country, files: [] };
+    entry.files.push(file);
+    entry.country ||= country;
+    grouped.set(icao, entry);
+  });
+  if (!grouped.size)
+    return res.status(422).json({ error: "未从文件夹路径或文件名识别出 ICAO 四字码。", unassignedFiles });
+  const batchId = crypto.randomUUID();
+  const now = new Date().toISOString();
+  const tasks: AgentTask[] = [];
+  await ensureAgentStorage();
+  for (const [icao, group] of grouped) {
+    const task: AgentTask = {
+      taskId: crypto.randomUUID(),
+      taskType: "AGENT_AD2_RECOGNITION",
+      taskName: `${icao} 完整机场生产`,
+      airportIcao: icao,
+      airportName: null,
+      documents: group.files.map((file) => documentFromUpload(file, now)),
+      status: "CREATED",
+      stage: "UPLOAD",
+      progress: 0,
+      completedProcedures: 0,
+      totalProcedures: 0,
+      warningCount: 0,
+      errorCount: 0,
+      createdAt: now,
+      updatedAt: now,
+      pages: [],
+      packages: [],
+      procedures: [],
+      steps: [],
+      modelCalls: [],
+      production: {
+        exceptionDecisions: [],
+        fieldEdits: [],
+        releases: [],
+        batchId,
+        sourceCountry: group.country,
+      },
+    };
+    await saveAgentTask(task);
+    tasks.push(task);
+  }
+  const batch: ProductionBatch = {
+    batchId,
+    name: String(req.body?.batchName || [...new Set(tasks.map((task) => task.production?.sourceCountry).filter(Boolean))].join("、") || "国家资料批次"),
+    taskIds: tasks.map((task) => task.taskId),
+    status: "CREATED",
+    mode: "ANALYZE",
+    concurrency: 2,
+    createdAt: now,
+    updatedAt: now,
+  };
+  await saveProductionBatch(batch);
+  res.status(202).json({
+    batchId,
+    airportCount: tasks.length,
+    documentCount: tasks.reduce((count, task) => count + task.documents.length, 0),
+    unassignedFiles,
+    tasks: tasks.map(taskSummary),
+  });
+});
+agentRouter.get("/production-batches", async (_req, res) => {
+  res.json(await Promise.all((await listProductionBatches()).map(productionBatchSummary)));
+});
+agentRouter.get("/production-batches/:id", async (req, res) => {
+  try { res.json(await productionBatchSummary(await readProductionBatch(req.params.id))); }
+  catch { res.status(404).json({ error: "生产批次不存在。" }); }
+});
+agentRouter.post("/production-batches/:id/start", async (req, res) => {
+  try {
+    const mode = req.body?.mode === "FULL_PRODUCTION" ? "FULL_PRODUCTION" : "ANALYZE";
+    res.status(202).json(await startProductionBatch(req.params.id, {
+      mode,
+      concurrency: Number(req.body?.concurrency || 2),
+      retryFailed: req.body?.retryFailed === true,
+    }));
+  } catch { res.status(404).json({ error: "生产批次不存在。" }); }
+});
+agentRouter.post("/production-batches/:id/pause", async (req, res) => {
+  try { res.json(await pauseProductionBatch(req.params.id)); }
+  catch { res.status(404).json({ error: "生产批次不存在。" }); }
+});
+agentRouter.get("/production/exceptions", async (req, res) => {
+  const batchId = String(req.query.batchId || "");
+  const tasks = (await listAgentTasks()).filter((task) => !batchId || task.production?.batchId === batchId);
+  const items = tasks.flatMap((task) => assessTaskForProduction(task).assessments.flatMap((assessment) =>
+    assessment.exceptions
+      .filter((issue) => issue.severity === "BLOCKER" || (issue.severity === "REVIEW" && issue.decision?.decision !== "CONFIRMED_CORRECT"))
+      .map((issue) => ({
+        ...issue,
+        taskId: task.taskId,
+        airportIcao: task.airportIcao ?? task.airportAnalysis?.airport.icao ?? null,
+        batchId: task.production?.batchId,
+        disposition: assessment.disposition,
+      })),
+  ));
+  res.json({
+    total: items.length,
+    blockerCount: items.filter((item) => item.severity === "BLOCKER").length,
+    reviewCount: items.filter((item) => item.severity === "REVIEW").length,
+    items: items.slice(0, Math.max(1, Math.min(500, Number(req.query.limit || 100)))),
+  });
+});
+agentRouter.get("/production/metrics", async (_req, res) => {
+  const tasks = await listAgentTasks();
+  const productionBatches = await listProductionBatches();
+  const summaries = tasks.map((task) => ({ task, production: assessTaskForProduction(task) }));
+  const assessments = summaries.flatMap((item) => item.production.assessments.map((assessment) => ({
+    task: item.task,
+    assessment,
+  })));
+  const completed = assessments.filter((item) => item.assessment.disposition !== "PENDING");
+  const autoPassed = completed.filter((item) => item.assessment.disposition === "AUTO_PASS");
+  const humanConfirmed = completed.filter((item) => item.assessment.disposition === "HUMAN_CONFIRMED");
+  const firstPass = autoPassed.filter(({ task, assessment }) => {
+    const procedure = task.procedures.find((item) => item.procedureId === assessment.procedureId);
+    return procedure?.version === 1;
+  });
+  const released = summaries.filter((item) => item.production.releaseCurrent);
+  const releaseMinutes = released.map(({ task, production }) =>
+    (new Date(production.latestRelease!.releasedAt).getTime() - new Date(task.createdAt).getTime()) / 60000,
+  ).filter((value) => value >= 0);
+  res.json({
+    airportCount: tasks.length,
+    programCount: assessments.length,
+    completedProgramCount: completed.length,
+    autoPassProgramCount: autoPassed.length,
+    humanConfirmedProgramCount: humanConfirmed.length,
+    reviewProgramCount: completed.filter((item) => item.assessment.disposition === "REVIEW_REQUIRED").length,
+    blockedProgramCount: completed.filter((item) => item.assessment.disposition === "BLOCKED").length,
+    pendingProgramCount: assessments.length - completed.length,
+    autoPassRate: completed.length ? Number((autoPassed.length / completed.length * 100).toFixed(1)) : null,
+    firstPassYield: completed.length ? Number((firstPass.length / completed.length * 100).toFixed(1)) : null,
+    currentReleasedAirportCount: released.length,
+    manualDecisionCount: tasks.reduce((count, task) => count + (task.production?.exceptionDecisions.length ?? 0), 0),
+    manualFieldEditCount: tasks.reduce((count, task) => count + (task.production?.fieldEdits.length ?? 0), 0),
+    modelCallCount: tasks.reduce((count, task) => count + task.modelCalls.length, 0),
+    averageReleaseCycleMinutes: releaseMinutes.length
+      ? Number((releaseMinutes.reduce((sum, value) => sum + value, 0) / releaseMinutes.length).toFixed(1))
+      : null,
+    batches: productionBatches.length,
+    runningBatchCount: productionBatches.filter((batch) => batch.status === "RUNNING").length,
+    pausedBatchCount: productionBatches.filter((batch) => batch.status === "PAUSED").length,
+  });
 });
 agentRouter.get("/tasks", async (_req, res) =>
   res.json((await listAgentTasks()).map(taskSummary)),
@@ -116,6 +296,104 @@ agentRouter.get("/tasks/:id/exceptions", async (req, res) => {
   } catch {
     res.status(404).json({ error: "任务不存在。" });
   }
+});
+agentRouter.post("/tasks/:id/exception-decisions", async (req, res) => {
+  const task = await readAgentTask(req.params.id);
+  const reviewer = String(req.body?.reviewer || "").trim();
+  const decision = String(req.body?.decision || "");
+  if (!reviewer) return res.status(400).json({ error: "必须填写确认人。" });
+  if (!['CONFIRMED_CORRECT', 'CORRECTION_REQUIRED'].includes(decision))
+    return res.status(400).json({ error: "无效的人工处理结论。" });
+  const summary = assessTaskForProduction(task);
+  const issue = summary.assessments
+    .flatMap((item) => item.exceptions)
+    .find((item) => item.exceptionId === req.body?.exceptionId);
+  if (!issue) return res.status(404).json({ error: "例外已不存在，请刷新后重新确认。" });
+  if (issue.severity === "BLOCKER" && decision === "CONFIRMED_CORRECT")
+    return res.status(409).json({ error: "确定性阻断项不能由人工豁免，必须修正后重新编译。" });
+  if (issue.severity === "WARNING")
+    return res.status(409).json({ error: "警告不需要生产确认。" });
+  const workflow = productionWorkflow(task);
+  workflow.exceptionDecisions.push({
+    decisionId: crypto.randomUUID(),
+    exceptionId: issue.exceptionId,
+    packageId: issue.packageId,
+    procedureId: issue.procedureId,
+    procedureVersion: issue.procedureId
+      ? task.procedures.find((item) => item.procedureId === issue.procedureId)?.version
+      : undefined,
+    decision: decision as "CONFIRMED_CORRECT" | "CORRECTION_REQUIRED",
+    reviewer,
+    note: String(req.body?.note || "").trim() || undefined,
+    decidedAt: new Date().toISOString(),
+  });
+  await saveAgentTask(task);
+  res.json(assessTaskForProduction(task));
+});
+agentRouter.post("/tasks/:id/release", async (req, res) => {
+  const task = await readAgentTask(req.params.id);
+  const reviewer = String(req.body?.reviewer || "").trim();
+  if (!reviewer) return res.status(400).json({ error: "必须填写放行人。" });
+  if (task.activeRun) return res.status(409).json({ error: "机场任务仍在运行，不能放行。" });
+  const summary = assessTaskForProduction(task);
+  if (!summary.releaseReady)
+    return res.status(409).json({ error: "仍有未关闭的阻断项或复核项，不能放行。", production: summary });
+  const procedures = summary.assessments.map((assessment) => {
+    const procedure = assessment.procedureId
+      ? task.procedures.find((item) => item.procedureId === assessment.procedureId)
+      : undefined;
+    if (!procedure?.candidate424?.text?.trim()) throw new Error(`程序 ${assessment.procedureName} 缺少424产物。`);
+    return { assessment, procedure };
+  });
+  const releasedAt = new Date().toISOString();
+  const releaseId = `${releasedAt.replace(/[-:.TZ]/g, "").slice(0, 14)}-${crypto.randomUUID().slice(0, 8)}`;
+  const arinc424 = `${procedures.map(({ procedure }) => procedure.candidate424!.text.trimEnd()).join("\n")}\n`;
+  const recordCount = arinc424.split(/\r?\n/).filter((line) => line.trim()).length;
+  const relativeRoot = `production/releases/${releaseId}`;
+  const manifest = {
+    releaseId,
+    taskId: task.taskId,
+    airportIcao: summary.airportIcao,
+    reviewer,
+    note: String(req.body?.note || "").trim() || undefined,
+    releasedAt,
+    fingerprint: summary.fingerprint,
+    programCount: procedures.length,
+    recordCount,
+    programs: procedures.map(({ assessment, procedure }) => ({
+      packageId: assessment.packageId,
+      procedureId: procedure.procedureId,
+      version: procedure.version,
+      procedureName: assessment.procedureName,
+      disposition: assessment.disposition,
+      outputProfile: procedure.candidate424?.profile,
+    })),
+  };
+  const manifestPath = await writeArtifact(task.taskId, `${relativeRoot}/manifest.json`, manifest);
+  const arinc424Path = await writeArtifact(task.taskId, `${relativeRoot}/${summary.airportIcao || "airport"}.424`, arinc424);
+  const release = {
+    releaseId,
+    reviewer,
+    note: manifest.note,
+    releasedAt,
+    fingerprint: summary.fingerprint,
+    manifestPath,
+    arinc424Path,
+    programCount: procedures.length,
+    recordCount,
+  };
+  productionWorkflow(task).releases.push(release);
+  await saveAgentTask(task);
+  res.status(201).json({ release, production: assessTaskForProduction(task) });
+});
+agentRouter.get("/tasks/:id/releases/:releaseId/:artifact", async (req, res) => {
+  const task = await readAgentTask(req.params.id);
+  const release = task.production?.releases.find((item) => item.releaseId === req.params.releaseId);
+  if (!release) return res.status(404).json({ error: "放行版本不存在。" });
+  const file = req.params.artifact === "manifest" ? release.manifestPath
+    : req.params.artifact === "424" ? release.arinc424Path : undefined;
+  if (!file) return res.status(400).json({ error: "无效的放行产物。" });
+  res.download(path.resolve(file));
 });
 agentRouter.post("/tasks/:id/documents", upload.any(), async (req, res) => {
   const task = await readAgentTask(String(req.params.id));
@@ -526,8 +804,31 @@ agentRouter.patch("/procedures/:id/fields", async (req, res) => {
   const found = await findProcedure(req.params.id);
   if (!found?.procedure.pir)
     return res.status(404).json({ error: "程序不存在。" });
-  for (const edit of req.body.edits || [])
-    applyManualEdit(found.procedure.pir as any, edit.path, edit.value);
+  const reviewer = String(req.body?.reviewer || "").trim();
+  const edits = Array.isArray(req.body?.edits) ? req.body.edits : [];
+  if (!reviewer) return res.status(400).json({ error: "必须填写修改人。" });
+  if (!edits.length) return res.status(400).json({ error: "至少需要一项字段修改。" });
+  const workflow = productionWorkflow(found.task);
+  try {
+    for (const edit of edits) {
+      const editPath = String(edit.path || "");
+      const previousValue = readManualValue(found.procedure.pir as any, editPath);
+      applyManualEdit(found.procedure.pir as any, editPath, edit.value);
+      workflow.fieldEdits.push({
+        editId: crypto.randomUUID(),
+        procedureId: found.procedure.procedureId,
+        packageId: found.procedure.packageId,
+        path: editPath,
+        previousValue,
+        value: edit.value,
+        reviewer,
+        note: String(req.body?.note || edit.note || "").trim() || undefined,
+        editedAt: new Date().toISOString(),
+      });
+    }
+  } catch (error) {
+    return res.status(400).json({ error: error instanceof Error ? error.message : "字段路径无效。" });
+  }
   found.procedure.version += 1;
   const pkg = found.task.packages.find(
     (p) => p.packageId === found.procedure.packageId,
@@ -542,7 +843,7 @@ agentRouter.patch("/procedures/:id/fields", async (req, res) => {
   );
   if (pkg) pkg.status = applyQualityGate(found.procedure.pir, validations);
   await saveAgentTask(found.task);
-  res.json(found.procedure);
+  res.json({ procedure: found.procedure, production: assessTaskForProduction(found.task) });
 });
 
 function documentFromUpload(
@@ -604,6 +905,8 @@ function taskSummary(task: AgentTask) {
       : task.airportAnalysis?.airport,
     fileCount: task.documents.length,
     documentCount: task.documents.length,
+    batchId: task.production?.batchId,
+    sourceCountry: task.production?.sourceCountry,
     packageCount: task.packages.length,
     recognizedCount: task.packages.filter((p) =>
       ["COMPLETED", "COMPLETED_WITH_WARNINGS"].includes(p.status),
@@ -611,11 +914,14 @@ function taskSummary(task: AgentTask) {
     production: {
       pendingPackages: production.pendingPackages,
       autoPassPackages: production.autoPassPackages,
+      humanConfirmedPackages: production.humanConfirmedPackages,
       reviewPackages: production.reviewPackages,
       blockedPackages: production.blockedPackages,
       autoPassRate: production.autoPassRate,
       releaseReady: production.releaseReady,
       openExceptionCount: production.openExceptionCount,
+      releaseCurrent: production.releaseCurrent,
+      latestRelease: production.latestRelease,
     },
     status: task.status,
     stage: task.stage,
@@ -624,6 +930,13 @@ function taskSummary(task: AgentTask) {
     updatedAt: task.updatedAt,
     error: task.error,
   };
+}
+function productionWorkflow(task: AgentTask): ProductionWorkflow {
+  task.production ||= { exceptionDecisions: [], fieldEdits: [], releases: [] };
+  task.production.exceptionDecisions ||= [];
+  task.production.fieldEdits ||= [];
+  task.production.releases ||= [];
+  return task.production;
 }
 function newPackage(task: AgentTask, body: any): BusinessProcedurePackage {
   const category = ["SID", "STAR", "APPROACH"].includes(body.procedureCategory)
@@ -747,6 +1060,19 @@ function applyManualEdit(root: any, pathText: string, value: unknown) {
   if (parts[0] === "legs" && /^\d+$/.test(parts[1] || ""))
     root.legs[+parts[1]].fieldStatus[parts.slice(2).join(".")] =
       "MANUALLY_EDITED";
+}
+function readManualValue(root: any, pathText: string) {
+  const parts = pathText
+    .replace(/\[(\d+)\]/g, ".$1")
+    .split(".")
+    .filter(Boolean);
+  if (!parts.length) throw new Error("字段路径不能为空。");
+  let node = root;
+  for (const part of parts) {
+    if (node == null || !(part in node)) throw new Error(`Invalid field path: ${pathText}`);
+    node = node[part];
+  }
+  return structuredClone(node);
 }
 
 // 放在所有路由之后：saveAgentTask 现在会在任务被别的运行者持有时抛错（此前它从不抛）。

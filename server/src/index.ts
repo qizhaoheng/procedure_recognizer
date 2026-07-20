@@ -14,6 +14,7 @@ import {
   ensureAgentStorage,
   recoverInterruptedAgentTasks,
 } from "../../apps/aip-procedure-agent/src/storage";
+import { recoverProductionBatches } from "../../apps/aip-procedure-agent/src/batchProduction";
 
 loadServerEnv();
 
@@ -23,6 +24,10 @@ const port = Number(process.env.PORT || 3317);
 await ensureStorage();
 await ensureAgentStorage();
 const recoveredAgentRuns = await recoverInterruptedAgentTasks();
+const recoveredBatches = await recoverProductionBatches();
+if (recoveredBatches.paused) {
+  console.warn(`Paused ${recoveredBatches.paused} interrupted production batch(es) for operator review.`);
+}
 if (recoveredAgentRuns.recoveredPackageCount) {
   console.warn(
     `Recovered ${recoveredAgentRuns.recoveredPackageCount} interrupted AIP agent package(s).`,
