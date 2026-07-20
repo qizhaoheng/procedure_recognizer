@@ -1,5 +1,5 @@
 import { callModel } from './modelGateway';
-import { compile424Candidate, fieldLevelRoundTrip, type Candidate424 } from './compiler';
+import { compile424Candidate, compileGeoJson, fieldLevelRoundTrip, type Candidate424 } from './compiler';
 import { geodesicInverse } from './coordinate';
 import { simpleLegsTo424Text } from '../../../server/src/services/jeppesen424/simpleLegsTo424Text';
 import type { SimpleProcedureLeg } from '../../../server/src/services/jeppesen424/types';
@@ -24,7 +24,7 @@ export interface GenerationDiff {
 }
 
 export interface Generated424 extends Candidate424 {
-  generatedBy: 'AI';
+  generatedBy: 'AI' | 'COMPILER_FALLBACK';
   decisionSummary: string;
   diffs: GenerationDiff[];
 }
@@ -194,7 +194,7 @@ export interface GeneratedGeometry {
   featureCollection: unknown;
   unresolvedLegs: Array<{ legId: string; reason: string }>;
   decisionSummary: string;
-  generatedBy: 'AI';
+  generatedBy: 'AI' | 'COMPILER_FALLBACK';
   diffs: GenerationDiff[];
 }
 
@@ -216,6 +216,36 @@ export async function generateGeometryWithAi(
 
   const featureCollection = parsed.featureCollection ?? { type: 'FeatureCollection', features: [] };
   const unresolvedLegs = Array.isArray(parsed.unresolvedLegs) ? parsed.unresolvedLegs : [];
+
+  /**
+   * 模型没画出本可以画的腿时，回落到确定性编译器。
+   *
+   * 实测：AROSO 1J 的 7 个点坐标全齐，模型却返回 features: []、unresolvedLegs: []，
+   * 只在 decisionSummary 里用 267 个 token 描述"我会怎么画"，末尾还写着
+   * "坐标严格取自提供的 fixes 和 runwayData"——描述了工作，没做工作。
+   * 界面于是提示"当前程序坐标不足"，把人引向错误的方向：坐标并不缺。
+   *
+   * 几何有确定性算法（测地采样、弧、跑马场都在 compiler 里），不该把能不能出图
+   * 押在模型这一次的自觉上。回落必须留痕：generatedBy 记为 COMPILER_FALLBACK，
+   * 让"模型这次没干活"保持可见，而不是被一张能用的图掩盖过去。
+   */
+  const anchorable = pir.legs.filter((leg) => hasCoordinates(findFix(pir, leg.fromFixId)) || hasCoordinates(findFix(pir, leg.toFixId)));
+  const drawn = ((featureCollection as { features?: unknown[] }).features || [])
+    .filter((feature) => (feature as any)?.properties?.featureType === 'LEG').length;
+  if (!drawn && anchorable.length) {
+    const compiled = compileGeoJson(pir) as { features?: unknown[] };
+    const compiledLegs = (compiled.features || []).filter((feature) => (feature as any)?.properties?.featureType === 'LEG').length;
+    if (compiledLegs) {
+      return {
+        featureCollection: compiled,
+        unresolvedLegs,
+        decisionSummary: `${String(parsed.decisionSummary || '')}\n\n[回落] 模型未输出任何航段几何，而 ${anchorable.length} 条腿的端点有坐标；已改用确定性编译器生成 ${compiledLegs} 条航段。`,
+        generatedBy: 'COMPILER_FALLBACK',
+        diffs: [{ kind: 'GEOMETRY', code: 'FELL_BACK_TO_COMPILER', detail: `The model emitted no leg geometry although ${anchorable.length} legs have resolved endpoints; the deterministic compiler produced ${compiledLegs}.` }],
+      };
+    }
+  }
+
   return {
     featureCollection,
     unresolvedLegs,
